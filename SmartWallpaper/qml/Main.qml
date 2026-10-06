@@ -1566,7 +1566,10 @@ ApplicationWindow {
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.rightMargin: 8
-        anchors.topMargin: 8
+        // 14, the same inset the chip strip uses above itself: the chips and the search box are
+        // 28 px tall starting at y=14, so their centre line is y=28 - these buttons are 28 px tall
+        // too, and only this margin decides whether the three groups sit on one line.
+        anchors.topMargin: 14
 
         WinBtn {
             name: "wmin"
