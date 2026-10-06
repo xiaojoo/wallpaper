@@ -1,5 +1,5 @@
 #pragma once
-// SmartWallpaper/LivePreview.hpp - the settings window's big picture when the renderer is drawing
+// Wallpaper/LivePreview.hpp - the settings window's big picture when the renderer is drawing
 // the wallpaper live. A QQuickPaintedItem rather than an Image with a new URL per frame: changing
 // the URL makes Qt build a fresh texture for every frame and blank the item while it loads, which
 // measured 16-18 fps and a visible flash. Here the same backing texture is repainted.

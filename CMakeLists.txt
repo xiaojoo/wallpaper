@@ -61,9 +61,9 @@ find_package(Qt6 QUIET COMPONENTS Quick Qml Gui Widgets)
 if(Qt6_FOUND)
   set(CMAKE_AUTOMOC ON)
   qt_add_executable(SmartWallpaper WIN32
-    SmartWallpaper/main.cpp
-    SmartWallpaper/Bridge.cpp
-    SmartWallpaper/LivePreview.cpp
+    Wallpaper/main.cpp
+    Wallpaper/Bridge.cpp
+    Wallpaper/LivePreview.cpp
     Engine/Core/Json.cpp
     Engine/Core/Log.cpp
     Engine/App/IPCClient.cpp
@@ -74,7 +74,7 @@ if(Qt6_FOUND)
   target_link_libraries(SmartWallpaper PRIVATE Qt6::Quick Qt6::Qml Qt6::Gui Qt6::Widgets)
   add_custom_command(TARGET SmartWallpaper POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-      "${CMAKE_SOURCE_DIR}/SmartWallpaper/qml" "$<TARGET_FILE_DIR:SmartWallpaper>/qml"
+      "${CMAKE_SOURCE_DIR}/Wallpaper/qml" "$<TARGET_FILE_DIR:SmartWallpaper>/qml"
     COMMENT "staging qml/ next to the settings window")
   set_target_properties(SmartWallpaper PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
   message(STATUS "Qt6 found: building SmartWallpaper settings window")

@@ -1,5 +1,5 @@
-// SmartWallpaper/LivePreview.cpp
-#include "SmartWallpaper/LivePreview.hpp"
+// Wallpaper/LivePreview.cpp
+#include "Wallpaper/LivePreview.hpp"
 
 #include <QDateTime>
 #include <QPainter>
