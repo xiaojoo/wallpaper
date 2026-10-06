@@ -1,5 +1,5 @@
 #pragma once
-// SmartWallpaper/Bridge.hpp - the settings window's view of the renderer, over the control pipe.
+// Wallpaper/Bridge.hpp - the settings window's view of the renderer, over the control pipe.
 #include "Engine/Core/Json.hpp"
 
 #include <QObject>

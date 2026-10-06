@@ -1,7 +1,7 @@
-// SmartWallpaper/main.cpp - the Qt settings window. It owns no wallpaper state: everything it
+// Wallpaper/main.cpp - the Qt settings window. It owns no wallpaper state: everything it
 // shows and changes goes through the renderer's control pipe.
-#include "SmartWallpaper/Bridge.hpp"
-#include "SmartWallpaper/LivePreview.hpp"
+#include "Wallpaper/Bridge.hpp"
+#include "Wallpaper/LivePreview.hpp"
 
 #include <QDir>
 #include <QFile>

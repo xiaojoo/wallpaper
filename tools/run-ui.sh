@@ -4,7 +4,7 @@
 set -u
 QT=/d/Program/Qt/6.11.2/msvc2022_64
 BIN=/h/wallpaper/bld/bin/RelWithDebInfo
-"/d/Program/CMake/bin/cmake" -E copy_directory /h/wallpaper/SmartWallpaper/qml "$BIN/qml" >/dev/null
+"/d/Program/CMake/bin/cmake" -E copy_directory /h/wallpaper/Wallpaper/qml "$BIN/qml" >/dev/null
 cd "$BIN" || exit 1
 export PATH="$QT/bin:$PATH"
 export QML_IMPORT_PATH="$QT/qml"

@@ -1,4 +1,4 @@
-#include "SmartWallpaper/Bridge.hpp"
+#include "Wallpaper/Bridge.hpp"
 #include "Engine/App/IPCClient.hpp"
 #include "Engine/Core/Log.hpp"
 #include "Engine/Core/Platform.hpp"

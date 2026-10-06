@@ -1,4 +1,4 @@
-// SmartWallpaper/qml/Main.qml - browse-first layout: the wallpaper fills the window, its controls
+// Wallpaper/qml/Main.qml - browse-first layout: the wallpaper fills the window, its controls
 // sit on two scrims over it, and settings opens as an overlay.
 // Chinese by default with an English switch; every control maps to a renderer command, and
 // anything the renderer cannot do is not shown.
@@ -62,7 +62,7 @@ ApplicationWindow {
     property string settingsTab: "general"
     property Item openField: null    // the Choice whose list is up; only one at a time
     property bool carouselPlaying: true
-    // The big picture shows the wallpaper being drawn right now (SmartWallpaper/LivePreview.cpp).
+    // The big picture shows the wallpaper being drawn right now (Wallpaper/LivePreview.cpp).
     // It used to be an Image with a new URL per frame, which measured 16-18 fps and blanked the
     // area on every swap; the painted item reuses one texture, so the picture never disappears
     // between frames. Turning this off falls back to the saved strip.
