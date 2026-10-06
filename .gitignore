@@ -1,0 +1,15 @@
+# Build output: CMake configure/build trees, the staged qml copy, screenshots and probe
+# intermediates. Nothing in here is source; `cmake -S . -B bld` regenerates it.
+bld/
+build/
+
+# Runtime state that lives next to the exe (WallpaperManager reads config.json from its own dir).
+config.json
+
+# Compiler / build logs.
+*.log
+
+# Visual Studio per-user files.
+.vs/
+*.user
+*.suo

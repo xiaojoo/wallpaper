@@ -1,0 +1,27 @@
+{
+  "id": "embers",
+  "category": "粒子光斑",
+  "name": "Circuit",
+  "renderer": "d3d11",
+  "fps": 60,
+  "quality": "medium",
+  "shader": "main.hlsl",
+  "textures": [
+    {
+      "name": "grain",
+      "file": "textures/grain.png"
+    }
+  ],
+  "params": {
+    "scroll_speed": 1.4,
+    "trace_density": 18,
+    "trace_width": 1.2,
+    "node_glow": 0.8,
+    "spark_speed": 1.1,
+    "hue_shift": 0.12,
+    "bg_depth": 0.45,
+    "bokeh": 0.12,
+    "vignette": 0.5,
+    "octaves": 4
+  }
+}
