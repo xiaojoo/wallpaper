@@ -1,0 +1,30 @@
+{
+  "id": "snowfall",
+  "category": "季节天气",
+  "name": "Snowfall",
+  "renderer": "particles",
+  "fps": 60,
+  "quality": "high",
+  "shader": "main.hlsl",
+  "blend": "additive",
+  "entries": {
+    "cs": "CSMain",
+    "pvs": "ParticleVS",
+    "bg": "PSBackground"
+  },
+  "particles": {
+    "count": 6000
+  },
+  "params": {
+    "fall_speed": 0.075,
+    "wind": 0.018,
+    "swirl": 0.05,
+    "flake_size": 9.0,
+    "depth_fade": 0.35,
+    "glow": 0.6,
+    "sky_top": 1.0,
+    "sky_bottom": 1.0,
+    "cloud": 0.7,
+    "octaves": 4
+  }
+}

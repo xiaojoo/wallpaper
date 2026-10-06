@@ -1,0 +1,20 @@
+﻿Desktop  = 0x1000C cls='#32769' txt='' vis=True win=0,0 3840x2160 cli=3840x2160 style=0x96000000 ex=0x00000000 pid=1872
+Shell    = 0x10148 cls='Progman' txt='Program Manager' vis=True win=0,0 3840x2160 cli=3840x2160 style=0x96000000 ex=0x00200080 pid=9876
+Progman via Enum = 0x10148   via FindWindowW = 0x0
+--- Progman subtree (depth 2) ---
+0x1014E cls='SHELLDLL_DefView' txt='' vis=True win=0,0 3840x2160 cli=3840x2160 style=0x56010000 ex=0x00080000 pid=9876
+  0x10150 cls='SysListView32' txt='FolderView' vis=True win=0,0 3840x2160 cli=3840x2160 style=0x56003B40 ex=0x00000000 pid=9876
+    0x10154 cls='SysHeader32' txt='' vis=False win=0,0 0x0 cli=0x0 style=0x400108C2 ex=0x00000000 pid=9876
+--- z-order neighbours of Progman ---
+ProgmanLine 0x10148 cls='Progman' txt='Program Manager' vis=True win=0,0 3840x2160 cli=3840x2160 style=0x96000000 ex=0x00200080 pid=9876
+ABOVE 0 0x10148 cls='Progman' txt='Program Manager' vis=True win=0,0 3840x2160 cli=3840x2160 style=0x96000000 ex=0x00200080 pid=9876
+ABOVE 1 0x10148 cls='Progman' txt='Program Manager' vis=True win=0,0 3840x2160 cli=3840x2160 style=0x96000000 ex=0x00200080 pid=9876
+ABOVE 2 0x10148 cls='Progman' txt='Program Manager' vis=True win=0,0 3840x2160 cli=3840x2160 style=0x96000000 ex=0x00200080 pid=9876
+ABOVE 3 0x10148 cls='Progman' txt='Program Manager' vis=True win=0,0 3840x2160 cli=3840x2160 style=0x96000000 ex=0x00200080 pid=9876
+ABOVE 4 0x10148 cls='Progman' txt='Program Manager' vis=True win=0,0 3840x2160 cli=3840x2160 style=0x96000000 ex=0x00200080 pid=9876
+ABOVE 5 0x10148 cls='Progman' txt='Program Manager' vis=True win=0,0 3840x2160 cli=3840x2160 style=0x96000000 ex=0x00200080 pid=9876
+--- first WorkerW subtree ---
+--- monitors ---
+\\.\DISPLAY1 bounds=0,0 3840x2160 work=0,0 3840x2112 primary=True
+DPI info: 
+Scale(96 dpi base) via WinRT not probed here

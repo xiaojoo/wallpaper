@@ -1,0 +1,22 @@
+{
+  "id": "aurora",
+  "category": "极光星空",
+  "name": "Aurora",
+  "renderer": "d3d11",
+  "fps": 60,
+  "quality": "high",
+  "shader": "main.hlsl",
+  "params": {
+    "speed": 0.45,
+    "hue": 0.32,
+    "star_amount": 0.55,
+    "curtain_strength": 1.15,
+    "ground_height": 0.16,
+    "vignette": 0.35,
+    "moon_size": 0.022,
+    "moon_pos": [0.78, 0.74],
+    "glow_spread": 0.55,
+    "shimmer": 0.25,
+    "octaves": 5
+  }
+}
