@@ -59,6 +59,9 @@ SmartWallpaper.exe --settings-tab monitors   # 打开并停在某一类（genera
 （如 x=0 与 x=1 都是 (185,146,204)）—— 没有接缝。为此把 `LivePreview` / `heroImg` / 条帧三层的
 `anchors.margins: 1` 全改成 0。
 标题栏是自绘的：右上角 `— □ ✕` 三颗（40x28、图标 14 px、无底板，只有 ✕ 悬停变红），
+**三颗的 `topMargin` 和 chip 条的 `topMargin` 是同一个数 14**（两边都是 28 px 高，所以中线必然重合），
+实测在 1360x860 的窗口上：chip 边框 y=16..39、搜索框填充 y=14..41、按钮墨迹 y=24..31，
+**三条中线都是 27.5（Δ0）**——之前按钮是 8，比另两组高 6 px，就是他圈的那处。
 拖动区是顶部那条 chip/搜索带自己的空白（`startSystemMove`，双击切最大化），
 **八块 6 px 的 `Edge` 区**负责改尺寸（`startSystemResize`，无边框后这是唯一的路子）。
 三颗都用 UIA 按名字真点过：最大化 1360x860 → **3840x2112**（`zoomed=True`，让开任务栏）、
