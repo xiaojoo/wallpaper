@@ -101,7 +101,76 @@ ApplicationWindow {
         for (let m = 0; m < mons.length; ++m) { const w = find(mons[m].wallpaper); if (w !== null) return w }
         return null
     }
-    readonly property var hero: current !== null ? current : applied
+    // Switching the big picture used to be a hard cut, and painting the outgoing wallpaper's *still*
+    // over it to crossfade made it worse: with the live pass on screen (measured: 12 of 12 switches)
+    // that overlay is a different picture of a different wallpaper arriving at full opacity, which is
+    // the flash he saw. So nothing is painted over the live pass. Instead the whole content stack dips
+    // to 22 % and `hero` - the value every layer, the caption and the preview request read - is swapped
+    // at the trough, so the change happens where it is least visible and one mechanism covers the
+    // live, motion and still cases alike.
+    // Switching the big picture used to be a hard cut. Painting the outgoing wallpaper's *still* over
+    // it to fake a crossfade made it worse (measured: 12 of 12 switches had the live pass on screen,
+    // so that overlay was a foreign picture arriving at full opacity - the flash he saw), and dipping
+    // the whole stack to the box's dark base was rejected for the same reason: it dims. So the
+    // outgoing frame is *captured* instead: the frame he is actually looking at is grabbed, laid on
+    // top at full opacity, and only then is `hero` swapped underneath it and the grab dissolved away.
+    readonly property var pendingHero: current !== null ? current : applied
+    property var hero: null
+    // saveToFile takes a QUrl, and QUrl("C:/Users/...") is not an absolute local file - it has to be
+    // spelled file:/// or the write silently fails and the overlay is left with nothing to show.
+    // Two names, alternated: an Image whose `source` is assigned the same URL it already holds does
+    // not reload, so a single path would show the *first* grabbed frame on every later switch.
+    // Not Qt.temporaryPath - measured undefined in this QML, which wrote the file to the working
+    // directory under the name "undefinedwallpaper-hero-out.png".
+    property int snapFlip: 0
+    function snapUrlFor(i) {
+        const dir = Bridge.rootDir.replace(/\\/g, "/")
+        return "file:///" + dir + "/cache/hero-out-" + (i ? "b" : "a") + ".png"
+    }
+    property url snapUrl: ""
+    property bool snapBusy: false
+    function heroIdOf(v) { return v && v.id !== undefined ? v.id : "" }
+    function heroOutItem() {
+        // Whichever layer really is the picture on screen right now - that is the frame to keep.
+        if (heroLive) return liveView
+        if (heroMotion) return frameStack
+        return heroImg
+    }
+    function commitHeroSwap() {
+        hero = pendingHero
+        heroOutFade.restart()
+    }
+    onPendingHeroChanged: {
+        const nid = heroIdOf(pendingHero), cid = heroIdOf(hero)
+        if (nid === cid) { hero = pendingHero; return }      // same wallpaper, new object: no fade
+        if (snapBusy || heroSnapWatch.running) return        // a swap is already in flight
+        snapBusy = true
+        heroSnapWatch.start()
+        const it = heroOutItem()
+        // Half size: the grab is a 250 ms dissolve of the same picture, and encoding 1360x860 measured
+        // 300-350 ms on the particle wallpapers (long enough that the old picture visibly holds), while
+        // 680x430 costs a quarter of the bytes.
+        if (!it || !it.grabToImage(function (res) {
+                snapBusy = false
+                heroSnapWatch.stop()
+                snapFlip = snapFlip ^ 1
+                const u = root.snapUrlFor(snapFlip)
+                snapUrl = res.saveToFile(u) ? u : ""
+                commitHeroSwap()
+            }, Qt.size(680, 430))) {
+            snapBusy = false
+            heroSnapWatch.stop()
+            snapUrl = ""
+            commitHeroSwap()
+        }
+    }
+    // The grab is asynchronous and a hidden or occluded window can leave it never completing; the
+    // picture must not freeze on the old wallpaper because of that.
+    Timer {
+        id: heroSnapWatch
+        interval: 250
+        onTriggered: { snapBusy = false; snapUrl = ""; commitHeroSwap() }
+    }
     function framesOf(w) { return w && w.frameUrls !== undefined ? w.frameUrls : [] }
     // How long one strip frame stays up. The renderer sampled the animation at this spacing, so
     // playing it back any faster or slower changes the speed of the motion, not just its smoothness.
@@ -241,6 +310,9 @@ ApplicationWindow {
         if (Bridge.selectAtStart.length > 0) root.selectedId = Bridge.selectAtStart
         if (Bridge.settingsAtStart) root.settingsOpen = true
         if (Bridge.settingsTabAtStart.length > 0) root.settingsTab = Bridge.settingsTabAtStart
+        // `hero` follows `pendingHero` with a deliberate delay while a switch is fading; the first
+        // picture must be there at once, not after the first dip.
+        root.hero = root.pendingHero
     }
 
     // There is no top bar: the search box moved into the content header, the settings entry into the
@@ -384,6 +456,31 @@ ApplicationWindow {
                                 visible: index === root.previewFrame
                                 source: modelData
                             }
+                        }
+                    }
+
+                    // The captured outgoing frame, dissolving away over the new picture. Loaded
+                    // synchronously and uncached on purpose: the file was written microseconds ago, an
+                    // asynchronous Image would leave the first fade frames transparent (the new
+                    // picture showing before the old one was ever seen), and the cache keys on the URL
+                    // - which is the same path every time.
+                    Image {
+                        id: heroSnap
+                        anchors.fill: parent
+                        fillMode: Image.PreserveAspectCrop
+                        asynchronous: false
+                        cache: false
+                        visible: opacity > 0.001
+                        opacity: 0
+                        source: root.snapUrl
+                        NumberAnimation {
+                            id: heroOutFade
+                            target: heroSnap
+                            property: "opacity"
+                            from: 1
+                            to: 0
+                            duration: 280
+                            easing.type: Easing.InOutQuad
                         }
                     }
 
