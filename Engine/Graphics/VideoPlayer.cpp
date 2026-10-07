@@ -177,6 +177,10 @@ bool VideoPlayer::OpenDecoder() {
 
     xform_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
     xform_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+    // Each rewind step has to out-distance every timestamp the clip can report, or the rebased clock
+    // would catch up with itself once the clip has looped a few times.
+    loopBias_ = LONGLONG((duration_.load() + 2.0) * 1e7);
+    if (loopBias_ < 10000000LL) loopBias_ = 10000000LL;   // no readable duration: use 10 s
     return true;
 }
 
@@ -253,7 +257,7 @@ bool VideoPlayer::PumpOne(std::vector<BYTE>& out, long long& outTs) {
         inBuf->Unlock();
         inBuf->SetCurrentLength(srcLen);
         inSample->AddBuffer(inBuf.Get());
-        inSample->SetSampleTime(ts);
+        inSample->SetSampleTime(ts + bias_);
         inSample->SetSampleDuration(dur ? dur : LONGLONG(1e7 / (fps_ > 1 ? fps_.load() : 30.0)));
     }
     srcBuf->Unlock();
@@ -392,16 +396,38 @@ void VideoPlayer::Thread() {
 
     while (true) {
         double seekSeconds = -1.0;
+        bool doLoop = false;
         {
             std::unique_lock lk(mtx_);
-            cv_.wait(lk, [&] { return stop_ || seekPending_ || (active_ && !paused_ && !drained_ && !holding_); });
+            cv_.wait(lk, [&] { return stop_ || seekPending_ || loopPending_ ||
+                                          (active_ && !paused_ && !drained_ && !holding_); });
             if (stop_) break;
             if (seekPending_) {
                 seekPending_ = false;
                 seekSeconds = seekTo_;
+            } else if (loopPending_) {
+                loopPending_ = false;
+                doLoop = true;
             }
         }
         if (std::chrono::steady_clock::now() - lastStats_ >= std::chrono::seconds(1)) LogStats();
+        if (doLoop) {
+            // Rewind the demuxer only. No flush, no pending_.clear(): the pictures still inside the
+            // transform are the clip's own tail, and they belong on screen while the head warms up.
+            // This is what removes the 146-167 ms freeze every loop used to cause (the flush itself
+            // measured 66-105 ms and the re-priming 117-129 ms, with file reads only 2.6-3.5 ms).
+            PROPVARIANT start{};
+            PropVariantInit(&start);
+            start.vt = VT_I8;
+            start.hVal.QuadPart = 0;
+            const long hr = reader_->SetCurrentPosition(GUID_NULL, start);
+            PropVariantClear(&start);
+            if (FAILED(hr)) Warn(MOD, "loop rewind: {}", HResultToString(hr));
+            prevBias_ = bias_;
+            bias_ += loopBias_;
+            nextDue = std::chrono::steady_clock::now();
+            continue;
+        }
         if (seekSeconds >= 0.0) {
             PROPVARIANT start{};
             PropVariantInit(&start);
@@ -414,6 +440,10 @@ void VideoPlayer::Thread() {
             {
                 std::lock_guard lk(mtx_);
                 pending_.clear();
+                // A real seek breaks the reference chain on purpose (the transform is flushed) and the
+                // clock starts over: the loop bias only belongs to rewinds that keep the pipeline warm.
+                bias_ = 0;
+                prevBias_ = 0;
                 // Park *after* the frame this seek brings, not before it: holding_ gates the wait at the
                 // top of the loop, so setting it here would strand the caller of ShowFrameAt waiting for
                 // a frame the thread is no longer allowed to produce.
@@ -452,7 +482,9 @@ void VideoPlayer::Thread() {
                 if (!pending_.empty()) ++st_.dropped;  // the render thread never took the last one
                 pending_.swap(frame);  // newest wins: an undisplayed frame is dropped, never queued.
                                        // A copy here would be 12 MB per frame on a 4K clip.
-                position_ = double(ts) / 1e7;
+                // ts is the sample's own (biased) time; take it back to clip time. A picture still on
+                // its way out of the pipeline after the rewind carries the *previous* cycle's bias.
+                position_ = double(ts >= bias_ ? ts - bias_ : ts - prevBias_) / 1e7;
                 ++delivered_;
                 // Park only once the clip has actually reached the moment that was asked for. The
                 // first frame out of a seek is the previous keyframe, and for a clip whose keyframes
@@ -491,9 +523,9 @@ void VideoPlayer::Thread() {
             std::lock_guard lk(mtx_);
             if (ended_ && !loop_) drained_ = true;
             else if (ended_ && loop_) {
-                // Restart through the normal seek path so the transform is flushed too.
-                seekPending_ = true;
-                seekTo_ = 0.0;
+                // Loop without touching the transform: rewinding the demuxer and keeping the pipeline
+                // warm is what makes the seam invisible. See the doLoop branch above.
+                loopPending_ = true;
                 ended_ = false;
             }
         }

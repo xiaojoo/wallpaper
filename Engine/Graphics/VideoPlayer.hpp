@@ -100,7 +100,16 @@ private:
     bool holdNext_ = false;        // park after the next frame is published
     double holdTarget_ = 0.0;      // ... but only once the picture has reached this moment
     bool seekPending_ = false;
+    bool loopPending_ = false;     // the clip ran out and loops: rewind the reader, keep the transform warm
     double seekTo_ = 0.0;
+    // Input timestamps are pushed forward by bias_ every time the clip rewinds, because handing the
+    // transform a picture whose time went backwards is only safe *after* a flush, and not flushing is
+    // the whole point. An H.264 IDR refreshes every reference, so the head decodes off its own frame:
+    // measured 2026-10-07 with build/tmp/seamcost.cpp, the three head pictures that come out of a warm
+    // no-flush loop are byte-identical to the ones the cold start produced (worst |delta| = 0 over
+    // 12,441,600 B each), and the 36 pictures left in the pipeline - the clip's tail, which the flush
+    // path used to throw away on every loop - play out first.
+    LONGLONG bias_ = 0, prevBias_ = 0, loopBias_ = 0;
     std::vector<BYTE> pending_;      // newest decoded NV12 frame, waiting for the render thread
     std::vector<BYTE> rows_, chroma_; // staging for the top-down copy, reused between frames: at 4K60
                                       // allocating these per frame is 12 MB of malloc and page faults
