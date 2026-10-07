@@ -822,9 +822,14 @@ void Application::BuildThumbnails(bool onlyMissing) {
         if (const MonitorInfo* m = monitors_.byIndex(0)) th.setDesignSize(m->px.w, m->px.h);
         // Reuse the compiled instance when this wallpaper is what a monitor is already showing;
         // otherwise compile a throwaway one, which is what a fresh install has to do anyway.
+        // A video wallpaper must not be the live one: grabbing its card parks that player on the
+        // frame it was asked to show (ShowFrameAt arms holding_), and nothing clears that flag except
+        // a later seek - so reusing the live instance froze the desktop on a still picture at every
+        // start. Measured 2026-10-07: delivered stuck at 84, the thread parked in cv_.wait at 0% CPU,
+        // and one `--ctl video seek 0.5` brought it back.
         WallpaperInstance* use = nullptr;
         for (auto& s : slots_)
-            if (s.wallpaperId == p.id()) use = &s.instance;
+            if (s.wallpaperId == p.id() && !s.instance.hasVideo()) use = &s.instance;
         WallpaperInstance temp;
         if (use) {
             if (!th.Build(dev_, renderer_, *use, thumbDir_, p.id(), thumbs_[p.id()], err))
