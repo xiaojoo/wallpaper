@@ -33,11 +33,6 @@ float Glow(float d, float r) {
     return exp(-d * d / max(r * r, 1e-5));
 }
 
-float BoxMask(float2 d, float2 h) {
-    float2 o = abs(d) - h;
-    return 1.0 - smoothstep(0.0, 0.02, max(o.x, o.y));
-}
-
 // The board: three columns are visited per pixel so a bend that leaves its own column still draws.
 float3 Board(float2 p, float t, float wcells, float seed, float3 tint) {
     float3 acc = float3(0.0, 0.0, 0.0);
@@ -46,7 +41,10 @@ float3 Board(float2 p, float t, float wcells, float seed, float3 tint) {
     [unroll]
     for (int i = -1; i <= 1; ++i) {
         float col = (float)c0 + (float)i;
-        float2 q = float2(col, p.y);
+        // Each column carries its own row phase. Without it every column's pads land on the same
+        // seg boundary and the vias line up into countable horizontal rows.
+        float yph = (Hash21(float2(col + seed, 7.3)) - 0.5) * 0.9;
+        float2 q = float2(col, p.y + yph);
         float lane = PathLane(col + seed, q);
         float cx = col + 0.5 + lane;
         float dx = p.x - cx;
@@ -55,24 +53,33 @@ float3 Board(float2 p, float t, float wcells, float seed, float3 tint) {
         float strand = Glow(dx, wcells) + Glow(dx, wcells * 4.2) * 0.05;
 
         float seg = floor(q.y);
-        float f = frac(q.y);
-        float2 npad = float2(col + 0.5 + Lane(col + seed, seg), seg);
-        float nd = length(p - npad);
-        float ring = Glow(abs(nd - 0.115), 0.022) * 1.6;
-        float pin = Glow(nd, 0.03) * 0.9;
-
         float2 r = Hash22(float2(col + seed, seg) + 11.0);
-        float pad = step(0.55, r.x);
-        float dash = step(0.62, Hash21(float2(col + seed, seg) + 5.0));
-        float2 dq = p - float2(cx + (r.y - 0.5) * 0.34, seg + 0.62);
-        float tick = BoxMask(dq, float2(0.055, 0.014)) * dash;
+        float pad = step(0.78, r.x);
+
+        // The pad belongs at the cell centre, not on the boundary it sits on: a pad at y = seg has
+        // its upper half in the cell below, which is drawn from that cell's own hash, so only the
+        // lower arc ever appeared - an identical row of little cups, the most glyph-like thing here.
+        // seg + 1 is the lane the trace is actually riding at the centre of the cell (see PathLane).
+        // Only q.y carries the phase: q.x is pinned to the column index, so measuring the distance
+        // with it would put every pad at least half a cell away from its own pixel and smear the
+        // ring into a horizontal band.
+        float2 npad = float2(col + 0.5 + Lane(col + seed, seg + 1.0), seg + 0.5);
+        float nd = length(float2(p.x - npad.x, q.y - npad.y));
+        // One via size for every pad made them repeat like the same character; the radius and its
+        // line weight now come off the same hash that decides whether the pad exists at all.
+        float pr = 0.085 + r.y * 0.055;
+        float ring = Glow(abs(nd - pr), 0.018 + r.y * 0.008) * 1.6;
+        float pin = Glow(nd, pr * 0.28) * 0.9;
 
         // One bright head per column, wrapping over a run of cells, riding the lane it belongs to.
         float head = frac(t * spark_speed * 0.07 + Hash21(float2(col + seed, 3.7)));
         float run = frac(q.y * 0.083 - head);
         float spark = Glow(min(run, 1.0 - run) * 6.0, 0.16) * strand;
 
-        acc += (strand * 0.42 + (ring + pin) * node_glow * pad + tick * 0.5) * tint;
+        // The little horizontal "tick" bars that used to sit in 38 % of the cells are gone: they
+        // were 6.6 x 1.7 px marks on a 120 px lattice, which measured as one every 15 px - the
+        // pitch of terminal text - and they were the only thing here with hard right-angle edges.
+        acc += (strand * 0.42 + (ring + pin) * node_glow * pad) * tint;
         acc += spark * tint * 2.2;
     }
     return acc;
@@ -103,14 +110,14 @@ float4 PSMain(VSOut i) : SV_TARGET {
 
     // Two depths of board: the far one is thinner and dimmer, which is what reads as distance.
     c += Board(p * float2(1.0, 1.0), t, wcells, 0.0, tint) * 1.0;
-    c += Board(p * 0.62 + float2(4.3, 9.1), t * 0.62, wcells * 1.4, 17.0, tint * 0.42) * 0.35;
+    c += Board(p * 0.72 + float2(4.3, 9.1), t * 0.72, wcells * 1.4, 17.0, tint * 0.42) * 0.20;
 
     // Bokeh sits behind the traces and drifts slower than they scroll.
     float2 bp = float2(auv.x, auv.y) * 7.0 + float2(0.0, -t * 0.25);
     float2 bc = floor(bp);
     float2 bf = frac(bp) - 0.5;
     float2 br = Hash22(bc + 2.0);
-    float bOn = step(0.80, br.x);
+    float bOn = step(0.90, br.x);
     c += lerp(tint, float3(0.35, 0.75, 1.0), br.y * 0.4) * bokeh * bOn *
            Glow(length(bf - (br - 0.5) * 0.5), 0.05 + br.y * 0.04) * 0.6;
 

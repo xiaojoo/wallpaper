@@ -1,17 +1,25 @@
 #include "Engine/App/Application.hpp"
 #include "Engine/App/IPCServer.hpp"
 #include "Engine/Core/Log.hpp"
+#include "Engine/Graphics/VideoPlayer.hpp"
 
 #include <psapi.h>
 #include <shellapi.h>
 #include <filesystem>
 #include <algorithm>
 #include <wincodec.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
 #include <sstream>
 
 namespace sw {
 static constexpr const char* MOD = "app";
 constexpr const wchar_t* kAppClass = L"SmartWallpaperApp";
+// One id for the timer that re-applies the taskbar fade; see TrayTransparency.hpp for why it needs
+// re-applying at all. 5 s is a compromise the eye cannot see: the shell rebuilds the bar on events
+// that are rare (monitor change, its own restart), and the fade is a look, not a function.
+constexpr UINT_PTR kTrayTimer = 0x57A1;
 
 namespace {
 
@@ -98,6 +106,8 @@ bool Application::Start(const CommandLine& cl, std::string& error) {
         return false;
     }
     LoadRotation(wpm_.raw().at("rotate"));
+    // Whatever the user left the taskbar faded to, put it back before the first frame is drawn.
+    trayFx_.Apply(wpm_.settings().trayAlpha);
     if (!cl_.applyWallpaper.empty()) {
         for (auto& a : wpm_.settings().assignments) a.wallpaper = cl_.applyWallpaper;
         if (!wpm_.find(cl_.applyWallpaper))
@@ -106,6 +116,12 @@ bool Application::Start(const CommandLine& cl, std::string& error) {
 
     if (!dev_.Init(false)) {
         error = "D3D11 device init failed";
+        return false;
+    }
+    // After CoInitializeEx inside dev_.Init, and before any wallpaper asks for a decoder.
+    if (FAILED(MFStartup(MF_VERSION))) {
+        error = "Media Foundation startup failed (video wallpapers cannot decode)";
+        Error(MOD, "{}", error);
         return false;
     }
     if (!renderer_.Init(dev_.dev.Get(), error)) {
@@ -163,6 +179,9 @@ bool Application::Start(const CommandLine& cl, std::string& error) {
         Error(MOD, "{}", error);
         return false;
     }
+    // The fade lives on explorer's window, which we do not own: it is lost when the shell rebuilds
+    // the bar, and that sends us no message. Poll instead of hoping.
+    SetTimer(win_, kTrayTimer, 5000, nullptr);
     SetWindowLongPtrW(win_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
 
     if (!BuildSlots(error)) {
@@ -298,6 +317,100 @@ std::string AddImagePackage(const std::wstring& root, const std::wstring& srcFil
     Info(MOD, "added local image package {} ({}x{})", id, w, h);
     return id;
 }
+
+// Adds a video as a wallpaper package. The id keeps the images' local_NN shape on purpose: the delete
+// guard only accepts that form, and the settings window's import list is built from it.
+std::string AddVideoPackage(const std::wstring& root, const std::wstring& srcFile, std::string& error) {
+    namespace fs = std::filesystem;
+    if (!fs::exists(srcFile)) { error = "file does not exist"; return {}; }
+
+    UINT w = 0, h = 0;
+    double rate = 0.0, duration = 0.0;
+    bool bt601 = false;
+    {
+        Com<IMFSourceReader> rd;
+        const HRESULT prh = MFCreateSourceReaderFromURL(srcFile.c_str(), nullptr, &rd);
+        if (FAILED(prh)) {
+            error = "Media Foundation cannot open this file: " + HResultToString(prh);
+            return {};
+        }
+        Com<IMFMediaType> mt;
+        const HRESULT mhr = rd->GetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &mt);
+        if (FAILED(mhr)) {
+            error = "no video stream in this file: " + HResultToString(mhr);
+            return {};
+        }
+        UINT32 ww = 0, hh = 0;
+        MFGetAttributeSize(mt.Get(), MF_MT_FRAME_SIZE, &ww, &hh);
+        w = UINT(ww);
+        h = UINT(hh);
+        UINT32 num = 0, den = 0;
+        if (SUCCEEDED(MFGetAttributeRatio(mt.Get(), MF_MT_FRAME_RATE, &num, &den)) && den)
+            rate = double(num) / double(den);
+        // Which matrix the encoder used. This SDK has no enum name for the primaries values, so the
+        // numbers are the ones MF defines: 1 BT.709, 2 unspecified, 4..7 the BT.601 family
+        // (625-line, 525-line, SMPTE-240M, SMPTE-C). Only a declared 601 family switches the shader.
+        UINT32 prim = 0;
+        if (SUCCEEDED(mt->GetUINT32(MF_MT_VIDEO_PRIMARIES, &prim)))
+            bt601 = (prim >= 4 && prim <= 7);
+        PROPVARIANT var{};
+        PropVariantInit(&var);
+        if (SUCCEEDED(rd->GetPresentationAttribute(DWORD(MF_SOURCE_READER_MEDIASOURCE), MF_PD_DURATION, &var)) &&
+            var.vt == VT_UI8)
+            duration = double(var.ulVal) / 1e7;
+        PropVariantClear(&var);
+    }
+    if (!w || !h) { error = "the video has no readable frame size"; return {}; }
+
+    std::wstring dir;
+    for (int n = 1; n < 1000; ++n) {
+        wchar_t buf[32];
+        swprintf(buf, 32, L"\\local_%02d", n);
+        dir = root + L"\\Wallpapers" + buf;
+        if (!fs::exists(dir)) break;
+        dir.clear();
+    }
+    if (dir.empty()) { error = "too many imported wallpapers"; return {}; }
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const std::wstring ext = fs::path(srcFile).extension().wstring();
+    if (!CopyFileW(srcFile.c_str(), (dir + L"\\video" + ext).c_str(), FALSE)) {
+        error = "copy failed: " + HResultToString(GetLastError());
+        return {};
+    }
+
+    const std::string id = ToUtf8(fs::path(dir).filename().wstring());
+    // The manifest carries the picture's own numbers so the browser can label and lay out the card
+    // without opening a decoder for every row.
+    const int fps = rate > 1.0 ? int(rate + 0.5) : 30;
+    Json j = Json::Object();
+    j.set("id", Json::Of(id));
+    j.set("name", Json::Of(ToUtf8(fs::path(srcFile).filename().wstring())));
+    j.set("category", Json::Of(std::string("本地视频")));
+    j.set("renderer", Json::Of(std::string("video")));
+    j.set("video", Json::Of(std::string("video") + ToUtf8(ext)));
+    j.set("loop", Json::Of(true));
+    j.set("width", Json::Of((long long)w));
+    j.set("height", Json::Of((long long)h));
+    j.set("duration_s", Json::Of(duration));
+    j.set("fps", Json::Of(fps));
+    j.set("quality", Json::Of(std::string("high")));
+    j.set("shader", Json::Of(std::string("Video.hlsl")));
+    Json pr = Json::Object();
+    pr.set("zoom", Json::Of(1.0));
+    pr.set("src_aspect", Json::Of(double(w) / double(h)));
+    pr.set("vignette", Json::Of(0.0));
+    // No Ken Burns on a video: the clip already has a camera, and sliding the frame under it reads as
+    // the wallpaper drifting rather than as motion in the picture.
+    pr.set("drift", Json::Of(0.0));
+    pr.set("saturation", Json::Of(1.0));
+    pr.set("brightness", Json::Of(1.0));
+    pr.set("bt601", Json::Of(bt601 ? 1.0 : 0.0));
+    j.set("params", std::move(pr));
+    if (!WriteFileUtf8(dir + L"\\wallpaper.json", j.dump(2))) { error = "cannot write manifest"; return {}; }
+    Info(MOD, "added local video package {} ({}x{}, {:.2f} fps, {:.1f} s)", id, w, h, rate, duration);
+    return id;
+}
 } // namespace
 
 // Removes an imported image package - the copy we made under Wallpapers\local_NN, never the file the
@@ -329,6 +442,17 @@ std::string Application::DeleteImagePackage(const std::string& id) {
         fs::remove(thumbDir_ + L"\\" + ToWide(id) + suffix, ec);
     fs::remove_all(thumbDir_ + L"\\" + ToWide(id) + L"_frames", ec);
     thumbs_.erase(id);
+
+    // The preview holds one compiled instance per id and that instance owns the loaded picture.
+    // An import takes the lowest free local_NN, so the next upload arrives under this same id and
+    // would be drawn with the deleted file's texture - the card thumbnails come off disk and look
+    // right while the big picture stays on the old one. Stopping the pass is what lets the next
+    // `preview` get past the "already on" shortcut and prepare the new package.
+    if (preview_.id == id) {
+        StopPreview("package deleted");
+        preview_.inst = nullptr;
+    }
+    preview_.cache.erase(id);
 
     std::vector<std::string> skipped;
     wpm_.Scan(skipped);
@@ -414,7 +538,17 @@ void Application::DrawSlot(Slot& s, double nowSeconds) {
     const MonitorInfo& m = s.window.monitor();
     FrameCB f{};
     f.time = float(nowSeconds);
-    f.delta = s.clock.effectiveFps > 0 ? 1.f / float(s.clock.effectiveFps) : 0.f;
+    // The simulation step is the time that actually passed between two draws of this slot, not
+    // 1/what the frame budget says. With the budget-derived version a wallpaper's speed followed the
+    // power cap: a 10 fps cap advanced 0.1 s per frame (and the package clamped it to 0.05, so the
+    // snow fell at half speed), then raising the cap to 60 made it visibly accelerate on its own.
+    float dt = s.lastDrawT >= 0.0 ? float(nowSeconds - s.lastDrawT) : 0.f;
+    s.lastDrawT = nowSeconds;
+    // A gap longer than a quarter second is not a frame: an unlock, a stalled loop, a cap that was 0.
+    // Advancing the simulation across it teleports every particle; holding still costs one frame.
+    if (dt > 0.25f) dt = 0.f;
+    f.delta = s.clock.effectiveFps > 0 ? dt : 0.f;
+    s.lastDelta = f.delta;
     f.frame = float(s.clock.frames % 100000);
     f.targetFps = float(s.clock.effectiveFps);
     f.resX = float(surf.width());
@@ -434,7 +568,7 @@ void Application::DrawSlot(Slot& s, double nowSeconds) {
     f.renderScale = QualityScale(q);
     f.fit = float(int(wpm_.settings().imageFit));
 
-    DrawArgs args = s.instance.MakeArgs(f);
+    DrawArgs args = s.instance.MakeArgs(f, dev_.ctx.Get());
     if (!renderer_.Render(dev_.ctx.Get(), surf.rtv(), surf.width(), surf.height(), args, err)) {
         s.error = err;
         surf.End(dev_.ctx.Get());
@@ -493,6 +627,7 @@ void Application::UpdateSnapshot() {
     r.set("quality", Json::Of(std::string(QualityName(wpm_.settings().globalQuality))));
     r.set("quality_is_global", Json::Of(wpm_.settings().useGlobalQuality));
     r.set("image_fit", Json::Of(std::string(ImageFitName(wpm_.settings().imageFit))));
+    r.set("tray_alpha", Json::Of(wpm_.settings().trayAlpha));
     r.set("power", Json::Of(power_.StatusLine()));
     {
         Json rot = Json::Object();
@@ -549,10 +684,25 @@ void Application::UpdateSnapshot() {
             m.set("params", Json::Of((long long)p.params().members().size()));
             m.set("textures", Json::Of((long long)p.textures().size()));
             m.set("particles", Json::Of((long long)p.particleCount()));
+            // What kind of package this is, so the window can label a clip without opening it.
+            m.set("type", Json::Of(std::string(p.isVideo() ? "video"
+                                              : p.hasParticles() ? "particles" : "shader")));
+            if (p.isVideo()) {
+                m.set("duration_s", Json::Of(p.srcDuration()));
+                m.set("loop", Json::Of(p.videoLoop()));
+            }
             auto it = thumbs_.find(p.id());
             if (it != thumbs_.end() && it->second.ok) {
                 m.set("thumb", Json::Of(ToUtf8(it->second.still)));
                 m.set("thumb_large", Json::Of(ToUtf8(it->second.large)));
+                // The picture on disk is replaced whenever the renderer rebuilds it, but a window that
+                // already loaded the old bytes keeps them. The stamp is what lets the window notice.
+                std::error_code ec;
+                long long stampMs = 0;
+                if (const auto w = std::filesystem::last_write_time(it->second.still, ec); !ec)
+                    stampMs = w.time_since_epoch().count() / 10000;  // the clock's own epoch; this is
+                    // only ever compared against itself, to give a rebuilt picture a new cache key
+                m.set("thumb_ms", Json::Of(stampMs));
                 Json fr = Json::Array();
                 for (auto& f : it->second.frames) fr.push(Json::Of(ToUtf8(f)));
                 m.set("frames", std::move(fr));
@@ -595,9 +745,21 @@ void Application::UpdateSnapshot() {
         j.set("effective_fps", Json::Of(s.clock.effectiveFps));
         j.set("measured_fps", Json::Of(std::format("{:.2f}", s.clock.measuredFps)));
         j.set("avg_frame_ms", Json::Of(std::format("{:.2f}", s.clock.avgMs)));
+        // The step the simulation actually got, in seconds. Its product with measured_fps is the
+        // speed factor: 1.0 means the wallpaper runs at wall-clock speed whatever the cap says, and
+        // 0.5 is the old budget-derived behaviour at a 10 fps cap.
+        j.set("sim_delta_s", Json::Of(std::format("{:.5f}", s.lastDelta)));
+        j.set("speed_factor", Json::Of(std::format("{:.3f}",
+                        s.clock.measuredFps > 0.05 ? double(s.lastDelta) * s.clock.measuredFps : 0.0)));
         j.set("worst_frame_ms", Json::Of(std::format("{:.2f}", s.clock.worstMs)));
+        // Late since the budget last moved: this is the one that counts hitches, because the two
+        // numbers above keep a stale maximum and an average that follows the cap, not the delivery.
+        j.set("late_frames", Json::Of((long long)s.clock.lateFrames));
         j.set("frames", Json::Of((long long)s.clock.frames));
         j.set("draw_errors", Json::Of((long long)s.drawErrors));
+        // How often the budget actually moved. This is the number the debounce is judged by: the raw
+        // classifier changed 24 times in 280 s before it existed.
+        j.set("state_switches", Json::Of((long long)s.stateSwitches_));
         j.set("corner_samples_changed", Json::Of((long long)s.changedSamples_));
         j.set("corner_samples_static", Json::Of((long long)s.staticSamples_));
         j.set("particles", Json::Of((long long)s.instance.particles().count()));
@@ -605,6 +767,18 @@ void Application::UpdateSnapshot() {
         j.set("particle_static_samples", Json::Of((long long)s.particleStaticSamples_));
         j.set("particle_out_of_bounds", Json::Of((long long)s.particleOutOfBounds_));
         j.set("particle_positions_hash", Json::Of(std::format("{:016x}", s.lastParticleHash_)));
+        // The video instrument: frames_delivered climbing at the clip's own rate is the direct proof
+        // that a decoder is running, and video_output says which path this machine actually gave us.
+        if (VideoPlayer* v = s.instance.video()) {
+            j.set("video_pos", Json::Of(v->position_s()));
+            j.set("video_duration", Json::Of(v->duration_s()));
+            j.set("video_fps", Json::Of(v->fps()));
+            j.set("video_size", Json::Of(std::format("{}x{}", v->width(), v->height())));
+            j.set("video_paused", Json::Of(v->paused()));
+            j.set("video_ended", Json::Of(v->ended()));
+            j.set("video_frames_delivered", Json::Of((long long)v->delivered()));
+            j.set("video_output", Json::Of(v->note()));
+        }
         j.set("error", Json::Of(s.error));
         mons.push(std::move(j));
     }
@@ -630,7 +804,7 @@ void Application::UpdateSnapshot() {
         statusLine_ = line;
     }
     if (tray_.installed()) {
-        std::string tip = std::format("SmartWallpaper - {}", statusLine_.empty() ? line : statusLine_);
+        std::string tip = std::format("Wallpaper - {}", statusLine_.empty() ? line : statusLine_);
         if (tip.size() > 120) tip.resize(120);
         tray_.SetTip(tip);
     }
@@ -687,6 +861,22 @@ bool Application::StartPreview(const std::string& id, std::string& error) {
         p.lastBeatMs = GetTickCount64();
         return true;
     }
+    // The wallpaper being replaced has to stop its media before the new one starts, and a video's warm
+    // copy has to go with it. A parked video instance keeps its decoder thread group, its frame buffers
+    // and two plane textures - measured at about 200 MB for a 4K clip - and browsing through a dozen
+    // took the process to 2.5 GB with 154 threads while only one of them was ever being drawn. Pictures
+    // and shaders stay cached, because re-preparing those is the hitch this cache exists to avoid.
+    if (p.inst) {
+        p.inst->SetMediaActive(false);
+        if (p.inst->hasVideo()) {
+            for (auto it = p.cache.begin(); it != p.cache.end(); ++it)
+                if (it->second.get() == p.inst) {
+                    p.cache.erase(it);
+                    break;
+                }
+            p.inst = nullptr;
+        }
+    }
     if (!p.writer.open() && !p.writer.OpenWriter(error)) return false;
 
     if (!p.rt || p.w != kPreviewW || p.h != kPreviewH) {
@@ -741,6 +931,7 @@ bool Application::StartPreview(const std::string& id, std::string& error) {
     p.error.clear();
     p.on = true;
     p.lastBeatMs = GetTickCount64();
+    p.inst->SetMediaActive(true);
     pacer_.ConfigureSlot(p.clock, kPreviewFps, 0);
     Info(MOD, "preview on: {} ({}x{} at {} fps)", id, kPreviewW, kPreviewH, kPreviewFps);
     return true;
@@ -749,9 +940,19 @@ bool Application::StartPreview(const std::string& id, std::string& error) {
 void Application::StopPreview(const char* why) {
     if (!preview_.on) return;
     preview_.on = false;
+    if (preview_.inst) preview_.inst->SetMediaActive(false);
     pacer_.ConfigureSlot(preview_.clock, 0, 0);
     // The textures and the compiled instance stay: the browse page comes back to the same wallpaper
     // seconds later, and re-preparing a shader mid-interaction is a visible hitch for 6 MB of VRAM.
+    // Video instances are the exception - each one parked holds a decoder thread, its frame buffers
+    // and two plane textures (measured: a 4K clip is tens of MB and several MF worker threads), and
+    // browsing through a dozen of them is what took the process to 2.5 GB. Re-opening one costs the
+    // next look at that clip, not the page.
+    for (auto it = preview_.cache.begin(); it != preview_.cache.end();) {
+        if (it->second->hasVideo()) it = preview_.cache.erase(it);
+        else ++it;
+    }
+    preview_.inst = nullptr;
     Info(MOD, "preview off ({}): drew={} dropped={}", why, preview_.drew, preview_.dropped);
 }
 
@@ -806,7 +1007,7 @@ void Application::DrawPreview(double nowSeconds) {
     if (const MonitorInfo* m = monitors_.byIndex(0); m && m->px.w > 0 && m->px.h > 0)
         f.sizeScale = std::min(float(p.w) / float(m->px.w), float(p.h) / float(m->px.h));
 
-    DrawArgs args = p.inst->MakeArgs(f);
+    DrawArgs args = p.inst->MakeArgs(f, dev_.ctx.Get());
     if (!renderer_.Render(dev_.ctx.Get(), p.rtv.Get(), p.w, p.h, args, err)) {
         p.error = err;
         Warn(MOD, "preview draw failed: {}", err);
@@ -902,12 +1103,34 @@ int Application::Run() {
                 if (q == Quality::Low) want = std::min(want, 30);
                 if (q == Quality::Medium) want = std::min(want, 60);
             }
-            s.decision = power_.Decide(m);
+            const PowerManager::Decision raw = power_.Decide(m);
+            if (raw.state != s.decision.state) {
+                if (raw.state != s.candState) {
+                    s.candState = raw.state;
+                    s.candSinceMs = nowMs;
+                }
+                // A locked session or a powered-down monitor takes effect immediately: waiting a
+                // second before stopping would mean drawing behind a lock screen.
+                const bool urgent = raw.state == PowerState::Locked || raw.state == PowerState::DisplayOff;
+                if (urgent || nowMs - s.candSinceMs >= Slot::kStateHoldMs) {
+                    s.decision = raw;
+                    s.decision.why += std::format("（保持 {:.0f} ms 后换档，本槽第 {} 次）",
+                                                  double(nowMs - s.candSinceMs), ++s.stateSwitches_);
+                }
+            }
+            if (s.decision.state != raw.state)
+                s.decision.why += std::format("（原始判定 {}，只持续了 {:.0f} ms，未到 {:.0f} ms 不改预算）",
+                                              PowerManager::StateName(raw.state),
+                                              double(nowMs - s.candSinceMs), double(Slot::kStateHoldMs));
             if (cl_.noPower && s.decision.cap < want) {
                 s.decision.why += " (caps bypassed by --no-power)";
                 s.decision.cap = want;
             }
-            pacer_.ConfigureSlot(s.clock, want == 0 ? 0 : std::min(want, s.decision.cap), m.refreshHz);
+            const int budget = want == 0 ? 0 : std::min(want, s.decision.cap);
+            pacer_.ConfigureSlot(s.clock, budget, m.refreshHz);
+            // A video wallpaper that is not drawing must also stop decoding: left running it burns a
+            // hardware decode session and a GPU slot behind a fullscreen game that asked for zero frames.
+            s.instance.SetMediaActive(budget > 0);
             clocks.push_back(&s.clock);
         }
         // The preview has its own budget on purpose: while a fullscreen app has the desktop capped at
@@ -1058,6 +1281,17 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         std::string e;
         wpm_.Save(e);
         result = std::format(R"({{"ok":true,"image_fit":"{}"}})", ImageFitName(wpm_.settings().imageFit));
+    } else if (action == "taskbar") {
+        // A percentage of transparency, 0 handing the bar back to Windows. The reply carries both
+        // numbers because the two are not the same thing: 0..100 is what the user set, the window
+        // alpha is what explorer was told, and the mapping has a floor of 1 on purpose.
+        const int pct = arg == "off" ? 0 : std::atoi(arg.c_str());
+        wpm_.SetTrayAlpha(pct);
+        std::string e;
+        wpm_.Save(e);
+        trayFx_.Apply(wpm_.settings().trayAlpha);
+        result = std::format(R"({{"ok":true,"tray_alpha":{},"window_alpha":{}}})",
+                             wpm_.settings().trayAlpha, TrayTransparency::ToAlpha(wpm_.settings().trayAlpha));
     } else if (action == "powercap") {
         const int value = std::atoi(arg2.c_str());
         if (!power_.SetCap(arg, value)) {
@@ -1115,6 +1349,20 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
             rotate_.index = 0;
             SaveRotation();
             result = std::format(R"({{"ok":true,"pool":{}}})", rotate_.pool.size());
+        } else if (arg == "next" || arg == "prev") {
+            // Manual stepping works whether or not the timer is on. A running timer gets its whole
+            // interval back, otherwise a hand pick would be overwritten on the next tick.
+            const std::string applied = RotateStep(arg == "next" ? 1 : -1);
+            if (rotate_.pool.empty()) {
+                result = R"({"ok":false,"error":"the rotation pool is empty"})";
+            } else if (applied.empty()) {
+                result = std::format(R"({{"ok":false,"error":"'{}' could not be shown on '{}'"}})",
+                                     rotate_.pool[size_t(rotate_.index)], rotate_.monitor);
+            } else {
+                if (rotate_.on) rotate_.nextAt = GetTickCount64() + ULONGLONG(rotate_.intervalMin) * 60000;
+                result = std::format(R"({{"ok":true,"wallpaper":"{}","index":{},"pool":{},"monitor":"{}"}})",
+                                     applied, rotate_.index, rotate_.pool.size(), rotate_.monitor);
+            }
         } else {
             result = std::format(
                 R"({{"ok":true,"on":{},"interval_min":{},"pool":{},"monitor":"{}","next_in_s":{}}})",
@@ -1132,6 +1380,59 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
             BuildThumbnails(true);
             result = std::format(R"({{"ok":true,"id":"{}"}})", id);
         }
+    } else if (action == "addvideo") {
+        std::string err;
+        const std::string id = AddVideoPackage(wpm_.settings().root, ToWide(arg), err);
+        if (id.empty()) {
+            result = std::format(R"({{"ok":false,"error":"{}"}})", err);
+        } else {
+            std::vector<std::string> skipped;
+            wpm_.Scan(skipped);
+            BuildThumbnails(true);
+            result = std::format(R"({{"ok":true,"id":"{}"}})", id);
+        }
+    } else if (action == "video") {
+        // Per-clip transport, distinct from the global `pause`: that one stops the wallpaper drawing
+        // (and idles the decoder with it), this one freezes the picture while the budget stays.
+        const bool known = arg == "pause" || arg == "resume" || arg == "seek";
+        bool any = false;
+        Json list = Json::Array();
+        for (auto& s : slots_) {
+            VideoPlayer* v = s.instance.video();
+            if (!v) continue;
+            any = true;
+            if (arg == "pause") v->Pause();
+            else if (arg == "resume") v->Resume();
+            else if (arg == "seek") v->Seek(std::atof(arg2.c_str()));
+            Json j = Json::Object();
+            j.set("where", Json::Of(s.window.monitor().tag));
+            j.set("wallpaper", Json::Of(s.instance.id()));
+            j.set("pos", Json::Of(v->position_s()));
+            j.set("duration", Json::Of(v->duration_s()));
+            j.set("paused", Json::Of(v->paused()));
+            j.set("frames", Json::Of((long long)v->delivered()));
+            list.push(std::move(j));
+        }
+        if (VideoPlayer* v = preview_.inst ? preview_.inst->video() : nullptr) {
+            any = true;
+            if (arg == "pause") v->Pause();
+            else if (arg == "resume") v->Resume();
+            else if (arg == "seek") v->Seek(std::atof(arg2.c_str()));
+            Json j = Json::Object();
+            j.set("where", Json::Of(std::string("preview")));
+            j.set("wallpaper", Json::Of(preview_.id));
+            j.set("pos", Json::Of(v->position_s()));
+            j.set("duration", Json::Of(v->duration_s()));
+            j.set("paused", Json::Of(v->paused()));
+            j.set("frames", Json::Of((long long)v->delivered()));
+            list.push(std::move(j));
+        }
+        if (!known)
+            result = std::format(R"({{"ok":false,"error":"video command is pause | resume | seek <seconds>, not '{}'"}})", arg);
+        else if (!any)
+            result = R"({"ok":false,"error":"no video wallpaper is loaded"})";
+        else
+            result = std::format(R"({{"ok":true,"players":{}}})", list.dump(0));
     } else if (action == "delimage") {
         result = DeleteImagePackage(arg);
     } else if (action == "preview") {
@@ -1206,6 +1507,11 @@ LRESULT Application::OnWindowMessage(HWND h, UINT m, WPARAM w, LPARAM l) {
                 if (area == L"DPIScaleFactor" || area == L"InteractiveSettings") OnMonitorsChanged();
             }
             return 0;
+        case WM_TIMER:
+            // Off is the shell's own look, so there is nothing to keep alive and nothing to poll.
+            if (w == static_cast<WPARAM>(kTrayTimer) && wpm_.settings().trayAlpha > 0)
+                trayFx_.Apply(wpm_.settings().trayAlpha);
+            return 0;
         case WM_IPC_WAKE:
             ProcessQueued();
             return 0;
@@ -1252,6 +1558,10 @@ void Application::Shutdown() {
         std::lock_guard lk(mtx_);
         Info(MOD, "final: {}", statusLine_);
     }
+    // The preview keeps one compiled instance per id and an instance owns its decoder, so those have to
+    // go while Media Foundation is still up; ~VideoPlayer joins the decode thread.
+    preview_.cache.clear();
+    MFShutdown();
     dev_.Shutdown();
     if (win_) {
         DestroyWindow(win_);
@@ -1292,11 +1602,22 @@ void Application::SaveRotation() {
     wpm_.Save(e);
 }
 
-void Application::TickRotation(ULONGLONG nowMs) {
-    if (!rotate_.on || rotate_.pool.empty()) return;
-    if (!rotate_.nextAt || nowMs < rotate_.nextAt) return;
-    rotate_.nextAt = nowMs + ULONGLONG(rotate_.intervalMin) * 60000;
-    rotate_.index = (rotate_.index + 1) % int(rotate_.pool.size());
+// Moves the rotation pointer by delta and shows what it lands on. The pointer starts from what is
+// actually on screen rather than from the saved index: "设为壁纸" changes the screen without
+// touching the rotation, and an index left behind by that would jump the next pick.
+std::string Application::RotateStep(int delta) {
+    if (rotate_.pool.empty())
+        for (auto& p : wpm_.catalog()) rotate_.pool.push_back(p.id());
+    if (rotate_.pool.empty()) return {};
+    const int n = int(rotate_.pool.size());
+    int from = rotate_.index;
+    for (auto& s : slots_) {
+        if (rotate_.monitor != "all" && s.window.monitor().tag != rotate_.monitor) continue;
+        for (int i = 0; i < n; ++i)
+            if (rotate_.pool[size_t(i)] == s.wallpaperId) { from = i; break; }
+        break;
+    }
+    rotate_.index = ((from + delta) % n + n) % n;
     const std::string id = rotate_.pool[size_t(rotate_.index)];
     std::string applied;
     for (auto& s : slots_) {
@@ -1312,6 +1633,14 @@ void Application::TickRotation(ULONGLONG nowMs) {
     }
     SaveRotation();
     UpdateSnapshot();
+    return applied;
+}
+
+void Application::TickRotation(ULONGLONG nowMs) {
+    if (!rotate_.on || rotate_.pool.empty()) return;
+    if (!rotate_.nextAt || nowMs < rotate_.nextAt) return;
+    rotate_.nextAt = nowMs + ULONGLONG(rotate_.intervalMin) * 60000;
+    RotateStep(1);
 }
 
 void Application::DestroySlots() {

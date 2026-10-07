@@ -12,7 +12,7 @@ for i in $(seq 1 60); do
        | python -c 'import sys,json;print(json.load(sys.stdin).get("preview",{}).get("id",""))' 2>/dev/null)
   if [ "$id" = "$WANT" ]; then
     powershell -NoProfile -ExecutionPolicy Bypass \
-      -File 'H:/wallpaper/tools/capture-window.ps1' -Out "$(cygpath -w "$OUT")" -Title 'SmartWallpaper' | tail -1
+      -File 'H:/wallpaper/tools/capture-window.ps1' -Out "$(cygpath -w "$OUT")" -Title 'Wallpaper' | tail -1
     echo "slide=$WANT after ${i} polls"
     exit 0
   fi

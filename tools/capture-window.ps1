@@ -1,4 +1,9 @@
 # Captures one window's own pixels with PrintWindow, without touching focus or z-order.
+# BLIND TO POPUPS: PrintWindow renders the window's backing store, and a Qt Quick Controls Popup
+# (tooltips, menus, any Hint) lives in the overlay layer that PrintWindow does not composite - the
+# shot comes back with the control hovered and its bubble simply absent. Proved twice on 2026-10-07
+# and then contradicted by tools/capture-desktop.ps1 over the same pixels. When the thing under test
+# is a popup, capture the screen region instead; use this only for the window's own content.
 param([string]$Out = 'window.png', [string]$Class = 'Qt6112QWindowIcon', [string]$Title = '')
 $src = @'
 using System;

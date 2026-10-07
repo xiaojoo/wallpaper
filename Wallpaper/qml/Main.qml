@@ -16,7 +16,7 @@ ApplicationWindow {
     minimumWidth: 1080
     minimumHeight: 680
     visible: true
-    title: "SmartWallpaper"
+    title: "Wallpaper"
     // Frameless so the wallpaper reaches the glass. The cost, measured: DWM has no non-client area to
     // animate, so a maximize is one snap instead of a zoom (see the note in Bridge.cpp - the
     // eaten-frame variant animates but leaves a 16x39 px strip Qt never paints). The window commands
@@ -24,8 +24,12 @@ ApplicationWindow {
     flags: Qt.Window | Qt.FramelessWindowHint
     color: th.bg
     // Closing the window must not leave the renderer drawing a second pass forever: the heartbeat
-    // would stop, but its watchdog only fires after three seconds.
-    onVisibleChanged: if (!visible) Bridge.hidePreview()
+    // would stop, but its watchdog only fires after three seconds. Coming back out of the tray has
+    // to re-arm it here too - the carousel's own visible flag never changed, so nothing else does.
+    // Focus is the other half of "nobody is watching it": while another program is in front, the
+    // second pass and the saved strip both stand down.
+    onVisibleChanged: carousel.syncPreview()
+    onActiveChanged: carousel.syncPreview()
 
     QtObject {
         id: th
@@ -42,6 +46,13 @@ ApplicationWindow {
         readonly property color ok: "#3FB27F"
         readonly property color warn: "#E0A030"
         readonly property color err: "#E06A6A"
+        // The filled version of the danger colour. err reads well as a tint on dark but not as a
+        // plate under white text: measured on the 确认删除 badge it is #E06A6A, which is 3.26:1
+        // against white - below AA. This plate is a deep red whose channel spread (max-min)/max is
+        // 0.767, the same as the theme's other Dim fill accentDim (0.772), so it reads as one family:
+        // R 164 -> 150 and G/B 77 -> 35 against the previous step, and white text goes 5.60:1 ->
+        // 8.26:1.
+        readonly property color errDim: "#962323"
     }
 
     // How much of the wallpaper reads through the top row's plates (the tabs and the search field).
@@ -104,6 +115,10 @@ ApplicationWindow {
     // every switch. When the renderer dies the feed goes stale, running falls to false, and the
     // saved strip loads again so the picture keeps moving instead of freezing.
     readonly property bool liveFed: liveWanted && liveView.running
+    // Motion is authored for the window in front of him. While this window is not the foreground
+    // one, neither the renderer's second pass nor the 24 saved strip frames is worth keeping, so
+    // the big picture rests on the still it already has loaded. Comes back with focus.
+    readonly property bool motionWanted: root.active
     // A switch costs the renderer one beat: measured 20-58 ms before the section holds the newly
     // picked wallpaper. Hiding the live item for that stretch stops the motion, and the still and
     // the live frame are different moments of the animation, so it reads as a hitch. Holding the
@@ -112,7 +127,8 @@ ApplicationWindow {
     property int liveGraceMs: 120
     property bool liveHeld: false
     readonly property bool heroLive: liveFed && (liveView.matching || liveHeld)
-    readonly property bool heroMotion: !liveFed && previewMotion && hero !== null && framesOf(hero).length > 1
+    readonly property bool heroMotion: !liveFed && previewMotion && motionWanted && hero !== null
+                                       && framesOf(hero).length > 1
 
     readonly property var settingsTabs: [
         { key: "general", icon: "gear", label: "tab_general" },
@@ -159,6 +175,15 @@ ApplicationWindow {
         for (var i = 0; i < Bridge.monitors.length; ++i)
             if (Bridge.monitors[i].wallpaper === w.id) return true;
         return false;
+    }
+    // The title over the caption bar reads as a name, not as a path: the extension says nothing the
+    // viewer asked for and the resolution is already printed in the meta line right beside it.
+    // Only a *trailing* "_WxH" goes - "snow-3840x2160-mountains-cave-25813.jpg" carries it in the
+    // middle, and stripping that would cut words out of the name rather than a tag off its end.
+    function displayName(s) {
+        var t = String(s).replace(/\.[A-Za-z0-9]{1,5}$/, "")
+        t = t.replace(/_[0-9]{2,5}x[0-9]{2,5}$/, "")
+        return t.length > 0 ? t : String(s)
     }
     function resText(w) {
         if (w === null || w.resolution === undefined) return trs("generated")
@@ -259,11 +284,14 @@ ApplicationWindow {
                 // has no other way out.
                 visible: Bridge.catalog.length > 0
 
-                // The live pass runs only while this page is on screen; leaving it (or closing the
-                // window) hands the GPU back to the desktop.
+                // The live pass runs only while this page is on screen and this window is the one
+                // he is looking at; leaving it, minimising it, or clicking to another program hands
+                // the GPU back to the desktop.
                 function syncPreview() {
-                    if (visible && root.hero && root.useLivePreview) Bridge.showPreview(root.hero.id)
-                    else Bridge.hidePreview()
+                    if (visible && root.motionWanted && root.hero && root.useLivePreview)
+                        Bridge.showPreview(root.hero.id)
+                    else
+                        Bridge.hidePreview()
                 }
                 onVisibleChanged: syncPreview()
                 Component.onCompleted: syncPreview()
@@ -295,7 +323,7 @@ ApplicationWindow {
 
                 Timer {
                     interval: 4000
-                    running: root.carouselPlaying && root.shown.length > 1
+                    running: root.carouselPlaying && root.shown.length > 1 && root.active
                     repeat: true
                     onTriggered: strip.step()
                 }
@@ -342,10 +370,11 @@ ApplicationWindow {
                         anchors.margins: 0
                         visible: root.heroMotion
                         Repeater {
-                            // Nothing is loaded while the live pass is on screen: a hidden Image
+                            // Only while the strip really is the picture on screen: a hidden Image
                             // still fetches its source, and 24 of them is 22 MB of textures for
-                            // pictures nobody can see.
-                            model: root.liveFed ? [] : root.framesOf(root.hero)
+                            // nobody to see - whether because the live pass is up or because this
+                            // window is not the focused one.
+                            model: root.heroMotion ? root.framesOf(root.hero) : []
                             delegate: Image {
                                 required property int index
                                 required property var modelData
@@ -416,7 +445,7 @@ ApplicationWindow {
                             spacing: 10
                             Text {
                                 id: nameLabel
-                                text: root.hero ? root.hero.name : ""
+                                text: root.hero ? root.displayName(root.hero.name) : ""
                                 color: "white"; font.family: root.fontFamily
                                 font.pixelSize: 20; font.weight: Font.DemiBold
                                 elide: Text.ElideMiddle
@@ -426,19 +455,6 @@ ApplicationWindow {
                                 // visible. No hover bubble for the full name - he asked for that back
                                 // out: the truncated form is what he wants to see, not a second copy.
                                 Layout.maximumWidth: 300
-                            }
-                            Rectangle {
-                                Layout.preferredWidth: useLbl.implicitWidth + 14
-                                Layout.preferredHeight: 22
-                                radius: 11
-                                visible: root.hero !== null && root.inUse(root.hero)
-                                color: th.accent
-                                Text {
-                                    id: useLbl
-                                    anchors.centerIn: parent
-                                    text: trs("current")
-                                    color: "white"; font.family: root.fontFamily; font.pixelSize: 11
-                                }
                             }
                             Text {
                                 text: root.hero
@@ -530,10 +546,16 @@ ApplicationWindow {
                             anchors.rightMargin: 16
                             spacing: 10
 
+                            // The button carries the state instead of a chip beside the name: the same
+                            // test the chip used (this card is up on some screen) now decides the
+                            // label, and the button greys out rather than disappearing - a button
+                            // that reads 正在显示 and still applies on click would be lying about
+                            // one of the two.
                             Btn {
-                                text: trs("set_as_wallpaper")
+                                readonly property bool up: root.hero !== null && root.inUse(root.hero)
+                                text: up ? trs("current") : trs("set_as_wallpaper")
                                 accent: true
-                                enabled: Bridge.connected && root.hero !== null
+                                enabled: Bridge.connected && root.hero !== null && !up
                                 onClicked: { if (root.hero) Bridge.apply(root.hero.id) }
                             }
 
@@ -657,10 +679,12 @@ ApplicationWindow {
                             anchors.right: parent.right
                             anchors.top: parent.top
                             anchors.leftMargin: 16
-                            // 144, not 16: the three window buttons sit at this strip's right end
-                            // (40 px each, 2 apart, 8 in from the glass) and the search box stops
-                            // short of them.
-                            anchors.rightMargin: 144
+                            // 152, not 16: the three window buttons sit at this strip's right end
+                            // (40 px each, 6 apart, 8 in from the glass = 140 px) and the search box
+                            // stops 12 short of them. Both numbers move together: there are two gaps,
+                            // so every px added to the buttons' own spacing costs 2 px here, or the
+                            // box and the first plate end up touching.
+                            anchors.rightMargin: 152
                             anchors.topMargin: 14
                             spacing: 10
 
@@ -716,6 +740,11 @@ ApplicationWindow {
                                             color: th.text
                                             placeholderTextColor: th.muted
                                             background: null
+                                            // The style's own leftPadding is `padding + 4` = 10 px, which
+                                            // stacked on the 6 px row spacing to put 18 px of nothing
+                                            // between the magnifier and the first glyph. The row's own
+                                            // 12 / 6 insets are ours; this one is nobody's.
+                                            leftPadding: 0
                                             font.family: root.fontFamily
                                             font.pixelSize: 12
                                             onTextChanged: root.query = text
@@ -731,36 +760,6 @@ ApplicationWindow {
                             }
                         }
                     }
-                    // Left / right over the picture, like the sheet he pasted.
-                    IconBtn {
-                        icon: "chevL"
-                        tip: trs("prev")
-                        flat: true
-                        box: 44
-                        glyph: 34
-                        stroke: 2.6
-                        tint: th.warn
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.leftMargin: 12
-                        enabled: root.shown.length > 1
-                        onClicked: strip.go((root.slideIndex() - 1 + root.shown.length) % root.shown.length)
-                    }
-                    IconBtn {
-                        icon: "chevR"
-                        tip: trs("next")
-                        flat: true
-                        box: 44
-                        glyph: 34
-                        stroke: 2.6
-                        tint: th.warn
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.rightMargin: 12
-                        enabled: root.shown.length > 1
-                        onClicked: strip.go((root.slideIndex() + 1) % root.shown.length)
-                    }
-
                     // The small cards: the carousel's navigator, floating over the bottom of the big
                     // picture and above the caption. Clicking one stops the rotation. They stay
                     // landscape like the sheet he pasted - only the selected one grows.
@@ -770,23 +769,61 @@ ApplicationWindow {
                     // widened card on the centre (measured 40 px off on the middle slide, +40 on the
                     // last), and the content margins that were meant to let the first and last card
                     // reach the middle never count toward contentWidth (Qt logged width=1236,
-                    // leftMargin=524, contentWidth=512), so every contentX was clamped away. Slots
-                    // positioned from the centre have no layout to race with.
+                    // leftMargin=524, contentWidth=512), so every contentX was clamped away.
+                    //
+                    // The whole list is now laid out as one row in row coordinates and that row is
+                    // slid under the window: centred on the selected card until an end of the list
+                    // reaches an edge, then it stops there and the selected card walks off-centre.
+                    // Cards that have left the window stop loading their picture, so the row covers
+                    // the full width instead of parking every slide's texture in memory.
+                    //
+                    // The hand-over between two slides is animated over strip.animMs: the row's offset,
+                    // the two cards' geometry and their frame colours move on one clock, so a step
+                    // reads as one move. That is also why the Repeater is keyed on root.shown and not
+                    // on the in-window subset: a model that changes when the selection changes is a
+                    // full reset, which destroys every delegate and rebuilds it already sitting at its
+                    // destination, and there is nothing left to animate. The subset is a per-card
+                    // `visible` instead, so the cards that are off-window still cost no image load.
                     Item {
                         id: strip
+                        // 260 ms is the whole move: long enough to read the two cards swapping roles,
+                        // short enough that a 4 s rotation is over well before the next one.
+                        readonly property int animMs: 260
                         property real bigW: 188
                         property real smallW: 148
                         property real bigH: 117
                         property real smallH: 92
                         property real gap: 14
                         readonly property int n: root.shown.length
+                        readonly property int sel: root.slideIndex()
+                        readonly property real pitch: smallW + gap
+                        readonly property real rowW: bigW + (n - 1) * pitch
+                        // The row's left edge in strip coordinates - the offset the row glides TO.
+                        readonly property real rowX: {
+                            if (rowW <= width) return (width - rowW) / 2
+                            return Math.max(width - rowW,
+                                            Math.min(0, (width - bigW) / 2 - sel * pitch))
+                        }
+                        function cardW(i) { return i === sel ? bigW : smallW }
+                        function slotX(i) { return i * pitch + (i > sel ? bigW - smallW : 0) }
+                        function cardX(i) { return rowX + slotX(i) }
+                        // Which cards exist over the window. Measured against the offset the row is
+                        // heading for, with a pitch of slack on each side: a card that has just been
+                        // pushed out has to stay alive while the row carries it clear, or it blinks
+                        // out mid-glide. The slack is why `visible` and not the model decides what is
+                        // on screen - see the note above the strip.
+                        function live(i) {
+                            if (i < 0 || i >= n) return false
+                            var x = cardX(i)
+                            return x + cardW(i) > -pitch && x < width + pitch
+                        }
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.bottom: captionBar.top
                         anchors.bottomMargin: 12
                         height: bigH
                         // No clip: the halo around the selected card is meant to spill onto the
-                        // picture and the cards beside it.
+                        // picture and the cards beside it. heroBox clips what runs past the window.
 
                         function step() {   // the rotation moving on its own
                             if (root.shown.length === 0) return
@@ -800,39 +837,30 @@ ApplicationWindow {
                             root.carouselPlaying = false   // a manual pick outranks the rotation
                         }
 
-                        // Which offsets around the selected slide get a card: two each side, but never
-                        // the same wallpaper twice - with two wallpapers in the list, -1 and +1 are the
-                        // same item, and only one of them is shown.
-                        function slots(total, sel) {
-                            if (total <= 0) return []
-                            var out = [0], seen = {}
-                            seen[sel] = true
-                            for (var k = 1; k <= 2; ++k)
-                                for (var s = -1; s <= 1; s += 2) {
-                                    var idx = ((sel + s * k) % total + total) % total
-                                    if (seen[idx]) continue
-                                    seen[idx] = true
-                                    out.push(s * k)
-                                }
-                            return out.sort(function (a, b) { return a - b })
-                        }
-
                         Repeater {
-                            model: strip.slots(strip.n, root.slideIndex())
+                            model: root.shown
                             delegate: Item {
                                 id: thumbCell
+                                required property int index
                                 required property var modelData
-                                readonly property int off: modelData
-                                readonly property int src: ((root.slideIndex() + off) % strip.n + strip.n) % strip.n
-                                readonly property var slide: root.shown[src]
-                                readonly property bool sel: off === 0
-                                width: sel ? strip.bigW : strip.smallW
+                                readonly property int src: index
+                                readonly property var slide: modelData
+                                readonly property bool sel: src === strip.sel
+                                readonly property bool onscreen: strip.live(src)
+                                width: strip.cardW(src)
                                 height: sel ? strip.bigH : strip.smallH
-                                x: off === 0 ? strip.width / 2 - strip.bigW / 2
-                                   : off > 0 ? strip.width / 2 + strip.bigW / 2 + off * (strip.gap + strip.smallW) - strip.smallW
-                                   : strip.width / 2 - strip.bigW / 2 + off * (strip.gap + strip.smallW)
+                                x: strip.cardX(src)
                                 y: strip.bigH - height
                                 z: sel ? 1 : 0
+                                visible: onscreen
+                                Behavior on x { NumberAnimation { duration: strip.animMs
+                                                                  easing.type: Easing.OutCubic } }
+                                Behavior on width { NumberAnimation { duration: strip.animMs
+                                                                      easing.type: Easing.OutCubic } }
+                                Behavior on height { NumberAnimation { duration: strip.animMs
+                                                                       easing.type: Easing.OutCubic } }
+                                // No Behavior on y: it is bigH - height, so it follows the height
+                                // animation frame for frame and the cards stay on one bottom line.
 
                                 // The glow: only the HUD marks are seeded, so the light gathers at the
                                 // four corners and the bottom core instead of ringing the whole card.
@@ -844,6 +872,7 @@ ApplicationWindow {
                                     // have a picture over them, so a seed that painted for idle cards
                                     // too would show its bright marks straight through those wedges.
                                     glow: thumbCell.sel ? th.accent : "transparent"
+                                    Behavior on glow { ColorAnimation { duration: strip.animMs } }
                                 }
                                 MultiEffect {
                                     source: haloSeed
@@ -852,7 +881,13 @@ ApplicationWindow {
                                     blur: 1.0
                                     blurMax: 32
                                     autoPaddingEnabled: true
-                                    visible: thumbCell.sel
+                                    // Faded, not switched: the halo is the one mark that would still
+                                    // cut at the two ends of the glide. visible rides on the same
+                                    // number so the blur pass is not paid for by an idle card.
+                                    opacity: thumbCell.sel ? 1 : 0
+                                    visible: opacity > 0.001
+                                    Behavior on opacity { NumberAnimation { duration: strip.animMs
+                                                                            easing.type: Easing.OutCubic } }
                                 }
 
                                 // The cut corners are real now: the picture is masked to the octagon,
@@ -883,7 +918,8 @@ ApplicationWindow {
                                             maskEnabled: true
                                             maskSource: picMask
                                         }
-                                        source: thumbCell.slide.thumb !== undefined ? thumbCell.slide.thumb : ""
+                                        source: thumbCell.onscreen && thumbCell.slide.thumb !== undefined
+                                                ? thumbCell.slide.thumb : ""
                                     }
                                 }
                                 // On top of the picture: the rim, its inner echo, the broken side lines
@@ -898,6 +934,12 @@ ApplicationWindow {
                                     primary: thumbCell.sel ? th.accent : Qt.alpha(th.muted, 0.62)
                                     secondary: thumbCell.sel ? th.accentDim : Qt.alpha(th.muted, 0.55)
                                     glow: thumbCell.sel ? th.accent : Qt.alpha(th.muted, 0.72)
+                                    // Steel to accent and back, on the same clock as the card's move:
+                                    // a rim that snaps to a new colour while the box beside it glides
+                                    // is the one thing that would still read as a cut.
+                                    Behavior on primary { ColorAnimation { duration: strip.animMs } }
+                                    Behavior on secondary { ColorAnimation { duration: strip.animMs } }
+                                    Behavior on glow { ColorAnimation { duration: strip.animMs } }
                                 }
                                 MouseArea {
                                         // A clickable place has to say so under the pointer, and taking the press also
@@ -908,6 +950,46 @@ ApplicationWindow {
                                     onClicked: strip.go(thumbCell.src)
                                 }
                             }
+                        }
+
+                        // Prev / next at the two ends of the row: they move the selection, and the row
+                        // slides under the window to follow. Disabled rather than hidden at an end of
+                        // the list, so the pair does not appear and disappear between slides.
+                        // On the idle cards' centre line, not the strip's: the idle cards are 25 px
+                        // shorter than the strip and sit on its bottom edge, so the strip's centre is
+                        // (bigH - smallH) / 2 above theirs (measured: chevron ink 695.5 vs card ink
+                        // 707.5).
+                        IconBtn {
+                            icon: "chevL"
+                            tip: trs("prev")
+                            flat: true
+                            box: 44
+                            glyph: 34
+                            stroke: 2.6
+                            tint: th.warn
+                            z: 2
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.verticalCenterOffset: (strip.bigH - strip.smallH) / 2
+                            anchors.leftMargin: 12
+                            enabled: strip.sel > 0
+                            onClicked: strip.go(strip.sel - 1)
+                        }
+                        IconBtn {
+                            icon: "chevR"
+                            tip: trs("next")
+                            flat: true
+                            box: 44
+                            glyph: 34
+                            stroke: 2.6
+                            tint: th.warn
+                            z: 2
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.verticalCenterOffset: (strip.bigH - strip.smallH) / 2
+                            anchors.rightMargin: 12
+                            enabled: strip.sel < strip.n - 1
+                            onClicked: strip.go(strip.sel + 1)
                         }
                     }
                 }
@@ -1141,12 +1223,6 @@ ApplicationWindow {
                                     onPicked: function (v) { Bridge.setFit(v) }
                                 }
                             }
-                            Text {
-                                text: trs("image_fit_hint")
-                                color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
-                                wrapMode: Text.WordWrap
-                                Layout.fillWidth: true
-                            }
                         }
 
                         // Auto-rotate lives here, not on the browse page.
@@ -1304,97 +1380,181 @@ ApplicationWindow {
                         spacing: 14
 
                         Group {
-                            Btn { raised: true; Layout.preferredWidth: 280; Layout.alignment: Qt.AlignLeft; text: trs("add_image"); enabled: Bridge.connected; onClicked: Bridge.addImageFile() }
-                            Btn { raised: true; Layout.preferredWidth: 280; Layout.alignment: Qt.AlignLeft; text: trs("reload"); enabled: Bridge.connected; onClicked: Bridge.reload() }
+                            // The two actions on one line, equal share of the width: stacked they read
+                            // as two unrelated buttons, side by side as the one block they are.
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 12
+                                Btn { raised: true; Layout.fillWidth: true; text: trs("add_image"); enabled: Bridge.connected; onClicked: Bridge.addImageFile() }
+                                Btn { raised: true; Layout.fillWidth: true; text: trs("add_folder"); enabled: Bridge.connected; onClicked: Bridge.addImageFolder() }
+                                Btn { raised: true; Layout.fillWidth: true; text: trs("reload"); enabled: Bridge.connected; onClicked: Bridge.reload() }
+                            }
                             Text {
                                 visible: root.localImages.length === 0
                                 text: trs("no_local_images")
                                 color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
                                 Layout.fillWidth: true
                             }
-                            // The imported copies, with the picture itself as the preview. The cross is
-                            // a corner badge that only exists while the pointer is on the card, and the
-                            // first press arms it: one click never destroys anything.
-                            Flow {
+                            // The imported copies, one at a time and as wide as the card: a 150 px tile
+                            // cannot show what a picture looks like, which is the only reason to look
+                            // at it here. The arrows wrap so the pair never goes grey mid-browse, and
+                            // the dots are the position readout.
+                            //
+                            // It does not advance on its own. A rotation that moves the target under
+                            // the pointer turns the cross into a roulette, and this list is the one
+                            // place in the window that deletes files.
+                            ColumnLayout {
+                                id: car
                                 visible: root.localImages.length > 0
                                 Layout.fillWidth: true
-                                spacing: 12
-                                Repeater {
-                                    model: root.localImages
-                                    delegate: Item {
-                                        id: cell
-                                        required property var modelData
-                                        width: 150
-                                        height: shot.height + 6 + nameLbl.height
-                                        property bool armed: false
-                                        Timer { id: disarm; interval: 3000; onTriggered: cell.armed = false }
+                                spacing: 8
+                                readonly property int n: root.localImages.length
+                                property int wanted: 0
+                                property bool armed: false
+                                // Clamped on the way out: deleting the last item shortens the list
+                                // under us, and an index past the end would read as a blank slide.
+                                readonly property int sel: n > 0 ? Math.min(wanted, n - 1) : 0
+                                readonly property var item: n > 0 ? root.localImages[sel] : null
+                                function go(d) { if (n > 0) wanted = (sel + d + n) % n }
+                                function to(i) { wanted = i }
+                                onSelChanged: { car.armed = false; carDisarm.stop() }
+                                // Arming does not stay armed: the pointer can drift, the mind can
+                                // move on, and the second press is the one that deletes a file.
+                                Timer { id: carDisarm; interval: 3000; onTriggered: car.armed = false }
 
-                                        Rectangle {
-                                            id: shot
-                                            width: 150; height: 84; radius: 6
-                                            color: "#0A0D12"
-                                            clip: true
-                                            Image {
-                                                anchors.fill: parent
-                                                source: cell.modelData.thumb !== undefined ? cell.modelData.thumb : ""
-                                                fillMode: Image.PreserveAspectCrop
-                                                asynchronous: true
-                                            }
-                                            MouseArea { id: overShot; anchors.fill: parent; hoverEnabled: true }
+                                Rectangle {
+                                    id: slide
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 200
+                                    radius: 6
+                                    color: "#0A0D12"
+                                    clip: true
 
-                                            Rectangle {
-                                                id: badge
-                                                anchors.right: parent.right
-                                                anchors.top: parent.top
-                                                anchors.margins: 6
-                                                width: badgeRow.width + 14
-                                                height: 20
-                                                radius: 10
-                                                visible: overShot.containsMouse || cell.armed
-                                                color: cell.armed ? th.err : "#CC1B2029"
-                                                Row {
-                                                    id: badgeRow
-                                                    anchors.centerIn: parent
-                                                    spacing: 4
-                                                    Icon {
-                                                        visible: !cell.armed
-                                                        name: "close"; px: 10; tint: "white"
-                                                        anchors.verticalCenter: parent.verticalCenter
-                                                    }
-                                                    Text {
-                                                        visible: cell.armed
-                                                        text: trs("confirm_delete")
-                                                        color: "white"; font.family: root.fontFamily; font.pixelSize: 11
-                                                        anchors.verticalCenter: parent.verticalCenter
-                                                    }
-                                                }
-                                            }
-                                            MouseArea {
-                                                    // A clickable place has to say so under the pointer, and taking the press also
-                                                    // drops the caret out of whichever field still holds it.
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onPressed: forceActiveFocus()   // takes the caret out of any field
-                                                anchors.centerIn: badge
-                                                width: Math.max(badge.width, 28)
-                                                height: 28
-                                                enabled: badge.visible
-                                                onClicked: {
-                                                    if (cell.armed) { Bridge.deleteImage(cell.modelData.id); cell.armed = false; disarm.stop() }
-                                                    else { cell.armed = true; disarm.restart() }
-                                                }
-                                            }
-                                        }
+                                    Image {
+                                        anchors.fill: parent
+                                        source: car.item && car.item.thumb !== undefined ? car.item.thumb : ""
+                                        fillMode: Image.PreserveAspectCrop
+                                        asynchronous: true
+                                    }
+                                    MouseArea { id: overSlide; anchors.fill: parent; hoverEnabled: true }
 
-                                        Text {
-                                            id: nameLbl
-                                            anchors.top: shot.bottom
-                                            anchors.topMargin: 6
-                                            width: 150
-                                            text: cell.modelData.name
-                                            color: th.text; font.family: root.fontFamily; font.pixelSize: 11
-                                            wrapMode: Text.WrapAnywhere
+                                    IconBtn {
+                                        icon: "chevL"; tip: trs("prev"); flat: true
+                                        box: 40; glyph: 30; stroke: 2.6; tint: th.text
+                                        anchors.left: parent.left
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.leftMargin: 8
+                                        enabled: car.n > 1
+                                        onClicked: car.go(-1)
+                                    }
+                                    IconBtn {
+                                        icon: "chevR"; tip: trs("next"); flat: true
+                                        box: 40; glyph: 30; stroke: 2.6; tint: th.text
+                                        anchors.right: parent.right
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.rightMargin: 8
+                                        enabled: car.n > 1
+                                        onClicked: car.go(1)
+                                    }
+
+                                    // The cross keeps the card's own rule: it exists only while the
+                                    // pointer is on the slide, and the first press only arms it.
+                                    Rectangle {
+                                        id: badge
+                                        anchors.right: parent.right
+                                        anchors.top: parent.top
+                                        anchors.margins: 6
+                                        width: badgeRow.width + 14
+                                        height: 20
+                                        radius: 4   // 20 px tall plate: 10 was a pill, 6 still read round
+                                        visible: overSlide.containsMouse || car.armed
+                                        color: car.armed ? th.errDim : "#CC1B2029"
+                                        Row {
+                                            id: badgeRow
+                                            anchors.centerIn: parent
+                                            spacing: 4
+                                            Icon {
+                                                visible: !car.armed
+                                                name: "close"; px: 10; tint: "white"
+                                                anchors.verticalCenter: parent.verticalCenter
+                                            }
+                                            Text {
+                                                visible: car.armed
+                                                text: trs("confirm_delete")
+                                                color: "white"; font.family: root.fontFamily; font.pixelSize: 11
+                                                anchors.verticalCenter: parent.verticalCenter
+                                            }
                                         }
                                     }
+                                    MouseArea {
+                                            // A clickable place has to say so under the pointer, and taking the press also
+                                            // drops the caret out of whichever field still holds it.
+                                            cursorShape: Qt.PointingHandCursor
+                                            onPressed: forceActiveFocus()   // takes the caret out of any field
+                                        anchors.centerIn: badge
+                                        width: Math.max(badge.width, 28)
+                                        height: 28
+                                        enabled: badge.visible
+                                        onClicked: {
+                                            if (!car.item) return
+                                            if (car.armed) { Bridge.deleteImage(car.item.id); car.armed = false; carDisarm.stop() }
+                                            else { car.armed = true; carDisarm.restart() }
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    Text {
+                                        text: car.item ? car.item.name : ""
+                                        color: th.text; font.family: root.fontFamily; font.pixelSize: 11
+                                        wrapMode: Text.WrapAnywhere
+                                        Layout.fillWidth: true
+                                    }
+                                    Row {
+                                        spacing: 6
+                                        Layout.alignment: Qt.AlignVCenter
+                                        Repeater {
+                                            model: car.n
+                                            delegate: Rectangle {
+                                                required property int index
+                                                width: 8; height: 8; radius: 4
+                                                color: index === car.sel ? th.accent : th.surfaceAlt
+                                                MouseArea {
+                                                        // A clickable place has to say so under the pointer, and taking the press also
+                                                        // drops the caret out of whichever field still holds it.
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onPressed: forceActiveFocus()   // takes the caret out of any field
+                                                    anchors.fill: parent
+                                                    anchors.margins: -4      // 8 px of dot is not a target
+                                                    onClicked: car.to(index)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+
+                        // The taskbar's opacity: the one setting here that changes something outside
+                        // this program, and the reason it is a range rather than a switch is that the
+                        // bar's window alpha moves how much of the wallpaper reaches it - which is
+                        // worth something only while a wallpaper is what is behind the bar.
+                        Group {
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("tray_alpha")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Range {
+                                    value: Bridge.trayAlpha
+                                    enabled: Bridge.connected
+                                    onCommitted: function (v) { Bridge.setTrayAlpha(v) }
                                 }
                             }
                         }
@@ -1562,7 +1722,10 @@ ApplicationWindow {
     // after the dialog so they stay reachable while it is open.
     RowLayout {
         id: winChrome
-        spacing: 2
+        // 6, the same gap the category chips across the strip use between themselves, so the three
+        // plates separate the way the tabs do. It widens the row leftwards, which is why the chip
+        // column's right margin went 144 -> 152 to hold the search box's distance from them.
+        spacing: 6
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.rightMargin: 8
@@ -1587,7 +1750,10 @@ ApplicationWindow {
             name: "close"
             tip: trs("close")
             danger: true
-            onClicked: root.close()
+            // Not close(): the process survives in the tray, which is the only way back once the
+            // window is gone. Tray.attach() never ran if this session has no tray, and then
+            // hideToTray() falls back to a real close.
+            onClicked: Tray.hideToTray()
         }
     }
 
@@ -1919,25 +2085,38 @@ ApplicationWindow {
 
     // Icon-only controls have no label to show, so the name shows in a bubble we draw: the style's
     // own ToolTip is a light box that does not belong anywhere near this palette.
-    component Hint: Rectangle {
+    // A bubble that is a child of its button is painted under anything declared later in the same
+    // container: the caption bar and the card strip both live inside the picture's clip box, the
+    // strip comes last, and the bubble vanished behind a card. A Popup belongs to the window's
+    // overlay instead - nothing is above it and no ancestor's clip reaches it. The coordinates are
+    // mapped to the window because what we know is the button's own hover area.
+    component Hint: Popup {
         id: hint
         property string label: ""
         property Item hovered: null
         property string place: "right"  // "right" | "left" | "top" | "bottom" - left/top for
                                         // controls near the right edge, where a bubble would be
                                         // clipped by the picture; bottom for the title-bar buttons
-        visible: hint.hovered !== null && hint.hovered.containsMouse
-        x: place === "right" ? parent.width + 10
-           : place === "left" ? -width - 10
-           : (parent.width - width) / 2
-        y: place === "top" ? -height - 8
-           : place === "bottom" ? parent.height + 8
-           : (parent.height - height) / 2
-        height: 26
+        padding: 0
         width: hintTxt.implicitWidth + 18
-        radius: 6
-        color: th.surfaceAlt
-        border.color: th.hover
+        height: 26
+        visible: hint.hovered !== null && hint.hovered.containsMouse
+        // Mapped into the Popup's own parent, not the window: a Popup's x/y are relative to whatever
+        // it ends up parented to, and that is not guaranteed to be the window's content item.
+        readonly property point at: hovered && parent ? hovered.mapToItem(parent, 0, 0) : Qt.point(0, 0)
+        readonly property real srcW: hovered ? hovered.width : 0
+        readonly property real srcH: hovered ? hovered.height : 0
+        x: place === "right" ? at.x + srcW + 10
+           : place === "left" ? at.x - width - 10
+           : at.x + (srcW - width) / 2
+        y: place === "top" ? at.y - height - 8
+           : place === "bottom" ? at.y + srcH + 8
+           : at.y + (srcH - height) / 2
+        background: Rectangle {
+            radius: 6
+            color: th.surfaceAlt
+            border.color: th.hover
+        }
         Text {
             id: hintTxt
             anchors.centerIn: parent
@@ -1948,8 +2127,8 @@ ApplicationWindow {
         }
     }
 
-    // The three buttons of a title bar we now draw ourselves. Flat like the caption row's icons:
-    // only the close one answers with red, and only under the pointer.
+    // The three buttons of a title bar we now draw ourselves. They now carry the same plate as the
+    // search box beside them; the hover fills are what they always were.
     component WinBtn: Rectangle {
         id: wb
         property string name: ""
@@ -1961,7 +2140,8 @@ ApplicationWindow {
         Layout.preferredWidth: 40
         Layout.preferredHeight: 28
         radius: 4
-        color: wbHover.containsMouse ? (wb.danger ? Qt.alpha(th.err, 0.85) : "#26FFFFFF") : "transparent"
+        color: wbHover.containsMouse ? (wb.danger ? Qt.alpha(th.err, 0.85) : "#26FFFFFF")
+                                     : Qt.alpha(th.surface, root.plateAlpha)
 
         Icon {
             anchors.centerIn: parent
@@ -2101,6 +2281,92 @@ ApplicationWindow {
         Accessible.checked: slide.checked
         Accessible.onPressAction: slide.toggled(!slide.checked)
         Accessible.onToggleAction: slide.toggled(!slide.checked)
+    }
+
+    // A value on a scale, not a button that cycles through its options. The whole track is the hit
+    // area and pressing anywhere on it moves the number there: that is fewer parts than a knob you
+    // can only drag, and it is the difference between a control a scripted click can prove works and
+    // one it cannot. The value leaves on release, so dragging does not put a request per pixel on
+    // the pipe.
+    component Range: Rectangle {
+        id: rng
+        property int from: 0
+        property int to: 100
+        property int value: 0            // what the renderer holds
+        property int held: -1            // what the pointer is on, only read while it is down
+        readonly property int shown: trackHover.pressed ? (held >= 0 ? held : value) : value
+        readonly property int pad: 10
+        readonly property int labelW: 34
+        readonly property int knob: 14
+        readonly property real trackW: Math.max(0, width - pad * 2 - labelW - knob)
+        readonly property real frac: to > from ? (shown - from) / (to - from) : 0
+        signal committed(int v)
+
+        function at(px) {
+            if (trackW <= 0) return from
+            const f = Math.min(1, Math.max(0, (px - pad - labelW) / trackW))
+            return Math.round(from + f * (to - from))
+        }
+
+        Layout.preferredWidth: 190
+        Layout.preferredHeight: 30
+        radius: 6
+        opacity: enabled ? 1.0 : 0.45
+        color: th.surface
+        border.color: th.line
+        border.width: 1
+
+        Text {
+            x: rng.pad
+            anchors.verticalCenter: parent.verticalCenter
+            width: rng.labelW
+            text: rng.shown === 0 ? trs("off") : rng.shown + "%"
+            color: th.text; font.family: root.fontFamily; font.pixelSize: 11
+        }
+        Rectangle {
+            x: rng.pad + rng.labelW
+            width: rng.trackW
+            height: 4
+            radius: 2
+            y: (rng.height - height) / 2
+            color: trackHover.containsMouse ? th.line : th.surfaceAlt
+        }
+        Rectangle {
+            x: rng.pad + rng.labelW
+            width: rng.trackW * rng.frac
+            height: 4
+            radius: 2
+            y: (rng.height - height) / 2
+            color: th.accent
+        }
+        Rectangle {
+            x: rng.pad + rng.labelW + rng.trackW * rng.frac
+            width: rng.knob
+            height: rng.knob
+            radius: rng.knob / 2
+            y: (rng.height - height) / 2
+            color: "white"
+            border.color: th.accent
+            border.width: 1
+        }
+        MouseArea {
+            id: trackHover
+            anchors.fill: parent
+            enabled: rng.enabled
+            cursorShape: Qt.PointingHandCursor
+            hoverEnabled: true
+            onPressed: function (mouse) {
+                forceActiveFocus()       // takes the caret out of any field
+                rng.held = rng.at(mouse.x)
+            }
+            onPositionChanged: function (mouse) { if (pressed) rng.held = rng.at(mouse.x) }
+            onReleased: {
+                if (rng.held >= 0) rng.committed(rng.held)
+                rng.held = -1
+            }
+        }
+        Accessible.role: Accessible.Slider
+        Accessible.name: trs("tray_alpha")
     }
 
     // Anything with more than two options is one field with a list under it, not a row of chips.

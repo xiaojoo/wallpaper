@@ -1,5 +1,5 @@
 #pragma once
-// Engine/Wallpaper/Thumbnailer.hpp - renders a wallpaper offscreen to PNG files for the settings
+// Engine/Packages/Thumbnailer.hpp - renders a wallpaper offscreen to PNG files for the settings
 // window: a card still, a large preview, and a short frame strip for the motion preview.
 #include "Engine/Core/Platform.hpp"
 #include <string>
@@ -37,7 +37,7 @@ public:
 private:
     bool Grab(D3D11Device& dev, D3D11Renderer& rend, WallpaperInstance& inst, UINT w, UINT h, double seconds,
               double delta, const std::wstring& file, std::vector<BYTE>* pixels, std::string& error,
-              int jpegQuality = 0);
+              int jpegQuality = 0, UINT supersample = 1);
 
     UINT stillW_ = 480, stillH_ = 270;
     UINT largeW_ = 1280, largeH_ = 720;

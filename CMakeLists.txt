@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(SmartWallpaper LANGUAGES CXX)
+project(SmartWallpaper LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,7 @@ endif()
 
 add_executable(WallpaperRenderer WIN32
   main.cpp
+  resources/app.rc
   Engine/Core/Log.cpp
   Engine/Core/Json.cpp
   Engine/Graphics/D3D11Device.cpp
@@ -18,12 +19,14 @@ add_executable(WallpaperRenderer WIN32
   Engine/Graphics/Texture.cpp
   Engine/Graphics/ParticleSystem.cpp
   Engine/Graphics/D3D11Renderer.cpp
-  Engine/Wallpaper/WallpaperPackage.cpp
-  Engine/Wallpaper/WallpaperInstance.cpp
-  Engine/Wallpaper/WallpaperManager.cpp
-  Engine/Wallpaper/Thumbnailer.cpp
+  Engine/Graphics/VideoPlayer.cpp
+  Engine/Packages/WallpaperPackage.cpp
+  Engine/Packages/WallpaperInstance.cpp
+  Engine/Packages/WallpaperManager.cpp
+  Engine/Packages/Thumbnailer.cpp
   Engine/Desktop/MonitorManager.cpp
   Engine/Desktop/WorkerW.cpp
+  Engine/Desktop/TrayTransparency.cpp
   Engine/Desktop/DesktopWindow.cpp
   Engine/Performance/FPSController.cpp
   Engine/Performance/PowerManager.cpp
@@ -46,8 +49,10 @@ target_compile_options(WallpaperRenderer PRIVATE
 )
 
 # d3dcompiler_47.dll is loaded at runtime (it is in System32), so it is deliberately not linked.
+# mf* is the video wallpaper path: source reader + the DXGI device manager + the attribute GUIDs.
 target_link_libraries(WallpaperRenderer PRIVATE
   d3d11 dxgi dcomp windowscodecs ole32 shell32 user32 gdi32 shcore wtsapi32 advapi32 powrprof
+  mfplat mfreadwrite mf mfuuid
 )
 
 set_target_properties(WallpaperRenderer PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
@@ -60,26 +65,30 @@ list(APPEND CMAKE_PREFIX_PATH "$ENV{QT_DIR}")
 find_package(Qt6 QUIET COMPONENTS Quick Qml Gui Widgets)
 if(Qt6_FOUND)
   set(CMAKE_AUTOMOC ON)
-  qt_add_executable(SmartWallpaper WIN32
+  qt_add_executable(Wallpaper WIN32
     Wallpaper/main.cpp
+    resources/app.rc
     Wallpaper/Bridge.cpp
     Wallpaper/LivePreview.cpp
+    Wallpaper/TrayMenu.cpp
     Engine/Core/Json.cpp
     Engine/Core/Log.cpp
     Engine/App/IPCClient.cpp
   )
-  target_include_directories(SmartWallpaper PRIVATE "${CMAKE_SOURCE_DIR}")
-  target_compile_definitions(SmartWallpaper PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-  target_compile_options(SmartWallpaper PRIVATE /utf-8 /W4 /permissive- /Zc:__cplusplus /EHsc)
-  target_link_libraries(SmartWallpaper PRIVATE Qt6::Quick Qt6::Qml Qt6::Gui Qt6::Widgets)
-  add_custom_command(TARGET SmartWallpaper POST_BUILD
+  target_include_directories(Wallpaper PRIVATE "${CMAKE_SOURCE_DIR}")
+  target_compile_definitions(Wallpaper PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(Wallpaper PRIVATE /utf-8 /W4 /permissive- /Zc:__cplusplus /EHsc)
+  target_link_libraries(Wallpaper PRIVATE Qt6::Quick Qt6::Qml Qt6::Gui Qt6::Widgets)
+  add_custom_command(TARGET Wallpaper POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-      "${CMAKE_SOURCE_DIR}/Wallpaper/qml" "$<TARGET_FILE_DIR:SmartWallpaper>/qml"
-    COMMENT "staging qml/ next to the settings window")
-  set_target_properties(SmartWallpaper PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
-  message(STATUS "Qt6 found: building SmartWallpaper settings window")
+      "${CMAKE_SOURCE_DIR}/Wallpaper/qml" "$<TARGET_FILE_DIR:Wallpaper>/qml"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_SOURCE_DIR}/resources/Wallpaper.ico" "$<TARGET_FILE_DIR:Wallpaper>/Wallpaper.ico"
+    COMMENT "staging qml/ and Wallpaper.ico next to the settings window")
+  set_target_properties(Wallpaper PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
+  message(STATUS "Qt6 found: building Wallpaper settings window")
 else()
-  message(STATUS "Qt6 not found: skipping the SmartWallpaper settings window")
+  message(STATUS "Qt6 not found: skipping the Wallpaper settings window")
 endif()
 
 # Assets are staged next to the exe, which is the same directory the renderer searches first.

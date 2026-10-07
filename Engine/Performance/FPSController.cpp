@@ -35,15 +35,34 @@ LONGLONG FPSController::Now() const {
     return li.QuadPart;
 }
 
+namespace {
+// The fastest rate at or below `want` that is an exact whole number of refresh periods. 60 fps on a
+// 144 Hz panel is 2.4 refreshes per frame, so the compositor shows the frames 2, 3, 2, 3 refreshes
+// long - a regular 13.9/20.8 ms judder that reads as stutter however steadily the loop delivers.
+// 144 Hz therefore gives 48 (3 periods), 24 (6), 12 (12). If the mode reports a refresh with no
+// divisor near what was asked for (143 Hz: 11 and 13), keeping the requested rate beats dropping
+// to a twentieth of it, so the snap only applies within a quarter of `want`.
+int SnapToRefresh(int want, int refresh) {
+    for (int d = want; d * 4 >= want * 3; --d)
+        if (refresh % d == 0) return d;
+    return want;
+}
+} // namespace
+
 void FPSController::ConfigureSlot(Slot& s, int targetFps, UINT refreshHz) {
     int want = targetFps < 0 ? 0 : targetFps;
     int cap = refreshHz ? int(refreshHz) : 60;
-    int eff = want == 0 ? 0 : std::min(want, cap);
+    int eff = want == 0 ? 0 : SnapToRefresh(std::min(want, cap), cap);
     s.targetFps = want;
     if (eff == s.effectiveFps) return;
     s.effectiveFps = eff;
     s.intervalTicks = eff > 0 ? qpcFreq_ / eff : 0;
     s.paused = eff == 0;
+    // A budget change is not a hitch: the first interval after one is measured against the new
+    // rate, and the late counter restarts so an A/B over a stable window reads on its own.
+    s.lastFrame = 0;
+    s.lastReal = 0;
+    s.lateFrames = 0;
     // A budget change must never push away a frame that is already due: the power cap flips
     // between states as the foreground window changes, and re-phasing here starved the loop.
     if (s.nextDue <= Now() || s.nextDue == 0) s.nextDue = Now();
@@ -65,6 +84,13 @@ void FPSController::SlotRendered(Slot& s) {
             s.avgMs = s.avgMs ? s.avgMs * 0.9 + ms * 0.1 : ms;
         }
     }
+    if (s.effectiveFps > 0 && s.lastReal) {
+        // More than half an interval late means the frame was held a whole refresh too long.
+        double ideal = 1000.0 / s.effectiveFps;
+        double gap = double(now - s.lastReal) * 1000.0 / qpcFreq_;
+        if (gap > ideal * 1.5 && gap < ideal * 30.0) ++s.lateFrames;
+    }
+    s.lastReal = now;
     s.lastFrame = now;
     ++s.frames;
 
@@ -128,8 +154,8 @@ void FPSController::WaitSlice(double seconds) {
 }
 
 std::string FPSController::Describe(const Slot& s, std::string_view label) {
-    return std::format("{} target={} eff={} measured={:.1f} avg={:.2f}ms worst={:.2f}ms frames={}", label,
-                       s.targetFps, s.effectiveFps, s.measuredFps, s.avgMs, s.worstMs, s.frames);
+    return std::format("{} target={} eff={} measured={:.1f} avg={:.2f}ms worst={:.2f}ms late={} frames={}", label,
+                       s.targetFps, s.effectiveFps, s.measuredFps, s.avgMs, s.worstMs, s.lateFrames, s.frames);
 }
 
 } // namespace sw

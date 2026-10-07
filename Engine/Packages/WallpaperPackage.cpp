@@ -1,4 +1,4 @@
-#include "Engine/Wallpaper/WallpaperPackage.hpp"
+#include "Engine/Packages/WallpaperPackage.hpp"
 #include "Engine/Core/Log.hpp"
 
 #include <algorithm>
@@ -71,14 +71,15 @@ std::optional<WallpaperPackage> WallpaperPackage::LoadFromDir(const std::wstring
     p.srcH_ = j.intOr("height", 0);
     const bool wantsParticles = j.strOr("renderer", "") == "particles";
     std::string renderer = j.strOr("renderer", "");
-    if (!renderer.empty() && renderer != "d3d11" && renderer != "particles") {
+    const bool wantsVideo = renderer == "video";
+    if (!renderer.empty() && renderer != "d3d11" && renderer != "particles" && renderer != "video") {
         error = "renderer '" + renderer + "' is not available in this build";
         return std::nullopt;
     }
     p.fps_ = j.find("fps") ? j.find("fps")->asInt(60) : 60;
     p.quality_ = ParseQuality(j.strOr("quality", ""), Quality::High);
     p.additive_ = j.find("blend") ? j.find("blend")->asString() == "additive" : false;
-    std::string shaderFile = j.strOr("shader", "main.hlsl");
+    std::string shaderFile = j.strOr("shader", wantsVideo ? "Image.hlsl" : "main.hlsl");
     p.shaderFile_ = ToWide(shaderFile);
     if (const Json* e = j.find("entries"); e && e->isObject()) {
         p.entries_.vs = e->strOr("vs", p.entries_.vs);
@@ -118,6 +119,21 @@ std::optional<WallpaperPackage> WallpaperPackage::LoadFromDir(const std::wstring
         }
     }
     if (p.textures_.size() > 8) p.textures_.resize(8);
+    if (const Json* v = j.find("video"); v && v->isString() && !v->asString().empty()) {
+        p.videoFile_ = ToWide(v->asString());
+        p.videoLoop_ = j.boolOr("loop", true);
+        p.duration_ = j.numOr("duration_s", 0.0);
+    }
+    // Both halves have to agree, as they do for particles: a manifest that names a video but asks for
+    // the shader renderer would play the file nowhere, and the picture would be a black rectangle.
+    if (wantsVideo && p.videoFile_.empty()) {
+        error = "renderer 'video' needs a \"video\" file name";
+        return std::nullopt;
+    }
+    if (!wantsVideo && !p.videoFile_.empty()) {
+        error = "a \"video\" entry needs renderer \"video\"";
+        return std::nullopt;
+    }
     // The renderer string and the particles block both have to agree, and textures are indexed from
     // t1 in a particle wallpaper because the buffer owns t0.
     if (wantsParticles && !p.particleCount_) {
@@ -138,6 +154,8 @@ std::string WallpaperPackage::summary() const {
     if (particleCount_)
         out += std::format(" particles={} cs={} pvs={} bg={}", particleCount_, entries_.cs, entries_.pvs,
                            entries_.bg);
+    if (!videoFile_.empty())
+        out += std::format(" video={} loop={}", ToUtf8(videoFile_), videoLoop_ ? "yes" : "no");
     return out;
 }
 

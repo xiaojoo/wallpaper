@@ -10,11 +10,17 @@ class FPSController {
 public:
     struct Slot {
         int targetFps = 0;       // what the wallpaper asked for, before power rules
-        int effectiveFps = 0;    // after power caps and refresh rate
+        int effectiveFps = 0;    // after power caps, and snapped to whole refresh periods
         LONGLONG intervalTicks = 0;
         LONGLONG nextDue = 0;
         unsigned long long frames = 0;
         double measuredFps = 0, avgMs = 0, worstMs = 0;
+        // Frames that landed more than half an interval late, since the budget last changed: a
+        // maximum only remembers the worst gap ever, and SlotIdle (which zeroes lastFrame for any
+        // slot not due this iteration) would blank a lastFrame-based counter on the second monitor
+        // and on the preview pass.
+        unsigned lateFrames = 0;
+        LONGLONG lastReal = 0;
         LONGLONG lastFrame = 0, windowStart = 0;
         unsigned long long windowFrames = 0;
         bool paused = false;

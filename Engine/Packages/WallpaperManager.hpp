@@ -1,7 +1,7 @@
 #pragma once
-// Engine/Wallpaper/WallpaperManager.hpp - config file, package catalog and per-monitor assignments.
+// Engine/Packages/WallpaperManager.hpp - config file, package catalog and per-monitor assignments.
 #include "Engine/Desktop/MonitorManager.hpp"
-#include "Engine/Wallpaper/WallpaperPackage.hpp"
+#include "Engine/Packages/WallpaperPackage.hpp"
 #include "Engine/Core/Json.hpp"
 
 namespace sw {
@@ -33,6 +33,8 @@ struct Settings {
     Quality globalQuality = Quality::High;
     bool useGlobalQuality = false; // when false each package's own quality wins
     ImageFit imageFit = ImageFit::Fill; // how image wallpapers cover the screen
+    // 0 = the taskbar keeps Windows' own material; 1..100 = how far past it to fade the bar.
+    int trayAlpha = 0;
     std::vector<Assignment> assignments;
     Json power = Json::Object();
 };
@@ -59,6 +61,7 @@ public:
     void SetFpsFor(const MonitorInfo& m, int fps);
     void SetGlobalQuality(const std::string& q);
     void SetImageFit(const std::string& f);
+    void SetTrayAlpha(int pct);
     void SetGlobalMaxFps(int fps);
     void SetRotate(const Json& r);
 
