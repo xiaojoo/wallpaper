@@ -13,10 +13,10 @@
     }
   ],
   "params": {
-    "scroll_speed": 1.4,
-    "trace_density": 18,
-    "trace_width": 1.2,
-    "node_glow": 0.8,
+    "scroll_speed": 1.33,
+    "trace_density": 8,
+    "trace_width": 1.7,
+    "node_glow": 1.0,
     "spark_speed": 1.1,
     "hue_shift": 0.12,
     "bg_depth": 0.45,

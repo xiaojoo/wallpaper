@@ -1,23 +1,41 @@
-#include "Engine/Wallpaper/Thumbnailer.hpp"
+#include "Engine/Packages/Thumbnailer.hpp"
 #include "Engine/Graphics/D3D11Device.hpp"
 #include "Engine/Graphics/D3D11Renderer.hpp"
 #include "Engine/Graphics/Texture.hpp"
-#include "Engine/Wallpaper/WallpaperInstance.hpp"
+#include "Engine/Graphics/VideoPlayer.hpp"
+#include "Engine/Packages/WallpaperInstance.hpp"
 #include "Engine/Core/Log.hpp"
 
 #include <wincodec.h>
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 
 namespace sw {
 static constexpr const char* MOD = "thumb";
 
+namespace {
+// The card is an eighth of the desktop in each axis and the large preview a third, so these are the
+// factors that bring each render exactly up to the monitor. Grab clamps them on a smaller screen.
+constexpr UINT kCardSupersample = 8, kLargeSupersample = 3;
+} // namespace
+
 bool Thumbnailer::Grab(D3D11Device& dev, D3D11Renderer& rend, WallpaperInstance& inst, UINT w, UINT h,
                        double seconds, double delta, const std::wstring& file, std::vector<BYTE>* pixels,
-                       std::string& error, int jpegQuality) {
+                       std::string& error, int jpegQuality, UINT supersample) {
+    // A card is an eighth of the desktop in each axis. A package that draws one-pixel hairlines
+    // cannot survive that by being sampled once per output pixel - each hairline either lands or
+    // does not, which is what reads as TV static on the browse page. Rendering the same picture at
+    // the desktop size and averaging it down lets a hairline contribute the fraction of the card
+    // pixel it really covers. The factor is clamped so the render never exceeds the monitor.
+    UINT k = 1;
+    if (supersample > 1 && designW_ >= w && designH_ >= h)
+        k = std::max<UINT>(1, std::min({ supersample, designW_ / w, designH_ / h }));
+    const UINT rw = w * k, rh = h * k;
+
     D3D11_TEXTURE2D_DESC td{};
-    td.Width = w;
-    td.Height = h;
+    td.Width = rw;
+    td.Height = rh;
     td.MipLevels = 1;
     td.ArraySize = 1;
     td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -27,7 +45,7 @@ bool Thumbnailer::Grab(D3D11Device& dev, D3D11Renderer& rend, WallpaperInstance&
 
     Com<ID3D11Texture2D> rt;
     if (FAILED(dev.dev->CreateTexture2D(&td, nullptr, &rt))) {
-        error = "offscreen texture " + std::to_string(w) + "x" + std::to_string(h);
+        error = "offscreen texture " + std::to_string(rw) + "x" + std::to_string(rh);
         return false;
     }
     Com<ID3D11RenderTargetView> rtv;
@@ -44,10 +62,10 @@ bool Thumbnailer::Grab(D3D11Device& dev, D3D11Renderer& rend, WallpaperInstance&
     f.delta = (float)delta;
     f.frame = (float)(seconds / delta);
     f.targetFps = 60.f;
-    f.resX = (float)w;
-    f.resY = (float)h;
-    f.invX = 1.f / (float)w;
-    f.invY = 1.f / (float)h;
+    f.resX = (float)rw;
+    f.resY = (float)rh;
+    f.invX = 1.f / (float)rw;
+    f.invY = 1.f / (float)rh;
     f.mouseNX = 0.5f;
     f.mouseNY = 0.5f;
     f.quality = 3.f; // high, so the preview shows the wallpaper's intended look
@@ -55,11 +73,22 @@ bool Thumbnailer::Grab(D3D11Device& dev, D3D11Renderer& rend, WallpaperInstance&
     f.renderScale = 1.f;
     // Everything a package draws in absolute pixels has to shrink with the preview, or a 640x360
     // strip shows snowflakes six times too large for the picture and it is not the same wallpaper.
-    f.sizeScale = (designW_ && designH_) ? std::min(float(w) / float(designW_), float(h) / float(designH_))
+    // This is the *render* surface's fraction of the monitor, so supersampling leaves the drawn
+    // proportions alone and only adds samples.
+    f.sizeScale = (designW_ && designH_) ? std::min(float(rw) / float(designW_), float(rh) / float(designH_))
                                          : 1.f;
 
-    DrawArgs args = inst.MakeArgs(f);
-    if (!rend.Render(dev.ctx.Get(), rtv.Get(), w, h, args, error)) return false;
+    // A video wallpaper has to be sampled *at* these times, not at whatever the decoder happened to
+    // be playing: the clip runs on its own wall clock and the strip would otherwise be 24 frames from
+    // a stretch of a second that has nothing to do with baseTime_.
+    if (inst.hasVideo()) {
+        const bool parked = inst.video()->ShowFrameAt(seconds, dev.ctx.Get());
+        Info(MOD, "grab at {:.2f} s: ShowFrameAt {}, {} frames delivered so far", seconds,
+             parked ? "found a frame" : "TIMED OUT", inst.video()->delivered());
+    }
+
+    DrawArgs args = inst.MakeArgs(f, dev.ctx.Get());
+    if (!rend.Render(dev.ctx.Get(), rtv.Get(), rw, rh, args, error)) return false;
     dev.ctx->OMSetRenderTargets(0, nullptr, nullptr);
 
     td.Usage = D3D11_USAGE_STAGING;
@@ -76,11 +105,38 @@ bool Thumbnailer::Grab(D3D11Device& dev, D3D11Renderer& rend, WallpaperInstance&
         error = "map staging";
         return false;
     }
-    std::vector<BYTE> buf((size_t)w * h * 4);
+    std::vector<BYTE> big((size_t)rw * rh * 4);
     const BYTE* src = static_cast<const BYTE*>(mp.pData);
-    for (UINT y = 0; y < h; ++y)
-        memcpy(buf.data() + (size_t)y * w * 4, src + (size_t)y * mp.RowPitch, (size_t)w * 4);
+    for (UINT y = 0; y < rh; ++y)
+        memcpy(big.data() + (size_t)y * rw * 4, src + (size_t)y * mp.RowPitch, (size_t)rw * 4);
     dev.ctx->Unmap(st.Get(), 0);
+
+    std::vector<BYTE> buf((size_t)w * h * 4);
+    if (k > 1) {
+        // A plain box average: the point is only that a sub-pixel hairline must contribute what it
+        // covers instead of being rounded to on or off.
+        const unsigned area = k * k;
+        for (UINT y = 0; y < h; ++y) {
+            for (UINT x = 0; x < w; ++x) {
+                unsigned b = 0, g = 0, r = 0;
+                for (UINT dy = 0; dy < k; ++dy) {
+                    const BYTE* px = big.data() + ((size_t)(y * k + dy) * rw + x * k) * 4;
+                    for (UINT dx = 0; dx < k; ++dx) {
+                        b += px[dx * 4];
+                        g += px[dx * 4 + 1];
+                        r += px[dx * 4 + 2];
+                    }
+                }
+                BYTE* o = buf.data() + ((size_t)y * w + x) * 4;
+                o[0] = (BYTE)(b / area);
+                o[1] = (BYTE)(g / area);
+                o[2] = (BYTE)(r / area);
+                o[3] = 255;
+            }
+        }
+    } else {
+        buf.swap(big);
+    }
 
     const bool wrote = WriteImage(dev.wic.Get(), file, w, h, buf, error, jpegQuality);
     if (pixels) pixels->swap(buf);   // after the write: swapping before it would hand it an empty buffer
@@ -107,6 +163,7 @@ double MeanAbsDiff(const std::vector<BYTE>& a, const std::vector<BYTE>& b) {
 
 bool Thumbnailer::Build(D3D11Device& dev, D3D11Renderer& rend, WallpaperInstance& inst,
                         const std::wstring& outDir, const std::string& id, ThumbSet& out, std::string& error) {
+    const auto t0 = std::chrono::steady_clock::now();
     out = {};
     MakeDirs(outDir);
     const std::wstring wide = ToWide(id);
@@ -120,18 +177,25 @@ bool Thumbnailer::Build(D3D11Device& dev, D3D11Renderer& rend, WallpaperInstance
     std::filesystem::remove_all(out.framesDir, ec);
     MakeDirs(out.framesDir);
 
-    if (!Grab(dev, rend, inst, stillW_, stillH_, baseTime_, 1.0 / 60.0, out.still, nullptr, error)) {
+    if (!Grab(dev, rend, inst, stillW_, stillH_, baseTime_, 1.0 / 60.0, out.still, nullptr, error, 0, kCardSupersample)) {
         out.error = error;
         return false;
     }
-    if (!Grab(dev, rend, inst, largeW_, largeH_, baseTime_, 1.0 / 60.0, out.large, nullptr, error)) {
+    if (!Grab(dev, rend, inst, largeW_, largeH_, baseTime_, 1.0 / 60.0, out.large, nullptr, error, 0,
+              kLargeSupersample)) {
         out.error = error;
         return false;
     }
     const double step = frameSpan_ / double(frameCount_);
     out.frameMs = step * 1000.0;
     std::vector<BYTE> kept, cur;
-    for (int i = 0; i < frameCount_; ++i) {
+    // A video gets a still and the large picture, not a 24-frame strip. Two measured reasons: every
+    // grab is a seek plus a full-size decode on the loop thread, which froze the desktop for 3.78 s on
+    // a 4K import; and 19 of the 24 came back as the same picture (the decoder lands on the previous
+    // keyframe, so the dedup dropped them). The motion the card used to show is available live instead.
+    const int framesToGrab = inst.hasVideo() ? 0 : frameCount_;
+    if (inst.hasVideo()) out.frameMs = 0.0;
+    for (int i = 0; i < framesToGrab; ++i) {
         const double t = baseTime_ + step * i;
         wchar_t name[64];
         swprintf(name, 64, L"\\f%02d.jpg", i);
@@ -153,8 +217,10 @@ bool Thumbnailer::Build(D3D11Device& dev, D3D11Renderer& rend, WallpaperInstance
     }
     dev.ctx->Flush();
     out.ok = true;
-    Info(MOD, "{}: still {}x{}, large {}x{}, {} of {} motion frames kept at {:.1f} ms", id, stillW_, stillH_,
-         largeW_, largeH_, (unsigned)out.frames.size(), frameCount_, out.frameMs);
+    const long long builtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - t0).count();
+    Info(MOD, "{}: still {}x{}, large {}x{}, {} of {} motion frames kept at {:.1f} ms - built in {} ms",
+         id, stillW_, stillH_, largeW_, largeH_, (unsigned)out.frames.size(), frameCount_, out.frameMs, builtMs);
     return true;
 }
 

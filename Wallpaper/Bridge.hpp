@@ -24,6 +24,7 @@ class Bridge final : public QObject {
     Q_PROPERTY(bool qualityIsGlobal READ qualityIsGlobal NOTIFY stateChanged)
     Q_PROPERTY(QStringList fitLevels READ fitLevels CONSTANT)
     Q_PROPERTY(QString imageFit READ imageFit NOTIFY stateChanged)
+    Q_PROPERTY(int trayAlpha READ trayAlpha NOTIFY stateChanged)
     Q_PROPERTY(int maxFps READ maxFps NOTIFY stateChanged)
     Q_PROPERTY(bool paused READ paused NOTIFY stateChanged)
     Q_PROPERTY(QString hostMethod READ hostMethod NOTIFY stateChanged)
@@ -59,6 +60,7 @@ public:
     bool qualityIsGlobal() const { return qualityIsGlobal_; }
     QStringList fitLevels() const;
     QString imageFit() const { return imageFit_; }
+    int trayAlpha() const { return trayAlpha_; }
     int maxFps() const { return maxFps_; }
     bool paused() const { return paused_; }
     QString hostMethod() const { return host_; }
@@ -72,6 +74,10 @@ public:
     int rotateIntervalMin() const { return rotateMin_; }
     int rotateNextInS() const { return rotateNext_; }
     QStringList favorites() const { return favorites_; }
+    // What the screen the tray and the settings window act on is showing right now: the id the
+    // rotation steps from, and the name the tray's tooltip and toast show.
+    QString showingId() const { return showingId_; }
+    QString showingName() const { return showingName_; }
     QString selectAtStart() const { return selectAtStart_; }
     bool settingsAtStart() const { return settingsAtStart_; }
     QString settingsTabAtStart() const { return settingsTabAtStart_; }
@@ -93,6 +99,7 @@ public:
     Q_INVOKABLE void setPaused(bool paused);
     Q_INVOKABLE void setQuality(const QString& level);
     Q_INVOKABLE void setFit(const QString& mode);
+    Q_INVOKABLE void setTrayAlpha(int pct);
     Q_INVOKABLE void setMaxFps(int fps);
     Q_INVOKABLE void setPowerCap(const QString& key, int value);
     Q_INVOKABLE void setMonitorFps(const QString& tag, int fps);
@@ -100,7 +107,13 @@ public:
     Q_INVOKABLE void setRotate(bool on);
     Q_INVOKABLE void setRotateInterval(int minutes);
     Q_INVOKABLE void setRotateScope(const QString& monitor);
+    // The tray's 上一张/下一张: asks the renderer to move its rotation pointer by one. It owns the
+    // pool and the index, so this window never has to guess which wallpaper comes next.
+    Q_INVOKABLE void stepWallpaper(int delta);
     Q_INVOKABLE void addImageFile();
+    // A second entry, not a replacement: picking one file stays the way to add a single
+    // picture, and this one queues every supported file in a directory.
+    Q_INVOKABLE void addImageFolder();
     // Removes the copy the import made under Wallpapers\local_NN; the renderer refuses while the
     // package is the one showing on a screen.
     Q_INVOKABLE void deleteImage(const QString& id);
@@ -130,6 +143,7 @@ private:
     bool request(const QString& body, int timeoutMs, Json* out = nullptr);
     void ingest(const Json& status, const Json& list);
     void say(const QString& msg, bool isError);
+    void reportStep();
 public:
     void setSelectAtStart(const QString& id) { selectAtStart_ = id; }
     void setSettingsAtStart(bool on) { settingsAtStart_ = on; }
@@ -147,9 +161,16 @@ private:
     QVariantList monitors_, catalog_, caps_;
     QString quality_, host_, root_, logPath_;
     QString imageFit_ = QStringLiteral("fill");
+    int trayAlpha_ = 0;
     bool qualityIsGlobal_ = false, paused_ = false, autostart_ = false;
     bool rotateOn_ = false;
     int rotateMin_ = 60, rotateNext_ = 0;
+    QString showingId_, showingName_;
+    // A tray step waiting to show up on screen: the delta that was asked for, the wallpaper it was
+    // asked from, and the moment the wait stops being believable. 0 when nothing is outstanding.
+    int stepDelta_ = 0;
+    QString stepFromId_;
+    qint64 stepWaitMs_ = 0;
     QStringList favorites_;
     QString selectAtStart_;
     bool settingsAtStart_ = false;

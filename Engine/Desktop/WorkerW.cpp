@@ -140,6 +140,26 @@ bool WorkerW::LocateLayer() {
     }
 
     if (defViewOwner == host_.progman) {
+        // On this build the layer that 0x052C builds is a *child* of Progman, not a top-level sibling,
+        // so the walk above cannot see it. Parenting straight into Progman instead - what this function
+        // used to do - puts our surface under the icon host, which paints the system wallpaper right on
+        // top of us: the renderer keeps drawing frames and the screen keeps showing the desktop photo.
+        // Children come out top-down, so the ones after DefView are below the icons: that is where a
+        // wallpaper layer belongs.
+        bool pastIcons = false;
+        for (HWND c = GetWindow(defViewOwner, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
+            if (c == host_.defView) { pastIcons = true; continue; }
+            if (!pastIcons || ClassOf(c) != "WorkerW") continue;
+            host_.parent = c;
+            host_.method = HostMethod::WorkerWBelowIcons;
+            host_.detail = std::format("WorkerW is a Progman child 0x{:X}, below DefView in z-order",
+                                        (uintptr_t)c);
+            Info(MOD, "wallpaper layer: {}", host_.detail);
+            return true;
+        }
+    }
+
+    if (defViewOwner == host_.progman) {
         // Explorer did not build a WorkerW: parent into Progman itself and keep our windows at the
         // bottom of its child list so the icon sibling still paints and receives clicks above us.
         host_.parent = host_.progman;

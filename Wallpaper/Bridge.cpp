@@ -55,16 +55,19 @@ const Entry kStrings[] = {
     {"auto_rotate", "自动更换", "Auto rotate"},
     {"categories", "壁纸分类", "Categories"},
     {"all", "全部", "All"},
-    {"search_placeholder", "搜索壁纸、分类…", "Search wallpapers, categories…"},
+    {"search_placeholder", "搜索壁纸、分类", "Search wallpapers, categories"},
     {"set_as_wallpaper", "设为壁纸", "Set as wallpaper"},
     {"apply_mode", "应用方式", "Apply mode"},
-    {"mode_current", "设为当前桌面壁纸", "Set on the current desktop"},
-    {"mode_all", "应用到所有显示器", "Apply to every monitor"},
-    {"mode_random", "随机切换（自动更换）", "Rotate automatically"},
+    {"mode_current", "设为壁纸", "Set as wallpaper"},
+    {"mode_all", "所有显示器", "All monitors"},
+    {"mode_random", "随机切换", "Random"},
     {"interval", "切换间隔", "Interval"},
     {"enable_auto_rotate", "启用自动更换", "Enable auto rotate"},
     {"next_switch", "下次切换", "Next switch"},
-    {"add_image", "添加本地图片", "Add a local image"},
+    {"add_image", "添加本地壁纸", "Add a local wallpaper"},
+    {"add_folder", "选择文件夹", "Choose a folder"},
+    {"folder_queued", "已排入导入队列", "queued for import"},
+    {"folder_empty", "这个文件夹里没有可用的图片或视频", "no pictures or videos in that folder"},
     {"added_image", "已添加", "Added"},
     {"generated", "着色器生成", "generated"},
     {"settings", "设置", "Settings"},
@@ -73,7 +76,7 @@ const Entry kStrings[] = {
     {"renderer_section", "渲染器", "Renderer"},
     {"performance", "性能与功耗", "Performance & power"},
     {"back", "返回", "Back"},
-    {"app_title", "SmartWallpaper 壁纸设置", "SmartWallpaper settings"},
+    {"app_title", "Wallpaper 壁纸设置", "Wallpaper settings"},
     {"subtitle", "渲染器通过命名管道控制，关掉本窗口不影响壁纸", "The renderer is driven over a named pipe; closing this window leaves the wallpaper running"},
     {"lang", "语言", "Language"},
     {"renderer", "渲染器", "Renderer"},
@@ -98,13 +101,12 @@ const Entry kStrings[] = {
     {"quality", "画质档", "Quality"},
     {"quality_package", "跟随壁纸", "Per wallpaper"},
     {"image_fit", "壁纸铺展", "Wallpaper fit"},
-    {"image_fit_hint", "只影响图片壁纸（本地图片）；程序化壁纸按屏幕尺寸生成画面",
-     "Applies to image wallpapers (local images); generated ones draw at the screen's own size"},
     {"fit_fill", "裁剪填充", "Fill (crop)"},
     {"fit_fit", "适应", "Fit"},
     {"fit_stretch", "拉伸", "Stretch"},
     {"fit_center", "居中", "Center"},
     {"fit_tile", "平铺", "Tile"},
+    {"tray_alpha", "任务栏透明度", "Taskbar transparency"},
     {"state", "状态", "State"},
     {"measured", "实测帧率", "Measured"},
     {"effective", "允许帧率", "Allowed"},
@@ -157,6 +159,12 @@ const Entry kStrings[] = {
     {"win_min", "最小化", "Minimize"},
     {"win_max", "最大化", "Maximize"},
     {"win_restore", "还原", "Restore"},
+    // The tray menu. Closing the window only hides it now, so these are the commands that have to
+    // work without it; 上一张/下一张 reuse "prev"/"next" above so both say the same thing.
+    {"tray_quit", "退出", "Quit"},
+    {"tray_auto_play", "自动播放", "Auto play"},
+    {"tray_stop_play", "停止播放", "Stop playing"},
+    {"tray_hint", "已退到托盘，壁纸继续在放；点托盘图标就能再打开", "Hidden to the tray - the wallpaper keeps playing. Click the tray icon to open this window again."},
 };
 
 QVariant toVariant(const Json& j) {
@@ -259,7 +267,7 @@ QStringList Bridge::qualityLevels() const {
 }
 
 // The order is the number the shaders branch on (Contract.hlsl, uPerf.w); adding one here means
-// adding a case in Image.hlsl and an Engine/Wallpaper/WallpaperManager.hpp enum member, in order.
+// adding a case in Image.hlsl and an Engine/Packages/WallpaperManager.hpp enum member, in order.
 QStringList Bridge::fitLevels() const { return {"fill", "fit", "stretch", "center", "tile"}; }
 
 QString Bridge::t(const QString& key) const {
@@ -325,6 +333,7 @@ void Bridge::refresh() {
             emit stateChanged();
         }
         if (!connected_ && timer_->interval() != 2000) timer_->start(2000);
+        reportStep();   // a renderer that went away mid-step must not leave the wait armed
         return;
     }
     if (!connected_ || timer_->interval() != 1000) timer_->start(1000);
@@ -332,6 +341,7 @@ void Bridge::refresh() {
     connected_ = true;
     ingest(status, list);
     emit stateChanged();
+    reportStep();
 }
 
 void Bridge::ingest(const Json& status, const Json& list) {
@@ -360,6 +370,7 @@ void Bridge::ingest(const Json& status, const Json& list) {
     quality_ = qualityIsGlobal_ ? QString::fromStdString(status.strOr("quality", "high"))
                                 : QStringLiteral("package");
     imageFit_ = QString::fromStdString(status.strOr("image_fit", "fill"));
+    trayAlpha_ = status.intOr("tray_alpha", 0);
     if (const Json* p = status.find("process"); p && p->isObject()) {
         cpu_ = p->numOr("cpu_percent");
         ws_ = p->numOr("working_set_mb");
@@ -386,23 +397,44 @@ void Bridge::ingest(const Json& status, const Json& list) {
         }
     }
 
+    // What this window acts on: the screen the target selector points at, or the first one when the
+    // target is "all". The tray's tooltip and its step toast both name this.
+    showingId_.clear();
+    showingName_.clear();
+    for (auto& v : monitors_) {
+        const QVariantMap row = v.toMap();
+        if (target_ != "all" && !target_.isEmpty() && row.value("tag").toString() != target_) continue;
+        showingId_ = row.value("wallpaper").toString();
+        showingName_ = row.value("wallpaperName").toString();
+        break;
+    }
+
     catalog_.clear();
     // The catalog comes from status, not list: only status carries the preview file paths.
     if (const Json* c = status.find("catalog"); c && c->isArray()) {
         for (auto& e : c->items()) {
             QVariantMap row;
+            // Rebuilt thumbnails have to replace the bytes this window already loaded, and Qt's image
+            // cache is keyed by URL - so the URL carries the file's own write time. Without this a
+            // window that was open while the renderer rebuilt a card keeps showing the old picture
+            // (measured: a card fixed at 11:39 still displayed the green picture from 11:31).
+            const long long stamp = e.find("thumb_ms") ? e.find("thumb_ms")->asNumber() : 0.0;
             for (auto& kv : e.members()) {
                 const QVariant v = toVariant(kv.second);
-                if (kv.first == "thumb" || kv.first == "thumb_large")
-                    row.insert(QString::fromStdString(kv.first),
-                               QUrl::fromLocalFile(QDir::fromNativeSeparators(v.toString())).toString());
-                else
+                if (kv.first == "thumb" || kv.first == "thumb_large") {
+                    QString url = QUrl::fromLocalFile(QDir::fromNativeSeparators(v.toString())).toString();
+                    if (stamp > 0) url += QStringLiteral("?v=%1").arg(stamp);
+                    row.insert(QString::fromStdString(kv.first), url);
+                } else
                     row.insert(QString::fromStdString(kv.first), v);
             }
             if (const Json* fr = e.find("frames"); fr && fr->isArray()) {
                 QStringList urls;
-                for (auto& f : fr->items())
-                    urls << QUrl::fromLocalFile(QDir::fromNativeSeparators(QString::fromStdString(f.asString()))).toString();
+                for (auto& f : fr->items()) {
+                    QString url = QUrl::fromLocalFile(QDir::fromNativeSeparators(QString::fromStdString(f.asString()))).toString();
+                    if (stamp > 0) url += QStringLiteral("?v=%1").arg(stamp);
+                    urls << url;
+                }
                 row.insert("frameUrls", urls);
             }
             catalog_.push_back(row);
@@ -483,6 +515,17 @@ void Bridge::setFit(const QString& mode) {
     refresh();
 }
 
+void Bridge::setTrayAlpha(int pct) {
+    Json out;
+    const int clamped = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+    request(std::format(R"({{"cmd":"taskbar","arg":"{}"}})", clamped).c_str(), 1500, &out);
+    // Echo the value rather than polling: the request is blocking, and this arrives from a drag.
+    // The once-a-second snapshot still reads tray_alpha back, so a renderer that refused would show
+    // up on the next tick.
+    trayAlpha_ = clamped;
+    emit stateChanged();
+}
+
 void Bridge::setMaxFps(int fps) {
     Json out;
     std::string body = std::format(R"({{"cmd":"fps","arg":"{}"}})", fps);
@@ -545,18 +588,77 @@ void Bridge::setRotateScope(const QString& monitor) {
     refresh();
 }
 
+// The tray's 上一张/下一张. The renderer owns the pool and the pointer, so this window only asks for
+// one step. The pipe answers "queued" before anything has been drawn and a switch costs a shader
+// compile, so the wallpaper this actually landed on is read out of a later snapshot - reportStep().
+void Bridge::stepWallpaper(int delta) {
+    if (!connected_) {
+        say(t("need_renderer"), true);
+        return;
+    }
+    stepFromId_ = showingId_;
+    stepDelta_ = delta;
+    stepWaitMs_ = QDateTime::currentMSecsSinceEpoch() + 4000;
+    Json out;
+    request(std::format(R"({{"cmd":"rotate","arg":"{}"}})", delta < 0 ? "prev" : "next").c_str(), 1500, &out);
+    refresh();
+}
+
+void Bridge::reportStep() {
+    if (stepDelta_ == 0) return;
+    const QString what = t(stepDelta_ > 0 ? "next" : "prev");
+    if (!showingId_.isEmpty() && showingId_ != stepFromId_) {
+        stepDelta_ = 0;
+        say(what + ": " + (showingName_.isEmpty() ? showingId_ : showingName_), false);
+    } else if (QDateTime::currentMSecsSinceEpoch() > stepWaitMs_) {
+        stepDelta_ = 0;
+        say(t("failed") + ": " + what, true);
+    }
+}
+
 void Bridge::addImageFile() {
     const QString file = QFileDialog::getOpenFileName(
         nullptr, t("add_image"), QDir::homePath(),
-        "Images (*.png *.jpg *.jpeg *.bmp *.webp *.tiff)");
+        "Images and video (*.png *.jpg *.jpeg *.bmp *.webp *.tiff *.mp4)");
     if (file.isEmpty()) return;
+    // One picker for both kinds, but two different packages: addimage hands the file to WIC, which
+    // answers "not a decodable image" for a clip, so the extension decides which command to send.
+    const bool video = QFileInfo(file).suffix().compare("mp4", Qt::CaseInsensitive) == 0;
     Json out;
-    std::string body = std::format(R"({{"cmd":"addimage","arg":"{}"}})", file.toStdString());
+    std::string body = std::format(R"({{"cmd":"{}","arg":"{}"}})", video ? "addvideo" : "addimage",
+                                   file.toStdString());
     if (!request(body.c_str(), 8000, &out) || !out.boolOr("ok")) {
         say(t("failed") + ": " + QFileInfo(file).fileName(), true);
         return;
     }
     say(t("added_image") + ": " + QFileInfo(file).fileName(), false);
+    refresh();
+}
+
+void Bridge::addImageFolder() {
+    const QString dir = QFileDialog::getExistingDirectory(nullptr, t("add_folder"), QDir::homePath());
+    if (dir.isEmpty()) return;
+    static const QStringList imgExt { "png", "jpg", "jpeg", "bmp", "webp", "tiff" };
+    static const QStringList vidExt { "mp4" };
+    QDir d(dir);
+    const QFileInfoList entries = d.entryInfoList(QDir::Files, QDir::Name);
+    int queued = 0;
+    // Each of these answers as soon as the renderer has taken the command, so the window never waits
+    // on the import itself - the copies and their pictures appear as the render loop gets to them.
+    for (const QFileInfo& f : entries) {
+        const QString suffix = f.suffix().toLower();
+        const bool isVideo = vidExt.contains(suffix);
+        if (!isVideo && !imgExt.contains(suffix)) continue;
+        Json out;
+        const std::string body = std::format(R"({{"cmd":"{}","arg":"{}"}})", isVideo ? "addvideo" : "addimage",
+                                             f.absoluteFilePath().toStdString());
+        if (request(body.c_str(), 4000, &out) && out.boolOr("ok")) ++queued;
+    }
+    if (!queued) {
+        say(t("folder_empty") + QStringLiteral(": ") + d.dirName(), true);
+        return;
+    }
+    say(QStringLiteral("%1 %2").arg(queued).arg(t("folder_queued")), false);
     refresh();
 }
 
@@ -595,6 +697,10 @@ void Bridge::reload() {
 
 void Bridge::showPreview(const QString& id) {
     if (id.isEmpty()) return;
+    // A window sitting in the tray must not keep the renderer drawing a second pass nobody can see.
+    // Item.visible does not follow the window's, so the carousel timer keeps re-aiming the preview
+    // after a hide - this is the one gate that catches every caller.
+    if (chromeHwnd_ && !IsWindowVisible(reinterpret_cast<HWND>(chromeHwnd_))) return;
     if (previewId_ != id) {
         previewId_ = id;
         previewBeatMs_ = 0;   // a new wallpaper asks for a beat straight away

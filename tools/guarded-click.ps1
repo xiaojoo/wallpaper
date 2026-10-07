@@ -4,7 +4,7 @@
 # ASCII only: PowerShell 5.1 reads .ps1 as GBK.
 param(
     [string]$Pts = '1000,476',
-    [string]$Title = 'SmartWallpaper',
+    [string]$Title = 'Wallpaper',
     [string]$Class = 'Qt6112QWindowIcon',
     [string]$Out = '',
     [switch]$Topmost,

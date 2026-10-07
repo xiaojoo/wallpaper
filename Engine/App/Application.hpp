@@ -4,14 +4,15 @@
 #include "Engine/App/Tray.hpp"
 #include "Engine/Desktop/DesktopWindow.hpp"
 #include "Engine/Desktop/MonitorManager.hpp"
+#include "Engine/Desktop/TrayTransparency.hpp"
 #include "Engine/Desktop/WorkerW.hpp"
 #include "Engine/Graphics/D3D11Device.hpp"
 #include "Engine/Graphics/D3D11Renderer.hpp"
 #include "Engine/Performance/FPSController.hpp"
 #include "Engine/Performance/PowerManager.hpp"
-#include "Engine/Wallpaper/WallpaperInstance.hpp"
-#include "Engine/Wallpaper/Thumbnailer.hpp"
-#include "Engine/Wallpaper/WallpaperManager.hpp"
+#include "Engine/Packages/WallpaperInstance.hpp"
+#include "Engine/Packages/Thumbnailer.hpp"
+#include "Engine/Packages/WallpaperManager.hpp"
 #include <atomic>
 #include <deque>
 #include <map>
@@ -60,6 +61,11 @@ private:
         std::string error;
         UINT drawErrors = 0;
         double lastSampleT = -1.0;
+        // The simulation step handed to the shader: the time that actually passed between two draws of
+        // this slot, plus the value last given out, which is what makes "did the cap change the speed"
+        // readable from the pipe instead of something to eyeball on the desktop.
+        double lastDrawT = -1.0;
+        float lastDelta = 0.f;
         unsigned long long lastSample = 0;
         unsigned changedSamples_ = 0, staticSamples_ = 0;
         // Particle wallpapers get a second, independent proof: the corner can be static while the
@@ -68,6 +74,14 @@ private:
         unsigned particleMovedSamples_ = 0, particleStaticSamples_ = 0;
         unsigned particleOutOfBounds_ = 0;
         bool visible = true;
+        // A power state has to hold this long before it is allowed to move the frame budget. The raw
+        // classifier follows every foreground-window change, and each step 60 -> 30 -> 15 -> 60 changes
+        // how much motion one drawn frame carries, which is what reads as a hitch on screen. Measured
+        // without this: 24 state changes in 280 s, six of them within two seconds of each other.
+        static constexpr ULONGLONG kStateHoldMs = 1000;
+        PowerState candState = PowerState::Desktop;
+        ULONGLONG candSinceMs = 0;
+        unsigned stateSwitches_ = 0;   // counted for status: how often the budget actually moved
     };
 
     struct Queued {
@@ -125,6 +139,8 @@ private:
     void StopPreview(const char* why);
     void DrawPreview(double nowSeconds);
     void TickRotation(ULONGLONG nowMs);
+    // Moves the rotation pointer by delta and shows the result. Returns the id that got on screen.
+    std::string RotateStep(int delta);
     static bool IsAutostartEnabled(std::string& error);
     static bool SetAutostart(bool on, std::string& error);
     std::string DoCommandLocal(const std::string& action, const std::string& arg, const std::string& arg2);
@@ -137,6 +153,7 @@ private:
     D3D11Renderer renderer_;
     MonitorManager monitors_;
     WorkerW desktop_;
+    TrayTransparency trayFx_;
     PowerManager power_;
     FPSController pacer_;
     Tray tray_;
@@ -171,6 +188,7 @@ private:
     ULONGLONG startedMs_ = 0;
     ULONGLONG lastSnapshotMs_ = 0;
     ULONGLONG lastHostCheckMs_ = 0;
+    ULONGLONG lastTrayCheckMs_ = 0;
     POINT cursorPx_{};
     bool committed_ = false;
     unsigned loopIters_ = 0, sawDrawStage_ = 0, drewTotal_ = 0;

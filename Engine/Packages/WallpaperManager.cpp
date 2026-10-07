@@ -1,4 +1,4 @@
-#include "Engine/Wallpaper/WallpaperManager.hpp"
+#include "Engine/Packages/WallpaperManager.hpp"
 #include "Engine/Desktop/MonitorManager.hpp"
 #include "Engine/Core/Log.hpp"
 
@@ -75,6 +75,9 @@ bool WallpaperManager::Load(const std::wstring& exeDir, std::string& error) {
     s_.useGlobalQuality = r.find("quality") ? r.find("quality")->asString() != "package" : false;
     s_.globalQuality = ParseQuality(r.strOr("quality", "high"), Quality::High);
     s_.imageFit = ParseImageFit(r.strOr("image_fit", "fill"));
+    s_.trayAlpha = r.find("tray_alpha") ? r.find("tray_alpha")->asInt(0) : 0;
+    if (s_.trayAlpha < 0) s_.trayAlpha = 0;
+    if (s_.trayAlpha > 100) s_.trayAlpha = 100;
     if (const Json* p = r.find("power"); p && p->isObject()) s_.power = *p;
     s_.assignments.clear();
     if (const Json* a = r.find("monitors"); a && a->isArray()) {
@@ -100,6 +103,7 @@ bool WallpaperManager::Save(std::string& error) {
     r.set("max_fps", Json::Of(s_.globalMaxFps));
     r.set("quality", Json::Of(s_.useGlobalQuality ? QualityName(s_.globalQuality) : std::string("package")));
     r.set("image_fit", Json::Of(std::string(ImageFitName(s_.imageFit))));
+    r.set("tray_alpha", Json::Of(s_.trayAlpha));
     r.set("power", s_.power.isObject() ? s_.power : Json::Object());
     Json mons = Json::Array();
     for (auto& a : s_.assignments) {
@@ -204,6 +208,10 @@ void WallpaperManager::SetGlobalQuality(const std::string& q) {
 void WallpaperManager::SetGlobalMaxFps(int fps) { s_.globalMaxFps = fps < 0 ? 0 : fps; }
 
 void WallpaperManager::SetImageFit(const std::string& f) { s_.imageFit = ParseImageFit(f, s_.imageFit); }
+
+void WallpaperManager::SetTrayAlpha(int pct) {
+    s_.trayAlpha = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+}
 
 Json WallpaperManager::StatusJson() const {
     Json r = Json::Object();

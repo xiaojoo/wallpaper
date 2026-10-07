@@ -1,0 +1,20 @@
+{
+  "id": "neonfall",
+  "category": "粒子光斑",
+  "name": "Neon Fall",
+  "renderer": "d3d11",
+  "fps": 60,
+  "quality": "medium",
+  "shader": "main.hlsl",
+  "textures": [],
+  "params": {
+    "fall_speed": 0.14,
+    "streaks": 9,
+    "tail_len": 2.4,
+    "head_glow": 1.7,
+    "bokeh": 0.45,
+    "haze": 0.5,
+    "parallax": 0.06,
+    "octaves": 4
+  }
+}

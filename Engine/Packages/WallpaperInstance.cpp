@@ -1,5 +1,6 @@
-#include "Engine/Wallpaper/WallpaperInstance.hpp"
+#include "Engine/Packages/WallpaperInstance.hpp"
 #include "Engine/Graphics/D3D11Device.hpp"
+#include "Engine/Graphics/VideoPlayer.hpp"
 #include "Engine/Core/Log.hpp"
 
 #include <algorithm>
@@ -8,17 +9,40 @@
 namespace sw {
 static constexpr const char* MOD = "winst";
 
+WallpaperInstance::~WallpaperInstance() = default;
+
+void WallpaperInstance::SetMediaActive(bool active) {
+    if (video_) video_->SetActive(active);
+}
+
 bool WallpaperInstance::Prepare(const std::wstring& rootDir, const WallpaperPackage& pkg, D3D11Device& dev,
                                 std::string& error) {
     namespace fs = std::filesystem;
     pkg_ = pkg;
 
-    std::wstring shaderPath = pkg_.dir() + L"\\" + pkg_.shaderFile();
+    // A video wallpaper puts its decoded frame's two planes in t0 and t1, so it cannot also list
+    // textures: the shader would sample the picture it was told to ignore and the fault would show up
+    // as a wrong image rather than as an error.
+    if (pkg_.isVideo() && !pkg_.textures().empty()) {
+        error = pkg_.id() + ": a video wallpaper must not list textures, the video owns t0 and t1";
+        return false;
+    }
+
+    // A decoded frame is two planes, and only Video.hlsl reads them. The two clips imported before
+    // that shader existed still carry "Image.hlsl" in their manifests, so the engine decides this one
+    // rather than letting a stale manifest sample luma as if it were a whole picture.
+    std::wstring shaderFile = pkg_.shaderFile();
+    if (pkg_.isVideo() && shaderFile != L"Video.hlsl") {
+        Warn(MOD, "{}: manifest asks for {}, but a video wallpaper is drawn by Video.hlsl", pkg_.id(),
+             ToUtf8(shaderFile));
+        shaderFile = L"Video.hlsl";
+    }
+    std::wstring shaderPath = pkg_.dir() + L"\\" + shaderFile;
     std::wstring sharedDir = rootDir + L"\\Shaders";
     if (!fs::exists(shaderPath)) {
-        std::wstring alt = sharedDir + L"\\" + pkg_.shaderFile();
+        std::wstring alt = sharedDir + L"\\" + shaderFile;
         if (!fs::exists(alt)) {
-            error = "shader " + ToUtf8(pkg_.shaderFile()) + " not found in " + ToUtf8(pkg_.dir()) + " or Shaders/";
+            error = "shader " + ToUtf8(shaderFile) + " not found in " + ToUtf8(pkg_.dir()) + " or Shaders/";
             return false;
         }
         shaderPath = alt;
@@ -71,6 +95,19 @@ bool WallpaperInstance::Prepare(const std::wstring& rootDir, const WallpaperPack
         Info(MOD, "{}: texture {} -> t{} ({}x{})", pkg_.id(), t.name, srvCount_ - 1, t.tex.width(), t.tex.height());
     }
 
+    // The decoder runs on its own thread from here on; the frame is picked up in MakeArgs, which every
+    // drawing path goes through.
+    if (pkg_.isVideo()) {
+        video_ = std::make_unique<VideoPlayer>();
+        const std::wstring path = pkg_.dir() + L"\\" + pkg_.videoFile();
+        std::string verr;
+        if (!video_->Open(dev.dev.Get(), path, pkg_.videoLoop(), verr)) {
+            error = pkg_.id() + ": " + verr;
+            video_.reset();
+            return false;
+        }
+    }
+
     if (pkg_.hasParticles()) {
         const UINT wanted = pkg_.particleCount();
         const UINT count = std::min(wanted, ParticleSystem::MaxCount);
@@ -95,16 +132,26 @@ bool WallpaperInstance::Prepare(const std::wstring& rootDir, const WallpaperPack
         }
     }
 
-    Info(MOD, "{} prepared: {} param byte(s), {} texture(s){}", pkg_.id(), shader_.paramBytes(), srvCount_,
-         pkg_.hasParticles() ? std::format(", {} particles", particles_.count()) : std::string());
+    Info(MOD, "{} prepared: {} param byte(s), {} texture(s){}{}", pkg_.id(), shader_.paramBytes(), srvCount_,
+         pkg_.hasParticles() ? std::format(", {} particles", particles_.count()) : std::string(),
+         pkg_.isVideo() ? std::format(", video {} via {}", ToUtf8(pkg_.videoFile()), video_->note()) : std::string());
     return true;
 }
 
-DrawArgs WallpaperInstance::MakeArgs(const FrameCB& frame) {
+DrawArgs WallpaperInstance::MakeArgs(const FrameCB& frame, ID3D11DeviceContext* ctx) {
     DrawArgs a;
     a.frame = frame;
     a.vs = shader_.vs();
     a.ps = shader_.ps();
+    if (video_ && ctx) {
+        // Until the decoder's first frame lands there is nothing to bind, and the wallpaper draws black
+        // for that moment rather than showing the previous wallpaper's texture.
+        if (ID3D11ShaderResourceView* y = video_->FrameY(ctx)) {
+            srvs_[0] = y;
+            srvs_[1] = video_->FrameUV();
+            srvCount_ = 2;
+        }
+    }
     a.srvCount = srvCount_;
     for (UINT i = 0; i < srvCount_; ++i) a.srvs[i] = srvs_[i];
     a.params = paramStore_.data();

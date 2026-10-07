@@ -1,0 +1,22 @@
+{
+  "id": "binarydrift",
+  "category": "粒子光斑",
+  "name": "Light Drift",
+  "renderer": "d3d11",
+  "fps": 60,
+  "quality": "medium",
+  "shader": "main.hlsl",
+  "textures": [],
+  "params": {
+    "fall_speed": 0.1,
+    "density": 13,
+    "brightness": 1.1,
+    "fade_height": 1.6,
+    "haze": 0.35,
+    "blur_near": 0.3,
+    "depth_spread": 1.0,
+    "parallax": 0.05,
+    "mote_size": 0.055,
+    "octaves": 4
+  }
+}

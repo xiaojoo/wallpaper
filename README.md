@@ -1,8 +1,8 @@
-# SmartWallpaper — Windows 动态壁纸引擎 V0.1
+# Wallpaper — Windows 动态壁纸引擎 V0.1
 
 按方案落地：`C++20 + Win32 + Direct3D 11 + DirectComposition + HLSL`，渲染引擎与设置 UI 分离。
-渲染器 V0.1 已跑通并量过；Qt/QML 设置界面、GPU 粒子已做；视频、3D、后处理还没做
-（见文末缺点与 `BACKLOG.md`）。
+渲染器 V0.1 已跑通并量过；Qt/QML 设置界面、GPU 粒子已做；视频壁纸能播了（H.264，只有命令行入口，
+设置界面还没有）、3D 与后处理还没做（见文末缺点与 `BACKLOG.md`）。
 
 ## 编译
 
@@ -30,12 +30,28 @@ WallpaperRenderer.exe --ctl quality battery
 WallpaperRenderer.exe --ctl fps 30
 WallpaperRenderer.exe --ctl fps 30 M0            只给这一块屏设上限
 WallpaperRenderer.exe --ctl rotate on | off | interval 30
+WallpaperRenderer.exe --ctl rotate next | prev   手动走一张（走的是 rotate.pool，池空时用全部壁纸）
 WallpaperRenderer.exe --ctl autostart on | off   登录自启（HKCU Run 单值）
 WallpaperRenderer.exe --ctl addimage "D:\pics\a.jpg"   把一张图片变成壁纸包
 ```
 
 控制通道是命名管道 `\\.\pipe\SmartWallpaper.Renderer`，一行一个 JSON。以后 Qt 设置界面走同一条管道，
-不需要改渲染器。托盘图标也有同一套菜单（壁纸 / 显示器 / 质量 / 最大帧率 / 暂停 / 重载 / 退出）。
+不需要改渲染器。两处托盘图标：渲染器自己那颗（`config.json` 的 `tray`，默认关）带壁纸/显示器/质量/最大帧率/
+暂停/重载/退出；设置窗那颗带 退出 / 下一张 / 上一张 / 自动播放 / 停止播放，见下节。
+
+**程序名与图标**（2026-10-07）：给人看的名字统一成 **Wallpaper** —— 设置窗可执行文件由 `SmartWallpaper.exe`
+改名 `Wallpaper.exe`（CMake 目标同名），窗口标题、两处托盘 tooltip、吐司标题、启动失败弹框、`--help`
+横幅、状态提示前缀一起改。**没改的是两个进程之间认彼此的标识**：管道 `SmartWallpaper.Renderer`、互斥体
+`Local\SmartWallpaper.Renderer`、预览共享段 `Local\SmartWallpaper.Preview`、自启注册表值
+`SmartWallpaper.Renderer`、`QSettings` 的 `SmartWallpaper/ui.ini`、以及三个窗口类名。
+理由写在 `tools/rename-app.py` 头部：**动 QSettings 那一对，下次启动语言/收藏/目标屏会静默回到默认；
+动管道或互斥体，第二个实例就能起来抢连接**（这两件真要做是"改名 + 迁移"两步，不是顺手替换）。
+图标是 `tools/make-icon.py` 画出来的（不是手描的资产，`--ico 3` 一条命令重生成 `resources/Wallpaper.ico`，
+16/20/24/32/40/48/64/128/256 九帧），经 `resources/app.rc` 嵌进两个 exe；设置窗的托盘和任务栏读 exe 旁边
+那份 `.ico`，渲染器的托盘从自己的资源里 `MAKEINTRESOURCEW(1)` 取。判据是**把图标从编译产物里取回来再看**
+（`tools/exe-icon.ps1` → `build/icons/from-exe.png`，两个 exe 都回 32×32 的蓝底 W），以及真实任务栏
+"显示隐藏的图标"飞板里那颗 16 px 也认得出（`build/shots/flyout-z.png`）。选这张的理由就是 16 px：
+另外两版（屏幕框+山+太阳、带揭角的壁纸）在 16 px 塌成"深蓝块加一个白点"，山形全丢。
 
 日志：`logs/renderer-<pid>.log`；配置：exe 同目录 `config.json`（首次运行自动写出）。
 
@@ -46,9 +62,9 @@ cmake -S . -B bld -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH=D:/Progr
 cmake --build bld --config RelWithDebInfo
 bash tools/run-ui.sh                  # 暂存 qml/ 并启动（改 QML 不用重编）
 bash tools/run-ui.sh --with-renderer  # 顺便把渲染器起来
-SmartWallpaper.exe --select embers    # 直接选中一张，让轮播停在它上面
-SmartWallpaper.exe --settings         # 直接打开设置对话框
-SmartWallpaper.exe --settings-tab monitors   # 打开并停在某一类（general/monitors/power/wallpapers/renderer）
+Wallpaper.exe --select embers    # 直接选中一张，让轮播停在它上面
+Wallpaper.exe --settings         # 直接打开设置对话框
+Wallpaper.exe --settings-tab monitors   # 打开并停在某一类（general/monitors/power/wallpapers/renderer）
 ```
 
 **设置窗现在是无边框的**（"壁纸和整个窗口有个很小的间隙，可以处理掉吗" → 选了"重绘"这一条）：
@@ -66,7 +82,20 @@ SmartWallpaper.exe --settings-tab monitors   # 打开并停在某一类（genera
 **八块 6 px 的 `Edge` 区**负责改尺寸（`startSystemResize`，无边框后这是唯一的路子）。
 三颗都用 UIA 按名字真点过：最大化 1360x860 → **3840x2112**（`zoomed=True`，让开任务栏）、
 还原 → 回到 1240,626 1360x860、最小化 → `iconic=True`（矩形变 -32000,-32000 是系统的最小化位置）、
-关闭 → 进程退出。**拖动和八块 Edge 没能机器验**：合成鼠标驱动不了系统拖动/缩放，要你上手。
+关闭 → **退到托盘**：`WM_CLOSE` 后进程活着、窗口 `visible=True→False`、`SW_SHOW` 按原尺寸回来。
+**拖动和八块 Edge 没能机器验**：合成鼠标驱动不了系统拖动/缩放，要你上手。
+
+**点 ✕ 不再退出设置窗**（`TrayMenu`：`QEvent::Close` 被 ignore + `hide()`，`setQuitOnLastWindowClosed(false)`），
+真退出在托盘那颗「退出」上——**它只退设置窗，壁纸继续放**。托盘右键五项：退出 / 下一张 / 上一张 /
+自动播放 / 停止播放（后四项在渲染器没连上时置灰不消失；自动播放/停止播放带一个勾，跟着 `rotate.on` 走，
+和「设置 → 通用 → 启用自动更换」是同一个状态）。图标在 Windows 11 默认落在「显示隐藏的图标」飞板里，
+要常驻就自己把它拖出来。代价：藏起来后轮播定时器还在跑，所以 `Bridge.showPreview()` 按窗口可见性挡掉，
+否则渲染器会一直为看不见的第二遍烧 GPU（实测挡住前 `preview.on` 恒 true、每秒 +30 帧）。
+**2026-10-07 把这条闸从"没退到托盘"扩到"看得见"**：`Main.qml` 里 `root.motionWanted = root.active`，
+设置窗失焦或最小化时第二遍实时预览和 4 秒自动轮播一起停，24 帧切片也不去解码（`heroMotion` 带着这个
+条件，否则焦点一走就白load 22 MB）。实测（`--ctl status` 的 `preview`）：最小化后 `on=true→false`、
+`drew` 9 秒内冻在 3899 不动；用 notepad 抢走焦点（窗口还看得见）`drew` 冻在 4710 达 5 秒；焦点回来
+3 秒内 `on=true` 且 `drew` 恢复前进。
 
 **最大化没有过渡了 —— 他被这一点打回两次，最后发现不是二选一，是三个角色没拆开。**
 先记两条被推翻的说法，别再去试：(1) "Qt 自己算几何造成两段式跳动" —— 改成 `Bridge.showCommand(n)`
@@ -189,6 +218,14 @@ margin **不计进 contentWidth**（Qt 自己打的日志：`width=1236 leftMarg
 气泡一律**朝上**（`Hint.place: "top"`）；
 收藏那颗的气泡一开始画不出来，原因是 `Hint` 挂在 `Icon`（Canvas）里面不渲染，改成 28 px 的 `Item`
 容器装图标 + MouseArea + 气泡就好了。
+**2026-10-07 气泡又被盖掉过一次，这次的原因是绘制顺序**：字幕条和卡片带都在 `heroBox` 里面，而
+`strip` 声明在 `captionBar` **之后**，所以朝上的气泡被卡片带压在下面（他指着右下角「右边的几个图标
+气泡被遮挡了」）。`Hint` 因此从 `Rectangle` 改成 **`Popup`**（挂窗口 overlay，没有任何兄弟能盖它、
+也没有祖先的 `clip` 够得着它），坐标改成 `hovered.mapToItem(parent, …)` —— Popup 的 x/y 是相对它自己
+的 `parent` 的，按窗口坐标算会被推到屏幕外。**量它的仪器有个瞎点**：`tools/capture-window.ps1` 走
+PrintWindow，**不合成 overlay**，拍出来"按钮已悬停、气泡不存在"，害我差点回滚对的改法；判气泡一律用
+`tools/capture-desktop.ps1` 抓真实屏幕区域（三颗实测：`screen-motion.png` 动态预览、`screen-gear.png`
+设置、`screen-winclose.png` 标题栏那颗 `place:"bottom"` 的关闭，全部完整）。
 **设置那颗原来在窗口右下角**（和状态点一排），2026-10-06 他指着右下角说「设置图标放到上一行 收藏图标右边」，
 所以搬进字幕条；搬完用 UIA 按名字"设置"找到它 `Invoke` 了一次，对话框真的开出来（截图 `gear_opens.png`），
 再点对话框右上角 ✕ 收回（`restored.png`，图标退回灰白）。
@@ -196,11 +233,17 @@ margin **不计进 contentWidth**（Qt 自己打的日志：`width=1236 leftMarg
 所以空目录那行文案后面补了同一颗齿轮（`empty_gear2.png`）——两颗齿轮靠 `Bridge.catalog.length` 互斥，
 同屏永远只有一个。这条是用"只改 staged 副本"造出来的空目录夹具拍的，拍完 `cmake -E copy_directory`
 还原并 diff 证明副本 == 源码。
-字幕条本身**从两行并成一行**：名字 + 当前徽章 + 那串元信息 + 三颗按钮。导入的照片文件名长达 52 字符，
+字幕条本身**从两行并成一行**：名字 + 那串元信息 + 三颗按钮。导入的照片文件名长达 52 字符，
 会把元信息挤出条子，所以名字**限宽 300 px、中间省略**（`965d767d2396…a-image.jpeg`）。
+**「正在显示」原来是名字右边那颗蓝底徽章，2026-10-07 摘掉了**，改由「设为壁纸」那颗按钮自己判断：
+同一个条件（`root.inUse(hero)`，这张在任意一屏上正显示），成立时文案换成 `trs("current")`「正在显示」并**置灰**
+（按钮不消失、不位移：两个文案都是 4 个汉字同一字号，左边距锚在 16 px）。
+不留"写着正在显示、点下去却会去设壁纸"的按钮——标签说的和做的事必须是一件。
 **这里不给悬停气泡**——我加了以后他下一条就是「名字不要气泡」，撤掉了；要看完整文件名去
 设置 → 壁纸 的导入预览卡（那里是整名换行、不截断）。
 最宽的一条实测过（Aurora：`正在显示 · 着色器生成 · 画质档: high · 壁纸请求帧率: 60 · 参数: 11`），
+**那句里的「正在显示」现在不在字幕条上了**（徽章摘了），所以这条实测是摘之前的上界、摘之后只会更宽裕，
+限宽 300 px 不动；
 右边四颗的**墨迹**实测 x=1217..1344（四颗格子占 1218..1360，图标 17 px 在 28 px 格子里所以墨迹两头各短 5~6 px），
 没有被挤掉。
 **渲染器状态点的那串数字不再藏在气泡里**（「绿点 把它的气泡信息展开它的左边」→ 下一句
@@ -219,22 +262,46 @@ RowLayout 默认垂直居中，所以自动同线）。改完实测同一张图�
 三个单选钮实测被拉开到相距约 330 px。
 设置入口在左导航底下，点开是浮在页面上的对话框（左边分类、右边一类内容）：**通用**（语言、画质档、
 **壁纸铺展**、启用自动更换、切换间隔、全局帧率上限）、**显示器**（每屏真实帧率/帧时/回读计数 + 本屏上限）、
-**省电**（8 个降功耗档）、**壁纸**（添加图片、重载，下面一排**导入图的预览卡**：150x84 真图 + 文件名整名换行不截断，
-悬停出现角标 ✕，第一下变成红色"确认删除"、3 秒不点就退回，第二下才删 —— 删的是 `Wallpapers\local_NN\` 里
+**省电**（8 个降功耗档）、**壁纸**（添加图片、重载**并排一行**，下面**导入图轮播**：一次一张、占满卡片宽（高 200）、
+两端 ‹ › 换张（**会绕回**，所以两颗永不置灰）、右下角圆点就是位置读数、文件名整名换行不截断，
+悬停出现角标 ✕，第一下变成红色"确认删除"、**3 秒不点就退回**、第二下才删；**换张也会立刻解除待确认**，
+否则你在第 3 张按红了、翻到第 4 张再点就删错东西；它**不自动翻页**，因为这个列表是全窗口唯一会删文件的地方，
+让目标在指针底下自己走等于轮盘赌。删的是 `Wallpapers\local_NN\` 里
 我们复制的那份和它的缩略图/帧图，你磁盘上的原图不动；这张若正被某屏用作壁纸，引擎拒绝并回 `in_use`+屏号，
-UI 提示"先换成别的"）、**渲染器**（桌面层级、CPU、工作集、已运行、
+UI 提示"先换成别的"；卡片下面还有**任务栏透明度**）、**渲染器**（桌面层级、CPU、工作集、已运行、
 开机自启、暂停渲染、启动/退出、打开日志目录）。命令结果条放在分类外面。
 **壁纸铺展**（`config.json` 的 `image_fit`，全局一项）= 裁剪填充 / 适应 / 拉伸 / 居中 / 平铺，
 默认 裁剪填充 就是原来那条 cover 路径。档位数字走 `uPerf.w`（那格本来是 FrameCB 的空 padding），
 所以换档下一帧生效、不重载槽位，`Shaders/Image.hlsl` 按它分支；居中和平铺要按图片**原始像素**排，
 引擎在 Prepare 时把包清单的 width 注进 shader 的 `src_w`（和粒子 `count` 同一手法），清单没宽度的包
 这两档退回裁剪填充而不是被放大到屏幕宽。留边填的是黑，没做可选背景色。**只影响图片壁纸**（程序化
-壁纸按屏幕尺寸生成画面，没有"铺"这件事），所以字段下面写了一行说明。
+壁纸按屏幕尺寸生成画面，没有"铺"这件事）。界面上那行小字说明按他的要求删了（2026-10-07），口径以这一段为准。
 夹具实测：800x800 纯白 + 6px 灰框，导入成一项，在设置窗大图（预览面固定 1280x720）逐档量黑边 ——
 裁剪填充/拉伸/平铺 无黑边，**适应** = 图片 858x860 居中、左右黑边各 220（预测 860/250，Δ2），
 **居中** = 316x316 居中、四周留边（预测 318.5，Δ2.5），**平铺** = 灰框接缝 x 243/560/878/1196
 （间隔 317~318，预测 318.5 = 800px × sizeScale 1/3 折到窗口）。`适应` **第一次量出来是上下黑边**：
 轴算反了（方图在 16:9 画面里该撑 x 却撑了 y），照数字改回 `float2(aspect/sa, 1)` 重测才对上。
+
+**任务栏透明度**（`config.json` 的 `tray_alpha`，设置 → 壁纸 那颗 0–100 滑条，命令 `--ctl taskbar <pct>`，
+执行体 `Engine/Desktop/TrayTransparency.{hpp,cpp}`）。Windows 自己在这件事上只有一个 bit
+（`Personalize\EnableTransparency`），本机实测这个 bit 值多少：开 = 壁纸以 **slope 0.149 R / 0.163 B**
+混进任务栏那条带，关 = 一条恒定 `238,238,238`（sd 0.0）的实心灰条。bit 之外只有三条外部路子，逐条量过
+（`tools/tray-slope.sh` + `tools/tray-band.ps1`，两张纯色夹具 `make-solid.ps1`，判据是
+**壁纸换色时任务栏像素跟着动多少**，不是"看起来变了"——多盖一层不透明色也会"看起来变了"）：
+`DWMWA_SYSTEMBACKDROP_TYPE` 对 `Shell_TrayWnd` **逐位无效**（1/2/3 三档读数与基线完全相同）；
+`ACCENT_POLICY` 只能把 slope **压低**（alpha 0→255 时 0.133→0.022，它是在盖色不是在透）；
+`WS_EX_LAYERED` + `SetLayeredWindowAttributes` 是唯一连续的，所以用了它。
+在冻结的纯色壁纸测试场（壁纸 129、任务栏原样 230.5）上量到的真实规律是**滑条百分比就是混合比例**：
+20/40/60/80/100 实测 0.199/0.399/0.601/0.800/1.008。
+两条硬约束都来自实测，不是猜的：**alpha 绝不能写 0** —— 0 时 `WindowFromPoint` 在任务栏那条带上返回的
+是 `SysListView32` 而不是 `Shell_TrayWnd`，整条任务栏点不动；1 起就正常（1/32/64/128/192/255 全部正常）。
+**样式会被 explorer 自己抹掉** —— 所以 `SetTimer` 每 5 秒补一次，实测把 `WS_EX_LAYERED` 手动摘掉后 2 秒内
+补回并留下 `[trayfx]` 日志。代价记在这里而不是界面上（字段下面那行提示他不要了，2026-10-07）：这条路子淡的是
+**整个窗口**，图标、时钟、Start
+一起淡（tray 段 sd 从 43.5 → 22.4@alpha128 → 8.3@alpha32），超过约 70 就不好读了。
+`pct=0` 是"交回 Windows"，实测移除样式后 exstyle 回到 `0x00000088`、任务栏读数逐位复原。
+未验：本机只有一块屏，`Shell_SecondaryTrayWnd`（副屏那条）走同一个循环但没量过；注销/explorer 重启后的
+自愈没实机走过。
 桌面那一层今天量不了：前台是 3840x2160 的游戏客户端，省电判成 `state=fullscreen`、`cap_fps=0`、
 槽 `frames=0`，**这时抓屏拿到的是上一帧** —— 我照这个抓法先量出"改了铺展桌面没反应"，是量具骗人，
 不是代码；`DrawSlot`（L435）和 `DrawPreview`（L801）两处是同一个 `f.fit` 表达式。
@@ -258,7 +325,7 @@ UI 提示"先换成别的"）、**渲染器**（桌面层级、CPU、工作集�
 **设置窗用的是 `QApplication`，不是 `QGuiApplication`**：壁纸页的"添加本地图片"走 `QFileDialog`（那是
 QWidget），底下只有 QGuiApplication 时点一下**整个进程当场没了**，界面上看着就是"点按钮窗口就关闭了"，
 日志里只留一句 `QWidget: Cannot create a QWidget without QApplication`。判这类症状要先问"进程还在不在"
-（`Get-Process SmartWallpaper`），别只看截图 —— 弹框关了和程序退了在图上是同一张脸。
+（`Get-Process Wallpaper`），别只看截图 —— 弹框关了和程序退了在图上是同一张脸。
 
 **控件形式的两条规矩**：只有两种状态的用左右滑块（`Slide`：启用自动更换、开机自启、暂停渲染），
 三种以上的用一个字段 + 下拉列表（`Choice`：画质档 6 项、切换间隔 5 项），不再一排 chip 摊开。
@@ -429,7 +496,8 @@ Z 序实测（`tools/probe-zorder.ps1`，Progman 子链自上而下）：
 | 拖拽 | 合成输入启动不了 shell 拖拽，**关掉壁纸的对照组同样启动不了** ⇒ 与壁纸无关；这条只能手动拖一下确认 |
 
 降功耗路径（不加 `--no-power`，前台是全屏游戏/窗口时）：状态判定为 `fullscreen`/`covered` →
-`effective_fps=0`，循环 5 次/秒空转等待，CPU 约 0%，日志里 `state_reason` 写明是哪块窗口挡的。
+预算降到 15/24（吸附后 12/24，实测见下节）；只有锁屏和关屏才降到 0 帧，此时循环按 16 ms 一片地
+等待并照常处理消息队列，CPU 约 0%，日志里 `state_reason` 写明是哪块窗口挡的。
 
 **桌面自己的窗口永远不算"遮挡"**：`Progman` 的 style 是 `0x96000000`（带 `WS_POPUP`）、rect 正好
 是整块屏，所以点一下桌面（或按 F5 刷新）会被误判成"全屏应用接管"→ `cap_fps=0` → **壁纸动画直接
@@ -442,6 +510,33 @@ Progman 及其子链 `SHELLDLL_DefView` / `SysListView32` / 壁纸 `WorkerW`）�
 | 点桌面空白处 | `state=fullscreen cap=0`，动画停住 | `state=desktop cap=60`，实测回到 **60.01 FPS** |
 | 打开桌面右键菜单 | 同上 | `desktop cap=60`，实测 55.11 → **59.99** |
 | 桌面按 F5 刷新 | 同上 | `desktop cap=60`，实测 **59.99 FPS** |
+
+### 帧率吸附到整刷新周期（2026-10-07）
+
+60 FPS 打在这块 144 Hz 屏上是 **2.4 个刷新周期/帧**，合成器只能按 2、3、2、3 个周期显示 —— 每帧
+在屏上停 13.9 或 20.8 ms，循环交帧再稳也看得出抖。所以 `FPSController::ConfigureSlot` 现在把预算
+吸附成刷新率的整数因子（`SnapToRefresh`），并且只在所求速率的 75% 范围内找因子，找不到就保持所求
+速率（143 Hz 这种因子只有 11/13 的档，不能为了对齐掉到 11）。实测（`--ctl fps <n>` 逐档，
+`bld/bin/RelWithDebInfo/WallpaperRenderer.exe --ctl status`，同一实例）：
+
+| 所求 | eff | 144/eff（周期/帧） | 实测交付 | `late_frames` |
+|---|---|---|---|---|
+| 60 | 48 | 3.000 | 48.01 | 0 |
+| 50 | 48 | 3.000 | 47.99 | 0 |
+| 40 | 36 | 4.000 | 36.01 | 0 |
+| 30 | 24 | 6.000 | 24.00 | 0 |
+| 20 | 18 | 8.000 | 18.00 | 0 |
+| 15 | 12 | 12.000 | 12.00 | 0 |
+
+`late_frames` 是新加的掉帧计数（间隔超过 1.5 个理想帧时就算一次，预算一变档就归零），它是唯一能
+回答"卡过没有"的表数：`worst_frame_ms` 只记得整个进程史上最坏的一次，实测在 5.6 小时的运行里恒读
+40.70 ms 一动不动，而超过 3 个间隔的缺口被当成空闲丢掉了。
+
+同时改了一条策略：`background`（有窗口压住这块屏、但桌面仍看得见一圈）**不再降档**，默认 30 → 60
+（吸附后 48）。原先它是有窗口时的常态，每次 `desktop 60 ↔ background 30` 都把一帧扛的运动量翻倍/
+减半，一次 5.6 小时运行里预算动了 32 次。现在只有真看不见的 `covered`（24）和 `fullscreen`（15→12）
+降。壁纸包里的着色器没有一处读 `uTargetFps`（`grep` 过 `Shaders/` 和 `Wallpapers/`），所以吸附改的
+只是交帧节奏，不会改动画速度。
 
 ### 粒子（snowfall，`--window --no-power --selftest 20`，3840x2160）
 
@@ -471,7 +566,13 @@ Progman 及其子链 `SHELLDLL_DefView` / `SysListView32` / 壁纸 `WorkerW`）�
    `tools/guarded-click.ps1 -Post` 是同一件事的**不占光标**版本：直接 `PostMessage` 三个鼠标消息给窗口
    自己的队列。桌面被 topmost 的游戏客户端盖住时只有这条路能走（`HWND_TOPMOST` 也压不住它，
    `WindowFromPoint` 会连着两次拒绝发点击 —— 拒得对，那一下会落进他的游戏里）。
-2. **视频壁纸没做**（Media Foundation 通路未写）。图像壁纸已做：`addimage` 建壁纸包 +
+2. **视频壁纸：能播，但只有命令行入口**。`WallpaperRenderer.exe --ctl addvideo "<路径>"` 建包（导入时用 MF
+   探分辨率/帧率/时长写进 `wallpaper.json`），再 `--ctl apply <id> [M0|all]` 上屏；`--ctl video
+   pause|resume|seek <秒>` 是这条 clip 的走带，和全局 `pause`（停整幅壁纸）不是一件事。本机只支持 **H.264**：
+   NVIDIA 没把 NVDEC 注册给 Media Foundation，所以走 `Microsoft H264 Video Decoder MFT` 软解，实测
+   1080p30 满速 ≈16–40% 单核、4K30 满速 ≈43–83%（均值 ≈62% 单核）、工作集 4K ≈873 MB。
+   设置界面的导入按钮/播放控件**一行都没动**，HEVC/VP9/MKV 这类会在打开解码器时才失败而不是在导入时拒绝。
+   矩阵/行序/平面几何的判据和剩下的欠账在 `BACKLOG.md` 第 3 条。图像壁纸已做：`addimage` 建壁纸包 +
    `Shaders/Image.hlsl` 覆盖裁切 + 缓慢 Ken Burns；**导入项已可删除**（设置 → 壁纸 的预览卡角标，
    两下确认，正在用作壁纸的那张会被拒绝），**重命名仍未做**。
    覆盖裁切这条**原来是反的**（注释写着 cover，代码把 UV 窗口 `除以` 裁切系数 → 窗口被撑到纹理之外，
@@ -541,7 +642,7 @@ Progman 及其子链 `SHELLDLL_DefView` / `SysListView32` / 壁纸 `WorkerW`）�
 Engine/Core        日志、JSON、Win32/D3D 头收口
 Engine/Graphics    D3D11 设备、着色器编译+反射、WIC 纹理、DirectComposition 表面与绘制
 Engine/Desktop     显示器枚举（物理像素/DPI/刷新率）、WorkerW 层级定位、每显示器窗口
-Engine/Wallpaper   壁纸包、实例（编译后）、配置与分配
+Engine/Packages   壁纸包、实例（编译后）、配置与分配
 Engine/Performance 帧率分配（每屏一路）、降功耗状态机
 Engine/App         应用外壳、托盘、命名管道服务端/客户端
 Wallpapers/        aurora、embers、snowfall（GPU 粒子）

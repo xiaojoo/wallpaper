@@ -10,8 +10,16 @@ enum class PowerState { Desktop, Background, Covered, Fullscreen, Locked, Displa
 
 struct PowerCaps {
     int desktop = 60;      // nothing in front of the wallpaper
-    int background = 10;   // another program has focus but the desktop is still partly visible
-    int covered = 5;       // a window sits over this monitor
+    // 10 -> 30 -> 60 for this one. The animation's speed over a second does not depend on the cap
+    // (measured: 22-26% of pixels change per second at 10, 30 and 60 alike), but the size of each
+    // visible step does - at 10 fps every step carries 100 ms of motion. It stopped at 30 because a
+    // cap was thought to be saving work, but "background" fires for any window that merely overlaps
+    // the monitor, so it is the steady state while the desktop is still visible all around that
+    // window - and every 60 <-> 30 move halves or doubles the motion in one frame (32 budget moves
+    // in a 5.6 h run). Visible costs full rate; only covered and fullscreen, where it cannot be seen,
+    // drop. FPSController then snaps these to whole refresh periods (60 -> 48 on a 144 Hz panel).
+    int background = 60;   // another program has focus but the desktop is still partly visible
+    int covered = 24;      // a window sits over this monitor
     int fullscreen = 0;    // a fullscreen game/app owns this monitor
     int locked = 0;        // session locked
     int displayOff = 0;    // monitor powered down

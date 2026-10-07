@@ -52,7 +52,7 @@ public static class Scr
 '@
 Add-Type -TypeDefinition $src -Language CSharp -ReferencedAssemblies System.Drawing
 
-if ($RectOnly) { Write-Output ([Scr]::Rect('Qt6112QWindowIcon', 'SmartWallpaper')); exit 0 }
+if ($RectOnly) { Write-Output ([Scr]::Rect('Qt6112QWindowIcon', 'Wallpaper')); exit 0 }
 
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 else { Remove-Item -Path (Join-Path $OutDir '*.png') -Force -ErrorAction SilentlyContinue }

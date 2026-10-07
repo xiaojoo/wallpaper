@@ -1,5 +1,5 @@
 #pragma once
-// Engine/Wallpaper/WallpaperPackage.hpp - a wallpaper on disk: manifest + HLSL + textures.
+// Engine/Packages/WallpaperPackage.hpp - a wallpaper on disk: manifest + HLSL + textures.
 #include "Engine/Core/Json.hpp"
 #include "Engine/Graphics/Shader.hpp"
 #include "Engine/Graphics/Texture.hpp"
@@ -40,6 +40,12 @@ public:
     // Source resolution of an image wallpaper; 0 for generated shaders, which have none.
     int srcWidth() const { return srcW_; }
     int srcHeight() const { return srcH_; }
+    // A video wallpaper names one file in its own directory instead of a texture at t0.
+    bool isVideo() const { return !videoFile_.empty(); }
+    const std::wstring& videoFile() const { return videoFile_; }
+    bool videoLoop() const { return videoLoop_; }
+    // Length the importer measured, so a card can say how long the clip is before anything opens it.
+    double srcDuration() const { return duration_; }
     const Json& params() const { return params_; }
     std::vector<TextureRef>& textures() { return textures_; }
     const std::vector<TextureRef>& textures() const { return textures_; }
@@ -49,6 +55,9 @@ private:
     std::string id_, name_, category_;
     int srcW_ = 0, srcH_ = 0;
     std::wstring dir_, shaderFile_;
+    std::wstring videoFile_;
+    bool videoLoop_ = true;
+    double duration_ = 0.0;
     Shader::Entries entries_;
     UINT particleCount_ = 0;
     int fps_ = 60;

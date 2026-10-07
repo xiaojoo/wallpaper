@@ -22,12 +22,17 @@ bool Tray::Install(HWND owner, Application* app, std::string& error) {
     nid_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid_.uVersion = NOTIFYICON_VERSION_4;
     nid_.uCallbackMessage = WM_TRAYICON;
-    nid_.hIcon = LoadIconW(nullptr, IDI_APPLICATION); // a real brand icon is a V0.2 item, not a blocker
+    // The brand mark this executable carries (resources/app.rc, resource id 1), requested at the
+    // small size the notification area uses so the shell never has to shrink the 256 px frame.
+    nid_.hIcon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1),
+                                               IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                               GetSystemMetrics(SM_CYSMICON), LR_SHARED));
+    if (!nid_.hIcon) nid_.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     if (!nid_.hIcon) {
         error = "LoadIcon failed";
         return false;
     }
-    wcscpy_s(nid_.szTip, L"SmartWallpaper");
+    wcscpy_s(nid_.szTip, L"Wallpaper");
     if (!Shell_NotifyIconW(NIM_ADD, &nid_)) {
         error = "Shell_NotifyIcon(NIM_ADD) failed";
         return false;

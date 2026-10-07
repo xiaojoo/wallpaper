@@ -2,11 +2,13 @@
 // shows and changes goes through the renderer's control pipe.
 #include "Wallpaper/Bridge.hpp"
 #include "Wallpaper/LivePreview.hpp"
+#include "Wallpaper/TrayMenu.hpp"
 
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QApplication>
+#include <QIcon>
 #include <QMessageLogContext>
 #include <QQmlApplicationEngine>
 #include <QWindow>
@@ -34,8 +36,16 @@ int main(int argc, char* argv[]) {
     qInstallMessageHandler(logMessage);
     app.setOrganizationName(QStringLiteral("SmartWallpaper"));
     app.setApplicationName(QStringLiteral("SmartWallpaper"));
+    // The taskbar and alt-tab take this one; Explorer takes the icon embedded in the exe
+    // (resources/app.rc). Both come from the same generated Wallpaper.ico.
+    app.setWindowIcon(QIcon(QDir(QCoreApplication::applicationDirPath())
+                                .absoluteFilePath("Wallpaper.ico")));
+    // Closing the window hides it to the tray now, and a hidden window must not read as "no windows
+    // left". The tray's 退出 is the one path that ends this process, and it calls quit() itself.
+    app.setQuitOnLastWindowClosed(false);
 
     sw::Bridge bridge;
+    sw::TrayMenu tray(bridge);   // gets its window in attach(), below, once QML has made one
     // Deep links for the click harness: self-drawn Qt controls are not reachable through UIA on
     // this build, so the state a screenshot should show is passed in here instead.
     for (int i = 1; i < argc; ++i) {
@@ -50,6 +60,8 @@ int main(int argc, char* argv[]) {
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("Bridge"), &bridge);
+    // The title bar's close button asks the tray to hide the window instead of closing it.
+    engine.rootContext()->setContextProperty(QStringLiteral("Tray"), &tray);
     qmlRegisterType<sw::LivePreview>("SW", 1, 0, "LivePreview");
     // Loaded from disk next to the exe: editing Main.qml then restarting is enough to see the
     // change, which matters more here than shipping one embedded resource.
@@ -63,7 +75,10 @@ int main(int argc, char* argv[]) {
     // `winId` is not exposed to QML (it is a plain C++ method on QWindow), so the HWND the chrome
     // filter watches is taken from the root object here rather than from the QML side.
     for (QObject* o : engine.rootObjects())
-        if (auto* w = qobject_cast<QWindow*>(o)) { bridge.adoptChromeWindow(
-                static_cast<qint64>(w->winId())); break; }
+        if (auto* w = qobject_cast<QWindow*>(o)) {
+            bridge.adoptChromeWindow(static_cast<qint64>(w->winId()));
+            tray.attach(w);
+            break;
+        }
     return app.exec();
 }

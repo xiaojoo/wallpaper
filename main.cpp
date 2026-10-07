@@ -28,7 +28,7 @@ void PrintToParentConsole(const std::string& text) {
         std::fputs(text.c_str(), stdout);
         std::fflush(stdout);
     } else {
-        MessageBoxA(nullptr, text.c_str(), "SmartWallpaper", MB_OK | MB_ICONINFORMATION);
+        MessageBoxA(nullptr, text.c_str(), "Wallpaper", MB_OK | MB_ICONINFORMATION);
     }
 }
 
@@ -44,7 +44,7 @@ std::string QuoteJson(std::string s) {
 
 void Usage() {
     PrintToParentConsole(
-        "SmartWallpaper renderer\n"
+        "Wallpaper renderer\n"
         "\n"
         "  WallpaperRenderer.exe                      start rendering (reads config.json)\n"
         "  WallpaperRenderer.exe --selftest 20        run 20 s, then exit and log the measurements\n"
@@ -61,7 +61,8 @@ void Usage() {
         "  WallpaperRenderer.exe --ctl apply aurora [M0|all]\n"
         "  WallpaperRenderer.exe --ctl pause | resume | reload | quit\n"
         "  WallpaperRenderer.exe --ctl quality battery\n"
-        "  WallpaperRenderer.exe --ctl fps 30\n");
+        "  WallpaperRenderer.exe --ctl fps 30\n"
+        "  WallpaperRenderer.exe --ctl taskbar 40\n");
 }
 
 } // namespace
@@ -112,7 +113,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                                 ? L"\\\\.\\pipe\\SmartWallpaper.Renderer"
                                 : ToWide(pipeOverride);
         if (ctlCmd.empty()) {
-            PrintToParentConsole("--ctl needs a command: status|list|apply|pause|resume|quality|fit|fps|reload|quit\n");
+            PrintToParentConsole("--ctl needs a command: status|list|apply|pause|resume|quality|fit|fps|taskbar|reload|quit\n");
             return 2;
         }
         Json q = Json::Object();
@@ -131,11 +132,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     Application app;
     std::string error;
     if (!app.Start(cl, error)) {
-        std::string text = "SmartWallpaper could not start: " + error +
+        std::string text = "Wallpaper could not start: " + error +
                            "\nSee logs/renderer-<pid>.log for the full trace.";
         // A modal dialog would sit on the desktop the user is working on: only pop up when the
         // renderer was started with no arguments at all (double-click), otherwise print.
-        if (argc <= 1) MessageBoxA(nullptr, text.c_str(), "SmartWallpaper", MB_OK | MB_ICONERROR);
+        if (argc <= 1) MessageBoxA(nullptr, text.c_str(), "Wallpaper", MB_OK | MB_ICONERROR);
         else PrintToParentConsole(text + "\n");
         return 1;
     }

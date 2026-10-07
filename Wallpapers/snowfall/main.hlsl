@@ -34,7 +34,9 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     if ((int)id.x >= count) return;
 
     Particle p = gParticlesRW[id.x];
-    float dt = min(uTime.y, 0.05);
+    // The engine already bounds the step, so clamping it again here would silently halve the fall
+    // speed whenever the frame budget is low: at a 10 fps cap the honest step is 0.1 s.
+    float dt = uTime.y;
     float t = uTime.x;
 
     p.life -= dt;
