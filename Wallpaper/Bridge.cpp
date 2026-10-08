@@ -136,6 +136,16 @@ const Entry kStrings[] = {
     {"none", "无", "none"},
     {"host_layer", "桌面层级", "Desktop layer"},
     {"cpu", "进程 CPU", "Process CPU"},
+    // The three labels on the window's bottom line. CPU and GPU are the same letters in both languages
+    // here, and keeping them in the table is what lets the line read as one string built from parts.
+    {"stat_cpu", "CPU", "CPU"},
+    {"stat_mem", "内存", "Memory"},
+    {"stat_gpu", "GPU", "GPU"},
+    // The two GPU readings name whose GPU they mean, and the per-engine parts name the engines.
+    {"gpu_self", "本程序", "this app"},
+    {"gpu_machine", "整机", "whole PC"},
+    {"gpu_3d", "3D 引擎", "3D engine"},
+    {"gpu_decode", "视频解码", "video decode"},
     {"working_set", "工作集", "Working set"},
     {"uptime", "已运行", "Uptime"},
     {"status", "实时状态", "Live status"},
@@ -424,6 +434,13 @@ void Bridge::ingest(const Json& status, const Json& list) {
         cpu_ = p->numOr("cpu_percent");
         cpuWin_ = p->numOr("cpu_window_s");
         ws_ = p->numOr("working_set_mb");
+        // The engine leaves this out when it has no NVML to ask; -1 keeps that distinguishable from
+        // "the GPU is idle", which is what a 0 would say.
+        gpu_ = p->find("gpu_percent") ? p->find("gpu_percent")->asNumber() : -1.0;
+        // This process's own share, from the per-engine counters. Same -1 rule.
+        gpuSelf_ = p->find("gpu_self_percent") ? p->find("gpu_self_percent")->asNumber() : -1.0;
+        gpu3d_ = p->find("gpu_self_3d") ? p->find("gpu_self_3d")->asNumber() : -1.0;
+        gpuDec_ = p->find("gpu_self_decode") ? p->find("gpu_self_decode")->asNumber() : -1.0;
     }
     monitors_.clear();
     if (const Json* m = status.find("monitors"); m && m->isArray()) {

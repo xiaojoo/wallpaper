@@ -32,6 +32,7 @@ add_executable(WallpaperRenderer WIN32
   Engine/Performance/FPSController.cpp
   Engine/Performance/PowerManager.cpp
   Engine/App/Application.cpp
+  Engine/App/GpuMonitor.cpp
   Engine/App/Tray.cpp
   Engine/App/IPCServer.cpp
   Engine/App/IPCClient.cpp

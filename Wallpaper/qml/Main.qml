@@ -989,14 +989,20 @@ ApplicationWindow {
                                 color: Bridge.connected ? th.ok : th.err
                             }
                             Text {
-                                // The window travels with the percent: a CPU number without one is what
-                                // made a 2-second burst look like a sustained 177% load.
-                                text: trs(Bridge.connected ? "running" : "stopped") + " · "
-                                      + root.num(Bridge.cpuPercent, 2) + "% · "
-                                      + root.num(Bridge.workingSetMb, 1) + " MB"
-                                      + (Bridge.cpuWindowS > 0
-                                         ? " · " + trs("cpu_over") + " "
-                                           + root.num(Bridge.cpuWindowS, 1) + " s"
+                                // Every number on this line is this program's own: the CPU percent comes
+                                // from GetProcessTimes of the renderer process, the MB from its working
+                                // set, the GPU percent from the engine instances that carry its pid.
+                                // Saying 本程序 in front of them was tried and he took the words back out
+                                // - the numbers are the point here. The card as a whole (整机) is not on
+                                // this line; it is in 壁纸进程管理, under its own label, together with the
+                                // 3D / video-decode split. The window behind the CPU percent lives there
+                                // too: a percent without its window is what once read a 2-second burst as
+                                // a sustained 177% load.
+                                text: trs(Bridge.connected ? "running" : "stopped")
+                                      + " · " + trs("stat_cpu") + " " + root.num(Bridge.cpuPercent, 2) + "%"
+                                      + " · " + trs("stat_mem") + " " + root.num(Bridge.workingSetMb, 1) + " MB"
+                                      + (Bridge.gpuSelfPercent >= 0
+                                         ? " · " + trs("stat_gpu") + " " + root.num(Bridge.gpuSelfPercent, 0) + "%"
                                          : "")
                                 color: "#C6CEDA"; font.family: root.fontFamily; font.pixelSize: 12
                             }
@@ -1962,6 +1968,13 @@ ApplicationWindow {
                                                     + trs("cpu_over") + " "
                                                     + root.num(Bridge.cpuWindowS, 1) + " s" }
                             StatLine { k: trs("working_set"); v: root.num(Bridge.workingSetMb, 1) + " MB" }
+                            StatLine { visible: Bridge.gpuSelfPercent >= 0
+                                k: trs("gpu_self")
+                                v: root.num(Bridge.gpuSelfPercent, 1) + " % · " + trs("gpu_3d") + " "
+                                  + root.num(Bridge.gpuSelf3d, 1) + " % · " + trs("gpu_decode") + " "
+                                  + root.num(Bridge.gpuSelfDecode, 1) + " %" }
+                            StatLine { visible: Bridge.gpuPercent >= 0
+                                k: trs("gpu_machine"); v: root.num(Bridge.gpuPercent, 0) + " %" }
                             StatLine { k: trs("uptime"); v: root.num(Bridge.uptimeSeconds, 0) + " s" }
                         }
 
