@@ -83,6 +83,13 @@ ApplicationWindow {
     // It used to be an Image with a new URL per frame, which measured 16-18 fps and blanked the
     // area on every swap; the painted item reuses one texture, so the picture never disappears
     // between frames. Turning this off falls back to the saved strip.
+    // 2026-10-09: this was switched off for one round on the reading that 「设置页面不要渲染成视频，
+    // 只截取第一帧作封面」 meant this picture. He meant the 壁纸 page inside the settings dialog, which
+    // is a plain Image over a file on disk and decodes nothing - so there was nothing to save there, and
+    // the live hero came back the same day. What the experiment did measure stays in BACKLOG: with it off
+    // the engine's second pass goes to +0 frames/s (`preview.drew`), the desktop path is unchanged
+    // (decode step 2.60 ms, 10.15% of a core with the window open against 9.11~10.17% without), and the
+    // window's own ~12% of a core does NOT drop - that cost is the 4 s carousel, not these frames.
     property bool useLivePreview: true
 
     function slideIndex() {
@@ -530,6 +537,19 @@ ApplicationWindow {
                     // asked for the motion to keep playing through a minimise or a trip to the tray:
                     // stopping it cost ~0.7 s of still/held picture on the way back). What is left in
                     // this gate is the two cases that genuinely have no picture to animate.
+                    // ... with one exception he set on 2026-10-09: a clip that is *not* what the desktop
+                    // is showing gets its cover instead of a live pass. Animating a different file needs
+                    // a SECOND 4K decoder - the desktop's player cannot be shared with another clip -
+                    // measured as `live players in this process: 2` and `process ws 946 MB` against ~320
+                    // MB with one, the same +41 pt of a core / +156 MB that re-decoding a 4K clip has
+                    // always cost. Shaders and particles are drawn rather than decoded, so they keep
+                    // moving, and the clip actually on the desktop keeps its live picture.
+                    // REJECTED the same day: 「没有设置成壁纸的动态视频，在点击到它时也要播放」. The
+                    // second decoder is therefore the price of an honest preview and stays. The cost is
+                    // not folklore - it is what the log showed on 2026-10-09 while this page was open
+                    // with the old behaviour: `opened ... local_05\video.mp4 via FFmpeg`, then
+                    // `live players in this process: 2`, then `closed a player: 1 still live, process
+                    // ws 946 MB` (against ~320 MB while one player serves both passes).
                     const want = root.hero !== null && root.useLivePreview
                     if (want)
                         Bridge.showPreview(root.hero.id)
@@ -998,11 +1018,20 @@ ApplicationWindow {
                                 // 3D / video-decode split. The window behind the CPU percent lives there
                                 // too: a percent without its window is what once read a 2-second burst as
                                 // a sustained 177% load.
+                                // The busiest single engine, not the sum: `gpuSelfPercent` adds every
+                                // engine our pid owns (3D + decode + copy) and each is measured against
+                                // its own 100%, so the total passed 100% and the line read "GPU 150%"
+                                // (measured 2026-10-09 while a Hyper-V VM held 88% of the decoder). A
+                                // percent over 100 next to a label that says GPU is not a number he can
+                                // read, so the line carries the peak engine and the 3D / decode split
+                                // stays in 壁纸进程管理 under its own labels.
+                                readonly property real gpuPeak: Math.max(Bridge.gpuSelf3d,
+                                                                         Bridge.gpuSelfDecode)
                                 text: trs(Bridge.connected ? "running" : "stopped")
                                       + " · " + trs("stat_cpu") + " " + root.num(Bridge.cpuPercent, 2) + "%"
                                       + " · " + trs("stat_mem") + " " + root.num(Bridge.workingSetMb, 1) + " MB"
-                                      + (Bridge.gpuSelfPercent >= 0
-                                         ? " · " + trs("stat_gpu") + " " + root.num(Bridge.gpuSelfPercent, 0) + "%"
+                                      + (gpuPeak >= 0
+                                         ? " · " + trs("stat_gpu") + " " + root.num(gpuPeak, 0) + "%"
                                          : "")
                                 color: "#C6CEDA"; font.family: root.fontFamily; font.pixelSize: 12
                             }
@@ -1175,6 +1204,11 @@ ApplicationWindow {
                         property real bigH: 117
                         property real smallH: 92
                         property real gap: 14
+                        // The rim sits this much OUTSIDE the picture's own octagon. He asked for
+                        // "边框比里面图片的边框更外扩一点" without a number, so it is 1.6% of the 188 px
+                        // selected card (3 px) - the smallest value that reads as a deliberate gap
+                        // rather than a misregistration. Re-measure before changing the card size.
+                        property real picInset: 3
                         readonly property int n: root.shown.length
                         readonly property int sel: root.slideIndex()
                         readonly property real pitch: smallW + gap
@@ -1271,20 +1305,32 @@ ApplicationWindow {
                                                                             easing.type: Easing.OutCubic } }
                                 }
 
-                                // The cut corners are real now: the picture is masked to the octagon,
-                                // so what shows in the four corners is the page behind the card. The
-                                // mask is the same geometry painted solid, and it stays underneath the
-                                // picture it clips, so its own white never reaches the screen.
+                                // The cut corners are real: the picture is masked to the octagon, so what
+                                // shows in the four corners is the page behind the card. The mask is the
+                                // same geometry painted solid (an opacity mask needs an opaque body - its
+                                // RGB is irrelevant, only its alpha is read), and while a picture is up it
+                                // stays underneath it, so the white never reaches the screen.
+                                //
+                                // It is painted ONLY while the picture is up. That is what fixes the white
+                                // tile: when the renderer refuses to rewrite a cover the Image has no
+                                // source at all, and an unmasked solid octagon showed as 56.6% pure
+                                // #FFFFFF (measured 2026-10-09, local_05). Filling the card with a dark
+                                // colour instead - the first attempt - is what he is rejecting now: it
+                                // paints over the four corners, which are supposed to be the page.
                                 TechFrame {
                                     id: picMask
                                     anchors.fill: parent
+                                    anchors.margins: strip.picInset   // the rim sits outside the picture
                                     body: "#FFFFFFFF"
+                                    visible: picImg.status === Image.Ready
                                 }
                                 Rectangle {
                                     id: card
                                     anchors.fill: parent
+                                    anchors.margins: strip.picInset
                                     color: "transparent"
                                     Image {
+                                        id: picImg
                                         anchors.fill: parent
                                         fillMode: Image.PreserveAspectCrop
                                         asynchronous: true
@@ -1378,32 +1424,38 @@ ApplicationWindow {
 
             }
 
-            // The carousel hides itself only when the renderer has nothing at all, so the reason
-            // goes here; a filter that matched nothing is explained inside the picture box.
-            // With the settings entry moved into the caption band, this state had no way to reach
-            // settings at all - the band is inside the column that collapses here, so the entry
-            // rides along with the explanation. The two gears are never on screen together.
-            RowLayout {
-                Layout.alignment: Qt.AlignHCenter
-                Layout.fillHeight: true
-                visible: Bridge.catalog.length === 0
-                spacing: 12
-                Text {
-                    Layout.alignment: Qt.AlignVCenter
-                    text: Bridge.connected ? trs("no_catalog") : trs("not_connected_hint")
-                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 13
-                }
-                IconBtn {
-                    id: emptyGear
-                    Layout.alignment: Qt.AlignVCenter
-                    icon: "gear"
-                    tip: trs("settings")
-                    glyph: 17
-                    tint: root.settingsOpen ? th.accent : th.text
-                    onClicked: root.settingsOpen = !root.settingsOpen
-                    Hint { label: emptyGear.tip; hovered: emptyGear.hoverArea; place: "top" }
-                }
-            }
+            // The carousel hides itself only when the renderer has nothing at all; a filter that matched
+            // nothing is explained inside the picture box. The line that says why used to sit here as a
+            // row of this column - see the centred overlay after the column closes.
+        }
+    }
+
+    // "The renderer is not running" / "nothing in the library", with the settings entry next to it:
+    // with the caption band inside the column that collapses in this state, the entry has to ride along
+    // with the explanation, and the two gears are never on screen together.
+    //
+    // Centred on the window rather than laid out inside the grid column: measured 2026-10-09, as a
+    // `Layout.alignment: Qt.AlignHCenter` row of that column it landed with its ink at x 0..413 of a
+    // 1360 px window - the column sizes itself to its content once the carousel is hidden, so the row
+    // had nothing wider than itself to centre in (its own box was 453 px, at the left edge).
+    RowLayout {
+        id: emptyHintRow
+        anchors.centerIn: parent
+        visible: Bridge.catalog.length === 0
+        spacing: 12
+        Text {
+            id: emptyHintText
+            text: Bridge.connected ? trs("no_catalog") : trs("not_connected_hint")
+            color: th.muted; font.family: root.fontFamily; font.pixelSize: 13
+        }
+        IconBtn {
+            id: emptyGear
+            icon: "gear"
+            tip: trs("settings")
+            glyph: 17
+            tint: root.settingsOpen ? th.accent : th.text
+            onClicked: root.settingsOpen = !root.settingsOpen
+            Hint { label: emptyGear.tip; hovered: emptyGear.hoverArea; place: "top" }
         }
     }
 

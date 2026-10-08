@@ -25,6 +25,7 @@
    剩下没验的还是那几处：卡片→打开模态框、`动态预览` 的按下。
 3. **视频壁纸**（H.264 → 自驱 MFT → NV12 双平面 → `Shaders/Video.hlsl`）。**2026-10-07 09:20 已经出画，并且是真合成的像素量过的。**
 
+
    量到的（`build/fixtures/fixture_1080.mp4` / `fixture_2160.mp4`，桌面 M0 = 3840x2160，`state=background`、
    档 24 fps；读回工具 `tools/preview-pixels.py`，预览共享内存和桌面截图各查一遍）：
    - **颜色**：8 条饱和色条最大 `|Δ| = 2/255`（错用 BT.601 矩阵时红条差 ~54），11 格 studio-swing 灰阶带
@@ -250,6 +251,33 @@
    - 仍未做：**D3D11VA 零拷贝**（解码直接写进 GPU 纹理数组，连 `Pack` 那一次 memcpy 都省掉，
      这才是字面意义的"全程 GPU"）；测量噪声：我那个每秒起一个 `--ctl` 进程的心跳循环会把预览拖到
      1.3 fps、桌面拖到 36 f/s，被污染的那组读数（97.0% / 108.5%）已排除，不进任何结论。
+
+   **2026-10-08 他说"按这个顺序从 ① 开始做"（针对我给的降资源排序 ①缓冲复用 ②解码跟显示同速 ③预览降频）。
+   ①②已做，③④没做。做 ① 的过程中先发现我自己的资源表有两把尺子坏了，这件事比改动本身更要紧：**
+
+   - **尺子一：进程 CPU 不能当绝对值用。**同一张 48 帧/秒的粒子壁纸，四个窗口读出 0.0% / 1.1% / 6.5% / 24.5%。
+     三个来源都查到了实据：(a) 渲染器启动的头几十秒在给**整个壁纸库**编译 HLSL + 生成缩略图（日志每条
+     `[thumb] xxx: built in 2xx ms`），这段时间挂哪张壁纸都烧 14~23% 单核 —— `startup-burn.py` 的 110 个逐秒
+     样本证明坐稳后是 1.1%；已让 `resource-matrix.py` 要求进程活满 150 s 才开始采，README 表里 C~F 行已按
+     坐稳后的那轮重写，**上一版表里的 20.70% / 6.53% 是预热的读数，别再引用**。(b) Windows 按 15.6 ms tick
+     记账，1 秒窗口有量化地板（真实 1.4% 会报 0.0 或 1.6），所以判据改成"逐秒差值中位数 + 20 s 窗口 + 引擎
+     自报"三把一起看。(c) D3D 驱动工人线程在我们进程里，整机卡在 24%~100% 之间跳时它们的等待也算我们的
+     （`cpu-vs-card.py`：我们的帧率一直稳在 48）。
+   - **① NV12 缓冲池**（`FFmpegPlayer.cpp` 的 `TakeBuffer`/`PutBuffer`，最多 3 槽，`clear()` 留容量）：
+     以前解码侧 31 次/秒 + 绘制侧 24 次/秒各自 `resize` 一块 12.4 MB。配对复测用引擎自己的每秒报告中位数
+     （n=60 各）：**4.30 → 3.40 ms/帧**，区间几乎不相交（对照 3.80~5.10 / 带池 3.10~4.00）。代价：工作集
+     +6.6 MB、private +3.9 MB（池里留住 1~2 块缓冲）。反证：对照版是把这文件 `git stash` 后重编的，
+     两版只差这一处；且已验历史不影响该读数（同一进程内 fresh/切过 C→D1→D2 之后/再切回来，三段都是 3.40）。
+   - **② 背压发布**（解码出帧后先看 `pending_` 满不满，满则不 `Pack`）：包**一包不落地**继续送解码器
+     （GOP/B 帧参考链不许跳），跳过的只是那次 12.4 MB 拷贝。新加的四个计数器 + `build/tmp/pub-control.py`
+     的双向对照：只有桌面时 拷贝 25/s、解码不拷 6/s、**白等的呈现 0/s**、步数仍 31/s；开第二遍（共享同
+     一个播放器）时拷贝回到 30/s、跳过 1/s、白等 26/s —— 关掉又回 25/6/0。"白等 = 0"就是"桌面没有重复帧"
+     的判据；片速 1.012 倍墙钟（31.633 s 的片，跨接缝样本已剔除）、帧率 24.0、`late_frames` 0、角点 69 变 8 不变。
+   - 两处合计的绝对数：同一无客户端、已坐稳的进程、60.2 s 窗口差值 **10.17% → 9.11% 单核**；与"少拷 6 帧 ×
+     1.24 ms = 0.74 点"相互对上，差值落在上面那把尺子的 ±1 点散度里 ⇒ 这是下限不是上限。
+   - **没做**：③ 预览在窗口不可见时降频（现在是 30 fps 一直跑，`kPreviewFps` 写死），④ D3D11VA 零拷贝。
+     ③ 之前不该再动 ④：④ 会重写 `Pack`/`Nv12Uploader`，没有 ①② 这类实测数字当地基就是白干。
+
 
    **2026-10-07 23:05 那张绿卡片：根因是"平面没绑上/没上传"，不是颜色管理。**
    他贴的卡片图实测磁盘上 `cache/thumbs/local_05_still.png` 与 `_large.png` **100.00% 是 (0,76,0)**。
@@ -496,6 +524,42 @@
   **②仍然成立**：`video` 是队列命令，管道只回 `"queued"`，真正的回复只在引擎日志里，所以按钮是
   "先按请求显示、下一秒快照纠正"，不是从回复读回来的 —— 想要真读回就得把 `video` 变成本地命令，
   那要处理 `preview_.inst` 的跨线程指针，暂时没做。
+- **2026-10-09 设置页大图改成静态封面 —— 方向理解错了，同一轮已改回**（原话「设置页面不要渲染成视频，
+  只截取第一帧作封面」我按**主界面大图**理解；他指的是**设置对话框的「壁纸」那一页**，而那一页本来就是
+  普通 `Image` 读磁盘文件、一个像素都不解码 ⇒ 那里没有资源可省）。恢复动作：`useLivePreview` 改回 true、
+  字幕条按钮的 `isClip` 回到原来的判据（不再按"是不是壁纸上那一张"置灰）、多出来的串
+  `video_pause_cover_only` 从 `kStrings` 删掉（i18n 门禁：缺语言 0、用了但没登记 0）。
+  复验恢复：`preview.on=True`、`drew` +366/12 s ≈ 30 帧/秒、桌面 24.63 FPS、`draw_errors` 0。
+  **下面这些是关掉那一轮量到的，作为"哪天要动它"的起点留着，不是当前行为**：
+  `Main.qml` 的
+  `useLivePreview` 从 true 改成 false，一行。第二遍（1280x720@30 重画 + GPU→CPU 回读 + 共享内存 +
+  客户端 15 ms 轮询）就此不再由界面发起，`syncPreview()` 只会走到 `Bridge.hidePreview()`。
+  判据用**工作量计数器**而不是 CPU：`preview.drew` 在 24 秒窗口里 +0（之前 ~30/s）、`preview.on` 恒 false、
+  `shm_frames` 冻在最后一次发布的 10382。大图退回 `heroImg`，源是 `cache/thumbs/<id>_large.png`
+  （park 路径一次性抓的首帧；视频卡的 `<id>_frames/` 目录本来就是空的，所以切片那条路也不会被走到 ——
+  `heroMotion` 要 `framesOf(hero).length > 1`，量过是 0）。抓窗验证：大图区域 stdev 55.3、近黑 0.0%。
+  **字幕条那颗播放/暂停按钮跟着改语义**：大图是封面之后，能暂停的只有"壁纸上那一张"（按下去动的是他桌面的
+  clip），所以 `isClip` 加了 `root.inUse(root.hero)`；其它视频卡置灰 + 新串 `video_pause_cover_only`
+  说明原因（置灰不消失是他的规矩）。i18n 门禁 147 条、缺语言 0、用了但没登记 0。
+  **绝对 CPU 后来在机器空下来时取到了**（`vmwp` 那阵过去之后，引擎自己的解码步长回到 med 2.60 ms）：
+  带客户端、封面状态、30 秒窗口 —— **引擎 10.15% 单核**（对照 D3 单独那行 9.11~10.17%，同一把尺子的散度
+  以内 ⇒ 桌面这一路没被这次改动变慢），**客户端 12.63%**（对照 E 行带第二遍时的 11.55%）。
+  ⇒ **省下来的都在引擎侧的工作量上（第二遍的画 + 回读 + 发布，`preview.drew` 从 ~30/s 变成 0/s），
+  不在客户端的 CPU 上**：客户端那 12% 不是活帧喂出来的，是 4 秒轮播每次换卡（`grabToImage` + 读 1280x720
+  PNG + 液态变换整块 hero 的 ShaderEffect）喂出来的。要再降客户端，动的是轮播/切换动画，不是预览。
+  **顺手记一把 PowerShell 的坑**：`$pid` 是只读自动变量，脚本里拿它当循环变量会整块炸
+  （`VariableNotWritable`），要写 `$procId`。
+- **2026-10-09 「这几界面的文字居中显示」**：空库/渲染器没跑那行（`not_connected_hint` / `no_catalog`，
+  `Main.qml` 里那个带齿轮的 RowLayout）。代码写着 `Layout.alignment: Qt.AlignHCenter`，看着却贴在左边缘 ——
+  量法是先别猜，让 QML 自己把几何报进 `ui.log`（临时 `Timer` + `mapToItem(null,0,0)`，量完删掉）：
+  **修前** 文字墨迹 x 0..413、行盒子 453×28 钉在网格列左边；原因是轮播隐藏后那一列收缩到内容大小
+  （列本身变成 453×28），"在一行里居中"就没有比它更宽的东西可居中了。**修后** 行盒子中心 (680, 430) =
+  窗口正中（Δ0），文字自己的中心 660 —— 差的 20 px 是右边那颗齿轮，整行才是居中的单位。改法是把这一行
+  从网格列里搬出来当窗口的覆盖层、`anchors.centerIn: parent`，不再依赖 Layout 的对齐语义。
+  **两条一起记着的坑**：① 用整窗像素找这行字会被面板自己的墨迹吃掉（阈值 150 时 y 11..765 连成一片），
+  要么按已知行带去量，要么直接问布局；② 想抓"渲染器没在跑"那一屏抓不到 —— 设置窗的看门狗约 3 秒就把
+  引擎起回来，目录一非空这行就消失，只有 1~2 秒的窗口期，所以判据取自进程内的几何而不是截图。
+
   踩到的坑：`Q_PROPERTY` 只写 `READ ... NOTIFY ...` 忘了 `WRITE`，从 QML 赋值会抛
   "Cannot assign to read-only property"，而 QML 的异常只进 `ui.log`、界面上完全看不出来 —— 探针第一次
   跑就是 `enabled=1` 但 `flag seen=0`、`PB8 ACT` 一行都没有，才定位到这里。
@@ -605,3 +669,100 @@
 
 - `Application::Run()` 里循环探针（`loopIters_`/`LoopDebug`）是调试期加的，稳定后应降级到 trace 级或删除。
 - `Shaders/Fullscreen.hlsl` 的 `Fbm` 用 `[loop]` 动态循环，低档壁纸应改用编译期常量八度。
+
+
+## ④ D3D11VA 零拷贝：探针已经证实的几条（2026-10-09，还没动产品代码）
+
+探针 `tools/dxvaspike.cpp` + `tools/dxvaspike-build.bat`（跟其它探针同一套：cl 必须在 .bat 里跑，MSYS 会
+改写在 `/` 开头的参数），跑真实 4K 片 `Wallpapers/local_02/video.mp4` 量到的：
+
+- **我们自己的 `ID3D11Device` 可以直接交给 FFmpeg**：`av_hwdevice_ctx_init` 回 OK。设备建时要带
+  `D3D11_CREATE_DEVICE_VIDEO_SUPPORT`，并且 `ID3D10Multithread::SetMultithreadProtected(TRUE)` ——
+  解码线程写、呈现线程读，没这一条就是跨线程未保护访问。
+- **内部 h264 解码器有 `d3d11`/`d3d11va` 配置**（`methods=0x3`、pix_fmt=d3d11）。出帧
+  `format=d3d11(171)`，`data[0]`=纹理、`data[1]`=**数组切片号**（实测 19/16/17…，不是顺序号）。
+  纹理 3840x2160、array=20、fmt=103(NV12)。**`data[1]` 是当指针装的整数，用 `%s` 打印直接段错误** —— 探针踩过一次。
+- **决定成败的那个坑**：只设 `hw_device_ctx` 时 FFmpeg 自己建的解码纹理池 `BindFlags=0x200`（只有
+  `D3D11_BIND_DECODER`），**没有 `D3D11_BIND_SHADER_RESOURCE` 的资源建不出 SRV** —— 七次
+  `CreateShaderResourceView` 全 FAIL。而改 `AVD3D11VAFramesContext::BindFlags` **没用**（设成
+  decoder|shader 之后实测仍是 0x200）：真正生效的是**设备级** `AVD3D11VADeviceContext::BindFlags`
+  （头文件写明 "applies globally to all AVD3D11VAFramesContext allocated from this device context"）。
+  设完之后 `bind=0x208`，**R8（亮度）与 R8G8（色度）按切片建视图全部 OK**，解码器自己那个切片（17）也 OK。
+  `DXGI_FORMAT_NV12` 的整资源视图 FAIL —— 不需要它，走的就是 R8/R8G8 两条平面视图。
+- **下一步必须先证再改的一件事**：切片/平面的**寻址**对不对。D3D11 里 NV12 数组纹理的 subresource 计算把
+  平面算进去（`plane * ArraySize + slice`），R8G8 视图覆盖的是不是就是色度平面 —— **探针没证成**：
+  `CopySubresourceRegion` 把 `BIND_DECODER` 纹理拷进普通 STAGING 2D 再 Map，三个候选 subresource 读回来
+  全是 mean 0.0（帧持有与不持有都一样），这条拷贝路本来就不是 libavcodec 搬帧回 CPU 的路（它走
+  `av_hwframe_transfer_data`）。**所以 0.0 是"探针读不到"，不是"平面在那儿不对"** —— 这个未知数只能在
+  真路上用色条门禁判（`tools/preview-pixels.py`，历史标准色条 Δ≤2），别拿"视图建出来了"当"颜色对了"，
+  这条搞错就是当年那批绿卡的颜色。
+- **改动面（为什么它比 ①② 大一个数量级）**：`Nv12Uploader` 的两段 `UpdateSubresource` 换成"按帧建/缓存
+  (texture, slice) 的两个 SRV"；`Video.hlsl` 从 `Texture2D` 双平面改成 `Texture2DArray` 采样；循环接缝、
+  `ShowFrameAt` 的 park 抓帧、缩略图、`--ctl preview` 那一路都要跟着走新帧格式；**AV1 走 libdav1d 是 CPU
+  解码**，所以 CPU 那条路必须留着当回退，两条路并存。
+- **收益边界**：省的是 `Pack` 那 1.24 ms/帧 × 24 帧/秒（≈0.7 点单核）+ 12.4 MB/帧的页触碰与私有工作集；
+  解码引擎那 16% 不会因此下降（NVDEC 还是 NVDEC）。所以它的真正价值是内存带宽和 private 那 700 MB，
+  不是 CPU —— 做之前要想清楚这个值不值。
+
+## 设置页那张白色卡片（2026-10-09，已修，根因没修）
+
+他贴的图里最右一张卡是纯白的。量出来：那块区域 **56.6% 是 (255,255,255)**，边框是选中态的蓝
+(108,161,248) —— 不是"图很亮"，是**底下那个八边形遮罩的白**露出来了。
+
+链路是：这一轮引擎重建 `local_05` 的封面时抓到的帧是 `luma 0..0`（空平面），
+`Thumbnailer.cpp` 那条"宁可不写"的守卫拒了 → `thumbs_[id].ok=false` → `status.catalog` 里这张
+**根本没有 `thumb` 字段** → 客户端 `Image.source` 绑成 `""` → 遮罩的 `body:"#FFFFFFFF"` 直接可见。
+磁盘上 00:23 那张好图一直都在（mean 60.0，near-white 0.00%），守卫的注释本来就写着
+"let the previous card stand" —— **它做到了"不覆盖"，但没做到"继续供给"**，这就是真正的缺口。
+
+两处都补了：
+- `Application.cpp`：Build 失败时如果磁盘上还在，就把记录重新立起来（日志新增
+  `thumbnail for <id>: the rebuild was refused, keeping the previous card on disk`）。
+  复验：`catalog` 里 `local_05 thumb=local_05_still.png exists=True`。
+- `Main.qml`：卡片的底 `color:"transparent"` → `th.surface`。以后任何一张没有图的卡都是"深色空卡"，
+  不再是白板。抓窗复测：strip 那条带里最长的纯白横跑 **174 px → 8 px**（那 8 px 是状态行文字），
+  原来那张白卡区域 mean 71.6 / stdev 44.2 / near-white 0.0%。
+
+**没修的根因**：`local_05`（4K60、4.7 s）的封面抓取**每次启动都**回 `luma 0..0` —— 不是偶发，同一进程
+里两次都一样。这属于 park/抓帧那条老家族（平面从没上传就被抓走），现在只是被兜住了不难看。
+判据现成：启动日志里 `the grabbed video frame is uniform` 出现次数应为 0；修好后 `local_05` 的
+`_still/_large` mtime 应该跟其它卡一起前进（现在停在 00:23，别的都是 00:48）。
+
+## 状态行报 71% / 1135 MB / GPU 150% 那一轮（2026-10-09）
+
+他贴的状态行截图问"怎么占用这么多的资源"。三个数分开查，三个答案不一样：
+
+- **GPU 150% 是显示口径错，已修**。`GpuMonitor` 把我们 pid 的**所有** GPU 引擎（3D + 解码 + 拷贝）
+  相加，而每个引擎各自满分 100%，所以合计会超 100（那次是 150，同一时刻的合计读数 101.47）。
+  状态行改成"最忙的那一个引擎"（`Math.max(gpuSelf3d, gpuSelfDecode)`），3D/解码的拆分留在壁纸进程管理页。
+  判据不是"我改了表达式"，是从窗口里把渲染出来的整行读回来（临时 `Timer` + `console.info(parent.text)`）：
+  `运行中 · CPU 88.21% · 内存 655.0 MB · GPU 85%`。
+- **CPU 71~93% 主因不是我们**：`vmwp`（Hyper-V/WSL2 虚拟机）占 **88.2%** 的 GPU 引擎，NVDEC 被排队，
+  我们的解码步长从 2.6 ms 涨到 **53~69 ms**；步长超过 33 ms 节拍之后解码线程没有可等的时间，CPU 就顶满。
+  桌面同一时间只有 9.4 FPS —— 这是"同一份活卡在等硬件"，不是多干活。量具：`build/tmp/gpu-users.ps1`。
+- **内存 1135 MB 是我们的设计代价，试过收、当天被否**：轮播经过另一张 4K 视频卡时引擎为它另开一个
+  解码器（`live players in this process: 2`、`process ws 946 MB`，对照一个播放器 ~320 MB）。收窄成
+  "只有壁纸上那张视频实时、其它视频卡用封面"之后扫一轮 9 张卡确实 **0** 次新解码器 —— 但他当天否掉：
+  「没有设置成壁纸的动态视频，在点击到它时也要播放」。回退后复验：`preview on: local_05` 出现、一轮里
+  新解码器开启 2 次，`local_02`（壁纸上那张）仍是 `sharing the live decoder`。**结论：第二个解码器是
+  "预览要诚实"的固定代价，别再打它的主意；要省内存得从别处想。**同步回退的还有字幕按钮的置灰和
+  `video_pause_cover_only` 那条串（kStrings 回到 146 条）。
+
+**同一处被当天推翻的第一版**：白板那条我第一版是把卡片底 `color:"transparent"` 改成 `th.surface` ——
+不再白，但**把四个角也填上了**（那四个角本来就该露出页面），他下一句就是「这个轮播的四个角怎么又出来了，
+把这个背景去掉」。正解是**画面缺席时不画遮罩**：`picMask.visible: picImg.status === Image.Ready`。
+遮罩要的是 alpha，它的白色 RGB 平时被不透明画面盖住，只有画面缺席时才露出来 —— 挡住"缺席时露白"就够了，
+不该给卡片加底色。同一条里他另外要了「边框比里面图片的边框更外扩一点」：图片和遮罩一起
+`anchors.margins: strip.picInset`（3 px = 188 px 选中卡的 1.6%，他没给数字，取最小可辨值并写明系数），
+外框仍 `anchors.fill: parent`。
+**这一处的两把尺子都没成，是看抓图交付的**：整排卡片的像素尺子分不清"角"和"光晕/底纹"（选中的那张还被
+窗口右边缘切掉）；窗口内问几何的探针（`Timer` + `console.info`）在这个委托里一次都没打出行 —— 委托会被
+Repeater 重建，`running: thumbCell.sel` 的 4.5 s 计时器走不满，改成 700 ms 重复仍然 0 行。所以 3 px 这个数
+要他上手看，改也只改 `picInset` 一个数。
+
+
+**两条量具教训**：① 设置窗失焦时 4 秒轮播本来就停着 —— 想观察"轮播经过视频卡"必须自己驱动
+`selectedId`（探针 `Timer` 走真 `syncPreview()`），等是等不到的；② heredoc 里写 `"%s\renderer-%s.log"`
+会被折成一个反斜杠再被 Python 解释成 `
+`（回车），路径变成 `logs<CR>renderer-…` 报 `OSError 22` ——
+Windows 路径在探针里一律用正斜杠。

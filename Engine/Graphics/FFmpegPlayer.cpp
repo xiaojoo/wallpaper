@@ -256,6 +256,13 @@ public:
         {
             std::lock_guard lk(mtx_);
             if (!pending_.empty()) frame.swap(pending_);
+            // The ruler for "did skipping the copy cost the desktop a picture": a present that finds the
+            // slot empty shows the same frame as the one before it. With the decoder at the clip's 30 fps
+            // and the slot at 24 this was always 0 (a newer picture was always there), so after publishing
+            // only into an empty slot it has to stay 0 or the saving bought visible judder. It is only
+            // meaningful with one consumer: when the second pass shares this player, 54 drains against 30
+            // publishes means 24 of them legitimately repeat.
+            else ++st_.tookNothing;
         }
         if (!frame.empty()) {
             Nv12Uploader::Out o;
@@ -271,6 +278,7 @@ public:
                 ++st_.taken;
             }
         }
+        PutBuffer(std::move(frame));   // the draw side was the other 12.4 MB allocation per frame
         return up_.Y();
     }
     ID3D11ShaderResourceView* FrameUV() override { return up_.UV(); }
@@ -415,6 +423,46 @@ private:
     double seekTo_ = 0.0;
     std::vector<BYTE> pending_;
 
+    // A 4K NV12 frame is 12.4 MB, and until 2026-10-08 both ends of this queue allocated one per
+    // frame: the decode thread declared its `frame` inside the loop, and FrameY let the buffer it took
+    // fall out of scope after the upload. That is 30 + 24 allocate/free pairs a second of a 12.4 MB
+    // block (the decode step measured 4.50 ms per frame with the copy inside it). The pool keeps them
+    // alive instead: Take hands back a buffer whose capacity is already there, Put returns one, and
+    // after the first two frames the steady state allocates nothing.
+    //
+    // Three slots is the most that can be in flight at once: pending_, the buffer the draw is
+    // uploading, and the one the decode thread is filling.
+    std::vector<std::vector<BYTE>> pool_;
+
+    std::vector<BYTE> TakeBuffer() {
+        std::lock_guard lk(mtx_);
+        int pick = -1;
+        for (size_t i = 0; i < pool_.size(); ++i) {
+            if (!pool_[i].empty()) continue;                 // somebody is still holding that slot
+            if (pool_[i].capacity()) { pick = int(i); break; }  // a real buffer: take it
+            pick = int(i);                                   // usable, just without capacity yet
+        }
+        if (pick < 0) {
+            if (pool_.size() >= 3) return {};
+            pool_.emplace_back();
+            pick = int(pool_.size()) - 1;
+        }
+        std::vector<BYTE> out;
+        out.swap(pool_[pick]);        // the slot keeps whatever the caller had in its place
+        return out;
+    }
+    void PutBuffer(std::vector<BYTE>&& b) {
+        if (b.capacity() == 0) return;
+        std::vector<BYTE> kept(std::move(b));
+        kept.clear();               // the bytes stay, the size becomes zero: an empty slot
+        std::lock_guard lk(mtx_);
+        for (auto& s : pool_) {
+            if (s.capacity() && s.empty()) return;      // already holding an equal-sized buffer
+            if (s.empty() && s.capacity() < kept.capacity()) { s.swap(kept); return; }
+        }
+        if (pool_.size() < 3) pool_.push_back(std::move(kept));
+    }
+
     // The loop seam, timed on the decode thread only: when the clip ran out, and what the last frame
     // shown before the cut was. The queue the decoder holds at that moment is the clip's own tail, so
     // it is played out, and the number that matters is the gap between the last tail frame and the
@@ -435,9 +483,11 @@ private:
 
     struct Stats {
         std::atomic<unsigned long long> decodeUsSum{0}, decodeUsMax{0};
+        std::atomic<unsigned long long> packUsSum{0}, packUsMax{0};       // the 12.4 MB copy, timed on its own
         std::atomic<unsigned long long> copyUsSum{0}, copyUsMax{0};   // the two UpdateSubresource calls
         std::atomic<unsigned long long> frameUsSum{0}, frameUsMax{0};
-        std::atomic<unsigned> steps{0}, empty{0}, dropped{0}, taken{0};
+        std::atomic<unsigned> steps{0}, empty{0}, dropped{0}, taken{0}, notPacked{0}, packSteps{0},
+                                    tookNothing{0};
         std::atomic<unsigned> lumaMean{0}, chromaMean{0}, haveBytes{0}, needBytes{0};
     } st_;
     std::chrono::steady_clock::time_point lastStats_;
@@ -447,16 +497,22 @@ void FFmpegPlayer::LogStats() {
     lastStats_ = std::chrono::steady_clock::now();
     const auto steps = st_.steps.exchange(0), empty = st_.empty.exchange(0);
     const auto taken = st_.taken.exchange(0), dropped = st_.dropped.exchange(0);
+    const auto notPacked = st_.notPacked.exchange(0);
+    const auto packSteps = st_.packSteps.exchange(0);
+    const auto tookNothing = st_.tookNothing.exchange(0);
+    const auto pSum = st_.packUsSum.exchange(0), pMax = st_.packUsMax.exchange(0);
     const auto dSum = st_.decodeUsSum.exchange(0), dMax = st_.decodeUsMax.exchange(0);
     const auto cSum = st_.copyUsSum.exchange(0), cMax = st_.copyUsMax.exchange(0);
     const auto fSum = st_.frameUsSum.exchange(0), fMax = st_.frameUsMax.exchange(0);
     const double k = 1.0 / 1000.0;
     Info(MOD, "{}: FFmpeg decode {} steps in 1 s ({} empty), step mean {:.1f} max {:.1f} ms | "
               "render took {} frame(s), FrameY mean {:.2f} max {:.2f} ms (upload {:.2f}/{:.2f}) | "
-              "{} produced but never displayed",
+              "{} produced but never displayed, {} decoded and not copied, packed {} frame(s) mean {:.2f} "
+              "max {:.2f} ms, {} presents took nothing",
          ToUtf8(file_), steps, empty, steps ? dSum * k / steps : 0.0, dMax * k, taken,
          taken ? fSum * k / taken : 0.0, fMax * k,
-         taken ? cSum * k / taken : 0.0, cMax * k, dropped);
+         taken ? cSum * k / taken : 0.0, cMax * k, dropped, notPacked, packSteps,
+         packSteps ? pSum * k / packSteps : 0.0, pMax * k, tookNothing);
     Info(MOD, "{}: planes hold luma mean {} chroma mean {} (neutral chroma is 128), frame {} B "
               "against a coded plane of {} B",
          ToUtf8(file_), st_.lumaMean.load(), st_.chromaMean.load(), st_.haveBytes.load(),
@@ -509,6 +565,7 @@ void FFmpegPlayer::Thread() {
             const bool rewinding = seamOpen_;
             const int64_t target = int64_t(seekSeconds / av_q2d(tb_));
             av_seek_frame(fmt_, vIdx_, target, AVSEEK_FLAG_BACKWARD);
+            std::vector<BYTE> retired;
             {
                 std::lock_guard lk(mtx_);
                 ended_ = false;
@@ -520,7 +577,7 @@ void FFmpegPlayer::Thread() {
                 if (!rewinding) {
                     avcodec_flush_buffers(ctx_);
                     position_ = seekSeconds;
-                    pending_.clear();
+                    retired.swap(pending_);   // emptied, and the 12.4 MB block goes back to the pool
                     holding_ = false;
                     holdNext_ = holdAfterFrame_;
                     holdTarget_ = seekSeconds;
@@ -531,14 +588,16 @@ void FFmpegPlayer::Thread() {
                     ++seekSeq_;
                 }
             }
+            PutBuffer(std::move(retired));
             nextDue = std::chrono::steady_clock::now();
             continue;
         }
 
         const Clock stepClock;
-        std::vector<BYTE> frame;
+        std::vector<BYTE> frame = TakeBuffer();
         long long outTs = 0;
         bool gotFrame = false;
+        bool skipped = false;
         for (;;) {
             const int rr = av_read_frame(fmt_, pkt_);
             if (rr < 0) {
@@ -564,10 +623,38 @@ void FFmpegPlayer::Thread() {
             const int rc = avcodec_receive_frame(ctx_, frm_);
             if (rc == AVERROR(EAGAIN)) { ++st_.empty; continue; }
             if (rc < 0) { ++st_.empty; break; }
-            if (!Pack(frm_, frame)) { av_frame_unref(frm_); ++st_.empty; break; }
             const int64_t pts = frm_->best_effort_timestamp != AV_NOPTS_VALUE ? frm_->best_effort_timestamp
                                                                              : frm_->pts;
             outTs = pts != AV_NOPTS_VALUE ? int64_t(pts * av_q2d(tb_) * 1e7) : 0;
+            // A 4K NV12 picture is 12.4 MB, and Pack() copies it on the decode thread while the desktop
+            // is trying to draw. If the pending slot still holds the picture from the last step, this one
+            // will be swapped out before any frame is drawn - copied, uploaded by nobody, freed. Measured
+            // 2026-10-08: the decoder runs at the clip's own 30 fps, the slot is capped to 24, so 6 of
+            // every 30 pictures (74 MB/s) were packed for nothing; the log called them `dropped`.
+            // Publishing only into an empty slot costs the same picture the desktop would have taken -
+            // one frame per present, the present phase decides which - and skips the copy instead of
+            // doing it and throwing it away.
+            // Two cases must keep every picture: running to a park target (the thumbnails ask for a named
+            // moment and the only proof that it arrived is position_ reaching it, which only a published
+            // frame stamps), and the first picture after a seek, which is what the hero transition waits
+            // for. The pending slot is empty in both, so neither is special-cased here beyond the guard.
+            bool held = false;
+            {
+                std::lock_guard lk(mtx_);
+                held = !pending_.empty() && !holdNext_;
+            }
+            if (held) {
+                av_frame_unref(frm_);
+                ++st_.notPacked;
+                skipped = true;
+                break;
+            }
+            const Clock packClock;
+            if (!Pack(frm_, frame)) { av_frame_unref(frm_); ++st_.empty; break; }
+            const unsigned long long packUs = packClock.us();
+            st_.packUsSum += packUs;
+            AddMax(st_.packUsMax, packUs);
+            ++st_.packSteps;
             av_frame_unref(frm_);
             gotFrame = true;
             break;
@@ -577,9 +664,13 @@ void FFmpegPlayer::Thread() {
         AddMax(st_.decodeUsMax, stepUs);
         ++st_.steps;
 
-        if (gotFrame) {
+        if (gotFrame || skipped) {
+            // A skipped picture is still a step of the clip's clock: pacing it like a published frame is
+            // what keeps position_ advancing at wall-clock speed (each published frame is now one clip
+            // interval further along than the last present, so the caption does not drift behind the file)
+            // and keeps the decoder from running ahead into the next GOP.
             idleStreak = 0;
-            {
+            if (gotFrame) {
                 // The braces are load-bearing: std::mutex is not recursive, and holding this guard
                 // into the pacing wait below made _Mtx_lock return thrd_busy, which MSVC turns into a
                 // std::system_error that escapes the thread -> terminate/abort (BEX64 in ucrtbase).
@@ -595,8 +686,13 @@ void FFmpegPlayer::Thread() {
                 }
             }
             cv_.notify_all();
+            // `frame` now holds whatever that swap displaced - the buffer the previous pending frame
+            // lived in - and it goes back to the pool instead of being freed. On the skipped path it is
+            // the empty buffer this step took out of the pool, which has to go back the same way or the
+            // pool loses a slot every time the desktop is behind.
+            PutBuffer(std::move(frame));
             const double pos = position_.load();
-            if (seamOpen_) {
+            if (gotFrame && seamOpen_) {
                 const auto nowMs = std::chrono::steady_clock::now();
                 if (pos + 0.0005 < lastShownPos_) {
                     // The cut itself. The two positions say the tail played out (last tail frame near
