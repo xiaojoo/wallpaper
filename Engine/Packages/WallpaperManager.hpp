@@ -44,6 +44,10 @@ public:
     // Loads, or writes a first-run config that points at the first wallpaper it finds.
     bool Load(const std::wstring& exeDir, std::string& error);
     bool Save(std::string& error);
+    // The two halves of `Save`, split so the presenting thread can build the text it owns and let a
+    // worker take the 8-43 ms file write. `WriteConfigText` serialises itself against other writers.
+    std::string ConfigText() const;
+    bool WriteConfigText(const std::string& text, std::string& error);
 
     Settings& settings() { return s_; }
     const Json& raw() const { return raw_; }

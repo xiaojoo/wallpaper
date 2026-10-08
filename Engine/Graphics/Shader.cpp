@@ -4,7 +4,12 @@
 #include <d3dcompiler.h>
 #include <d3d11shader.h>
 
+#include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <format>
+#include <map>
+#include <mutex>
 
 namespace sw {
 static constexpr const char* MOD = "shader";
@@ -94,8 +99,59 @@ bool Shader::Available(std::string& why) {
     return true;
 }
 
+namespace {
+struct Blobs {
+    Com<ID3DBlob> vs, ps, cs, bg, pvs;
+};
+std::mutex gShaderMtx;
+std::map<std::string, Blobs> gCompiled;
+
+std::string CompileKey(const std::string& source, const std::wstring& fileName,
+                       const std::vector<std::wstring>& includeDirs, const Shader::Entries& e) {
+    unsigned long long h = 1469598103934665603ULL;
+    const auto add = [&h](const std::string& s) {
+        for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
+    };
+    add(source);
+    add(ToUtf8(fileName));
+    add(e.vs + "\1" + e.ps + "\1" + e.cs + "\1" + e.bg + "\1" + e.pvs);
+    std::vector<std::string> stamps;
+    for (const std::wstring& dir : includeDirs) {
+        std::error_code ec;
+        for (const auto& de : std::filesystem::directory_iterator(dir, ec)) {
+            if (!de.is_regular_file()) continue;
+            const std::string n = ToUtf8(de.path().filename().wstring());
+            stamps.push_back(std::format("{}|{}|{}", n, (unsigned long long)de.file_size(ec),
+                                         de.last_write_time(ec).time_since_epoch().count()));
+        }
+    }
+    std::sort(stamps.begin(), stamps.end());
+    for (const auto& s : stamps) add(s);
+    return std::format("{:016x}-{}", h, stamps.size());
+}
+} // namespace
+
 bool Shader::Compile(const std::string& source, const std::wstring& fileNameForErrors,
                      const std::vector<std::wstring>& includeDirs, const Entries& e, std::string& error) {
+    // A switch to a wallpaper used to pay for a fresh D3DCompile of a source this process had already
+    // compiled: main.hlsl measures 46-104 ms, and every package is compiled once by the startup thumbnail
+    // pass before the hero or the desktop ever asks for it again. The key covers what the compiler would
+    // read - the source text, the entry points, and the name, size and write-time of every file in the
+    // include directories - so an edited shader or include recompiles rather than drawing the stale one
+    // (measured both ways on 2026-10-08: five hero changes reused, a `touch` of Shaders/main.hlsl forced
+    // the recompile). A touched-but-unused file costs a recompile, never a wrong picture.
+    const std::string key = CompileKey(source, fileNameForErrors, includeDirs, e);
+    {
+        std::lock_guard lk(gShaderMtx);
+        auto hit = gCompiled.find(key);
+        if (hit != gCompiled.end()) {
+            vsBlob_ = hit->second.vs; psBlob_ = hit->second.ps; csBlob_ = hit->second.cs;
+            bgBlob_ = hit->second.bg; pvsBlob_ = hit->second.pvs;
+            Info(MOD, "reusing the compiled {}: vs {}B, ps {}B", ToUtf8(fileNameForErrors),
+                 (unsigned)vsBlob_->GetBufferSize(), (unsigned)psBlob_->GetBufferSize());
+            return true;
+        }
+    }
     const std::string vsEntry = e.vs, psEntry = e.ps;
     auto api = LoadCompiler();
     if (!api.compile) {
@@ -150,6 +206,7 @@ bool Shader::Compile(const std::string& source, const std::wstring& fileNameForE
     Info(MOD, "compiled {}: vs {}B, ps {}B{}{}{}", ToUtf8(fileNameForErrors), (unsigned)vsBlob_->GetBufferSize(),
          (unsigned)psBlob_->GetBufferSize(), csBlob_ ? ", cs " : "", csBlob_ ? std::to_string((unsigned)csBlob_->GetBufferSize()).c_str() : "",
          pvsBlob_ ? ", pvs+bg" : "");
+    { std::lock_guard lk(gShaderMtx); gCompiled[key] = { vsBlob_, psBlob_, csBlob_, bgBlob_, pvsBlob_ }; }
     return true;
 }
 

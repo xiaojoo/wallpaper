@@ -90,6 +90,13 @@ const Entry kStrings[] = {
     {"resume", "恢复渲染", "Resume rendering"},
     {"monitors", "显示器", "Monitors"},
     {"all_monitors", "全部显示器", "All monitors"},
+    // The licence notice is a distribution obligation for the FFmpeg DLLs, so it has to be readable
+    // from the running program rather than only from the source tree.
+    // The percent in the status line is an average, so the label carries the window it averages over.
+    {"cpu_over", "均值窗口", "over"},
+    // The LGPL sentence that used to live here was taken out of the 通用 page on 2026-10-08. The
+    // obligation itself is untouched: LICENSE-FFmpeg.txt and NOTICE-FFmpeg.txt still ship beside the
+    // exe (CMake stages them), and `--ctl status` still answers which build is loaded.
     {"target", "操作目标", "Target"},
     {"wallpapers", "壁纸", "Wallpapers"},
     {"tab_general", "通用", "General"},
@@ -395,6 +402,7 @@ void Bridge::ingest(const Json& status, const Json& list) {
     trayAlpha_ = status.intOr("tray_alpha", 0);
     if (const Json* p = status.find("process"); p && p->isObject()) {
         cpu_ = p->numOr("cpu_percent");
+        cpuWin_ = p->numOr("cpu_window_s");
         ws_ = p->numOr("working_set_mb");
     }
     monitors_.clear();
@@ -411,6 +419,9 @@ void Bridge::ingest(const Json& status, const Json& list) {
             }
             monitors_.push_back(row);
         }
+        // Which decoder each screen landed on used to be aggregated here for a line on the 通用 page.
+        // He took that line out (2026-10-08); `--ctl status` still answers it per monitor, and nothing
+        // in this process reads it any more.
         if (!target_.isEmpty() && target_ != "all") {
             bool stillThere = false;
             for (auto& v : monitors_)

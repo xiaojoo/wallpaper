@@ -2,7 +2,7 @@
 #include "Engine/Graphics/D3D11Device.hpp"
 #include "Engine/Graphics/D3D11Renderer.hpp"
 #include "Engine/Graphics/Texture.hpp"
-#include "Engine/Graphics/VideoPlayer.hpp"
+#include "Engine/Graphics/VideoSource.hpp"
 #include "Engine/Packages/WallpaperInstance.hpp"
 #include "Engine/Core/Log.hpp"
 
@@ -81,10 +81,23 @@ bool Thumbnailer::Grab(D3D11Device& dev, D3D11Renderer& rend, WallpaperInstance&
     // A video wallpaper has to be sampled *at* these times, not at whatever the decoder happened to
     // be playing: the clip runs on its own wall clock and the strip would otherwise be 24 frames from
     // a stretch of a second that has nothing to do with baseTime_.
-    if (inst.hasVideo()) {
-        const bool parked = inst.video()->ShowFrameAt(seconds, dev.ctx.Get());
+    //
+    // Not when this is the instance on screen. Asking it to park is what froze the desktop on a still
+    // picture at every start, and taking the frame it is already showing costs no decoder at all - a
+    // throwaway 4K player cost ~900 MB of decoder surface pool for the few seconds of the grab.
+    if (inst.hasVideo() && !liveSource_) {
+        const bool parked = inst.video()->ShowFrameAt(seconds, dev.ctx.Get(), idle_);
         Info(MOD, "grab at {:.2f} s: ShowFrameAt {}, {} frames delivered so far", seconds,
              parked ? "found a frame" : "TIMED OUT", inst.video()->delivered());
+    } else if (inst.hasVideo()) {
+        // This runs at startup too, before the player has produced anything - and an empty grab would
+        // be saved as a black card that then survives every reload (only restarting the renderer
+        // rebuilds thumbnails). Wait briefly for the first picture instead; if none arrives, the
+        // frame that gets drawn is whatever the instance holds, and the card is rebuilt next restart.
+        const ULONGLONG until = GetTickCount64() + 1500;
+        while (inst.video()->delivered() == 0 && GetTickCount64() < until) Sleep(10);
+        Info(MOD, "grab at {:.2f} s: live source, taking frame {} as it plays", seconds,
+             inst.video()->delivered());
     }
 
     DrawArgs args = inst.MakeArgs(f, dev.ctx.Get());
@@ -136,6 +149,27 @@ bool Thumbnailer::Grab(D3D11Device& dev, D3D11Renderer& rend, WallpaperInstance&
         }
     } else {
         buf.swap(big);
+    }
+
+    // A video card with no picture in it must never reach the disk. An un-uploaded plane pair reads as
+    // zero, and the shader turns that into R0 G76 B0 - the green card that survived every reload
+    // because only a restart rebuilds thumbnails. Uniform output is the signature (green and black
+    // both), so refuse and let the previous card stand; scoped to video because a solid-colour image
+    // wallpaper is legitimately uniform and should still get its card.
+    if (inst.hasVideo()) {
+        unsigned lo = 255, hi = 0;
+        for (size_t i = 0; i < buf.size(); i += 4) {
+            const unsigned l = (unsigned(buf[i]) * 77 + unsigned(buf[i + 1]) * 150
+                                + unsigned(buf[i + 2]) * 29) >> 8;
+            if (l < lo) lo = unsigned(l);
+            if (l > hi) hi = unsigned(l);
+        }
+        if (hi - lo < 6) {
+            error = "the grabbed video frame is uniform (luma " + std::to_string(lo) + ".."
+                    + std::to_string(hi) + ") - no card written";
+            Warn(MOD, "{}", error);
+            return false;
+        }
     }
 
     const bool wrote = WriteImage(dev.wic.Get(), file, w, h, buf, error, jpegQuality);
@@ -219,8 +253,15 @@ bool Thumbnailer::Build(D3D11Device& dev, D3D11Renderer& rend, WallpaperInstance
     out.ok = true;
     const long long builtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                   std::chrono::steady_clock::now() - t0).count();
-    Info(MOD, "{}: still {}x{}, large {}x{}, {} of {} motion frames kept at {:.1f} ms - built in {} ms",
-         id, stillW_, stillH_, largeW_, largeH_, (unsigned)out.frames.size(), frameCount_, out.frameMs, builtMs);
+    // Two different sentences, because one number line was read as a failure twice: "0 of 24 kept"
+    // looks like a strip that failed to build, when for a video there is no strip to build and no
+    // grab was ever attempted.
+    if (inst.hasVideo())
+        Info(MOD, "{}: still {}x{}, large {}x{}, no motion strip (video cards play live, by design) - built in {} ms",
+             id, stillW_, stillH_, largeW_, largeH_, builtMs);
+    else
+        Info(MOD, "{}: still {}x{}, large {}x{}, {} of {} motion frames kept at {:.1f} ms - built in {} ms",
+             id, stillW_, stillH_, largeW_, largeH_, (unsigned)out.frames.size(), frameCount_, out.frameMs, builtMs);
     return true;
 }
 

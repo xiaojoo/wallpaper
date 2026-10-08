@@ -1,6 +1,9 @@
 #include "Engine/Packages/WallpaperInstance.hpp"
 #include "Engine/Graphics/D3D11Device.hpp"
-#include "Engine/Graphics/VideoPlayer.hpp"
+#include "Engine/Graphics/FFmpegPlayer.hpp"
+#include "Engine/Core/Json.hpp"
+
+#include <iterator>
 #include "Engine/Core/Log.hpp"
 
 #include <algorithm>
@@ -15,8 +18,80 @@ void WallpaperInstance::SetMediaActive(bool active) {
     if (video_) video_->SetActive(active);
 }
 
+namespace {
+// One backend, hardware first. Measured 2026-10-07 on the 4K60 clip that is on this desktop, 10 s
+// windows from `--ctl status`: native h264 216% of a core / 556 MB / 54.8 frames/s, h264_cuvid 37% /
+// 299 MB / 60.7 frames/s. The Media Foundation decoder that shipped before this cost 290-313% /
+// 779-790 MB for the same picture and is gone.
+//
+// WALLPAPER_VIDEO=sw asks for the native decoder only. It exists because NVDEC is a second piece of
+// software we do not control: when the picture goes wrong on a machine with a green colour gate, the
+// first question is whether the vendor decoder or our pipeline did it, and that question needs a
+// switch, not a rebuild.
+bool NativeDecoderOnly() {
+    wchar_t env[16]{};
+    const DWORD n = GetEnvironmentVariableW(L"WALLPAPER_VIDEO", env, DWORD(std::size(env)));
+    return n > 0 && ToUtf8(std::wstring_view(env, n)) == "sw";
+}
+
+// Where a package's shader actually lives and what the compiler gets handed. Shared between Prepare
+// and the worker-thread warm-up below so the two can never disagree about which file was compiled.
+bool ResolveShader(const WallpaperPackage& pkg, const std::wstring& rootDir, std::string& src,
+                   std::wstring& fileName, std::vector<std::wstring>& includes, std::string& error) {
+    namespace fs = std::filesystem;
+    // A decoded frame is two planes, and only Video.hlsl reads them. The two clips imported before
+    // that shader existed still carry "Image.hlsl" in their manifests, so the engine decides this one
+    // rather than letting a stale manifest sample luma as if it were a whole picture.
+    std::wstring shaderFile = pkg.shaderFile();
+    if (pkg.isVideo() && shaderFile != L"Video.hlsl") {
+        Warn(MOD, "{}: manifest asks for {}, but a video wallpaper is drawn by Video.hlsl", pkg.id(),
+             ToUtf8(shaderFile));
+        shaderFile = L"Video.hlsl";
+    }
+    std::wstring shaderPath = pkg.dir() + L"\\" + shaderFile;
+    const std::wstring sharedDir = rootDir + L"\\Shaders";
+    if (!fs::exists(shaderPath)) {
+        const std::wstring alt = sharedDir + L"\\" + shaderFile;
+        if (!fs::exists(alt)) {
+            error = "shader " + ToUtf8(shaderFile) + " not found in " + ToUtf8(pkg.dir()) + " or Shaders/";
+            return false;
+        }
+        shaderPath = alt;
+    }
+    bool ok = false;
+    src = ReadFileUtf8(shaderPath, ok);
+    if (!ok || src.empty()) { error = "cannot read shader " + ToUtf8(shaderPath); return false; }
+    includes = { fs::path(shaderPath).parent_path().wstring(), sharedDir, pkg.dir() };
+    fileName = fs::path(shaderPath).filename().wstring();
+    return true;
+}
+} // namespace
+
+bool WarmPackageShader(const WallpaperPackage& pkg, const std::wstring& rootDir, std::string& error) {
+    std::string src;
+    std::wstring fileName;
+    std::vector<std::wstring> includes;
+    if (!ResolveShader(pkg, rootDir, src, fileName, includes, error)) return false;
+    Shader probe;   // Compile needs no device - only CreatePipeline does - so a worker may run it
+    return probe.Compile(src, fileName, includes, pkg.entries(), error);
+}
+
+std::unique_ptr<VideoSource> OpenPackageMedia(const WallpaperPackage& pkg, std::string& error) {
+    if (!pkg.isVideo()) return nullptr;
+    auto src = MakeFFmpegPlayer(!NativeDecoderOnly());
+    if (!src) { error = pkg.id() + ": no video backend could be created"; return nullptr; }
+    const std::wstring path = pkg.dir() + L"\\" + pkg.videoFile();
+    std::string verr;
+    if (!src->OpenFile(path, pkg.videoLoop(), verr)) {
+        error = pkg.id() + ": " + verr;
+        Warn(MOD, "{}", error);
+        return nullptr;
+    }
+    return src;
+}
+
 bool WallpaperInstance::Prepare(const std::wstring& rootDir, const WallpaperPackage& pkg, D3D11Device& dev,
-                                std::string& error) {
+                                std::string& error, std::unique_ptr<VideoSource> warmMedia) {
     namespace fs = std::filesystem;
     pkg_ = pkg;
 
@@ -28,39 +103,12 @@ bool WallpaperInstance::Prepare(const std::wstring& rootDir, const WallpaperPack
         return false;
     }
 
-    // A decoded frame is two planes, and only Video.hlsl reads them. The two clips imported before
-    // that shader existed still carry "Image.hlsl" in their manifests, so the engine decides this one
-    // rather than letting a stale manifest sample luma as if it were a whole picture.
-    std::wstring shaderFile = pkg_.shaderFile();
-    if (pkg_.isVideo() && shaderFile != L"Video.hlsl") {
-        Warn(MOD, "{}: manifest asks for {}, but a video wallpaper is drawn by Video.hlsl", pkg_.id(),
-             ToUtf8(shaderFile));
-        shaderFile = L"Video.hlsl";
-    }
-    std::wstring shaderPath = pkg_.dir() + L"\\" + shaderFile;
-    std::wstring sharedDir = rootDir + L"\\Shaders";
-    if (!fs::exists(shaderPath)) {
-        std::wstring alt = sharedDir + L"\\" + shaderFile;
-        if (!fs::exists(alt)) {
-            error = "shader " + ToUtf8(shaderFile) + " not found in " + ToUtf8(pkg_.dir()) + " or Shaders/";
-            return false;
-        }
-        shaderPath = alt;
-    }
-
-    bool ok = false;
-    std::string src = ReadFileUtf8(shaderPath, ok);
-    if (!ok || src.empty()) {
-        error = "cannot read shader " + ToUtf8(shaderPath);
-        return false;
-    }
-
+    // A decoded frame is two planes, and only Video.hlsl reads them - the resolution rule lives in
+    // ResolveShader, which the worker-thread warm-up calls with the same arguments.
+    std::string src;
+    std::wstring fileName;
     std::vector<std::wstring> includes;
-    includes.push_back(fs::path(shaderPath).parent_path().wstring());
-    includes.push_back(sharedDir);
-    includes.push_back(pkg_.dir());
-
-    std::wstring fileName = fs::path(shaderPath).filename().wstring();
+    if (!ResolveShader(pkg_, rootDir, src, fileName, includes, error)) return false;
     if (!shader_.Compile(src, fileName, includes, pkg_.entries(), error)) return false;
     if (!shader_.CreatePipeline(dev.dev.Get(), error)) return false;
     if (!shader_.ReflectParams(error)) return false;
@@ -98,14 +146,19 @@ bool WallpaperInstance::Prepare(const std::wstring& rootDir, const WallpaperPack
     // The decoder runs on its own thread from here on; the frame is picked up in MakeArgs, which every
     // drawing path goes through.
     if (pkg_.isVideo()) {
-        video_ = std::make_unique<VideoPlayer>();
-        const std::wstring path = pkg_.dir() + L"\\" + pkg_.videoFile();
+        std::unique_ptr<VideoSource> player = std::move(warmMedia);
+        if (!player) {
+            player = OpenPackageMedia(pkg_, error);
+            if (!player) return false;
+        }
+        // The device half either way: whoever opened the file still cannot build the plane textures off
+        // the thread that owns the immediate context.
         std::string verr;
-        if (!video_->Open(dev.dev.Get(), path, pkg_.videoLoop(), verr)) {
+        if (!player->Attach(dev.dev.Get(), verr)) {
             error = pkg_.id() + ": " + verr;
-            video_.reset();
             return false;
         }
+        video_ = std::move(player);
     }
 
     if (pkg_.hasParticles()) {

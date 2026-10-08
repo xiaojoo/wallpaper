@@ -14,9 +14,13 @@
 #include "Engine/Packages/Thumbnailer.hpp"
 #include "Engine/Packages/WallpaperManager.hpp"
 #include <atomic>
+#include <condition_variable>
 #include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
+#include <thread>
+#include <vector>
 
 namespace sw {
 
@@ -99,6 +103,10 @@ private:
         // that inside the frame loop stalled every screen for ~100 ms each time the selection moved.
         std::map<std::string, std::unique_ptr<WallpaperInstance>> cache;
         WallpaperInstance* inst = nullptr;
+        // True when `inst` is a live desktop slot's instance being drawn a second time into the
+        // preview surface, rather than one this pass owns. Shared instances must not be parked,
+        // erased from the cache, or left pointing at a slot that has since been rebuilt.
+        bool shared = false;
         Com<ID3D11Texture2D> rt;
         Com<ID3D11RenderTargetView> rtv;
         // Two staging textures and an event query each: the copy is picked up a frame later so the
@@ -109,6 +117,16 @@ private:
         // copy is still in flight is collected on a later loop rather than dropped.
         enum SlotState : UINT8 { Free = 0, CopyPending };
         UINT8 slotState[2] = { Free, Free };
+        // Set while a freshly re-targeted video has no decoded picture yet, so the "publishing held
+        // back" line is logged once per re-target instead of thirty times a second.
+        bool waitingFirstFrame = false;
+        // ... and each slot remembers which wallpaper it was drawn from, because that is not the same
+        // question as "which one is asked for now": with two slots and the driver a frame behind, the
+        // first frames collected after a switch were rendered from the wallpaper the user just left.
+        // Stamping those with the current id is what made the window, and any external ruler reading
+        // the section, believe a picture of one wallpaper was a picture of another.
+        UINT64 slotHash[2] = { 0, 0 };
+        unsigned draining = 0;      // frames written that belong to a wallpaper other than the request
         UINT w = 0, h = 0;
         FPSController::Slot clock{};
         ULONGLONG lastBeatMs = 0;
@@ -130,6 +148,34 @@ private:
     void DestroySlots();
     bool ReloadSlot(Slot& s, const std::string& wallpaperId, std::string& error);
     void DrawSlot(Slot& s, double nowSeconds);
+    // Draw every slot and (unless told not to) the preview, then commit one composition.
+    void DrawDue(bool withPreview = true);
+    // Runs a package's device-free preparation (HLSL compile, clip container and decoder) on a worker
+    // thread and keeps the desktop drawing while it runs. See Application.cpp for the measured reason a
+    // switch may not stop to pay for it inline. `withPreview` is false when the caller is the preview
+    // switch itself: its instance is mid-replacement there, and drawing it failed with
+    // "missing rtv or shader" 12-39 times a session before that was noticed.
+    std::unique_ptr<VideoSource> WarmWhileDrawing(const WallpaperPackage& pkg, std::string& error,
+                                                  bool withPreview = true);
+    // Hand an outgoing wallpaper to the background thread instead of destroying it here: a video player's
+    // shutdown measured 28-59 ms on the thread that presents the desktop, which is most of what a switch
+    // still costs after the file open moved off it.
+    void ReapLater(std::unique_ptr<WallpaperInstance> outgoing);
+    // One background thread for the two jobs that are too expensive for the presenting thread and need
+    // no device: tearing down an outgoing wallpaper, and writing config.json (8-43 ms for this file).
+    void PostBackground(std::function<void()> work);
+    // Block until the background queue has run dry, keeping the desktop drawing while waiting. Needed
+    // before anything that depends on a deferred teardown having actually happened - a package's
+    // video.mp4 is still open until its player is destroyed, and a directory holding an open file
+    // cannot be removed.
+    void WaitBackgroundIdle();
+    void BackgroundLoop();
+    std::thread background_;
+    std::mutex bgMtx_;
+    std::condition_variable bgCv_;
+    std::deque<std::function<void()>> bgWork_;
+    bool bgStop_ = false;
+    bool bgBusy_ = false;
     void ProcessQueued();
     void UpdateSnapshot();
     void DrainMessages();

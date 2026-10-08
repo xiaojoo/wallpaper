@@ -6,6 +6,12 @@ the desktop is covered measures that window, not the wallpaper. The live preview
 section (Engine/App/PreviewStream.hpp) is the same shader output on the same device, and its layout
 is fixed by that header, so it is a faithful ruler for "what did Video.hlsl put on screen".
 
+Two guards it needs because the section is a single channel with two copies in flight: every frame is
+measured only if the stamp in its own header says it belongs to the wallpaper under test, and the
+channel is waited out until the instance behind it has a picture. Without them a re-target reads as a
+colour defect (measured 2026-10-07: bars coming back as (0,76,0) and as a rain scene, both times while
+`status.preview.id` correctly named the clip under test).
+
 Fixture geometry (tools/mkfixture.cpp), in video pixels of a 16:9 clip shown into a 16:9 preview box:
   top third    8 saturated colour bars - the matrix choice moves these by tens
   middle third 11 step studio-swing luma ramp, 16..235, grey, so both matrices agree
@@ -26,6 +32,18 @@ MAGIC, VERSION = 0x56535057, 2
 HDR_BYTES = 64
 # PreviewHeader: magic 0, version 4, w 8, h 12, stride 16, seq 20, stampMs 24, frames 32, idHash 40
 SEQ_OFF = 20
+HASH_OFF = 40
+
+
+def fnv(s):
+    """The FNV-1a the renderer stamps each frame with (Engine/App/PreviewStream.hpp::IdHash)."""
+    h = 1469598103934665603
+    for b in s.encode("utf-8"):
+        h ^= b
+        h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
 BARS = [(255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0),
         (255, 0, 255), (255, 0, 0), (0, 0, 255), (16, 16, 16)]
 RAMP = [16 + i * (235 - 16) // 10 for i in range(11)]
@@ -61,7 +79,10 @@ def read_frame(view):
     buf = ctypes.string_at(view + HDR_BYTES, h * stride)
     if struct.unpack_from("<i", ctypes.string_at(view + SEQ_OFF, 4), 0)[0] != seq:
         return None
-    return w, h, buf
+    # The stamp travels with the pixels. `status.preview.id` is a question asked at a different moment,
+    # and the channel holds two copies in flight, so the answer can describe a frame that has not been
+    # written yet - which is how a measurement of one wallpaper came back as another one's picture.
+    return w, h, buf, struct.unpack_from("<Q", head, HASH_OFF)[0]
 
 
 def sample(w, h, buf, vx, vy, vw, vh):
@@ -107,15 +128,53 @@ def main():
         print(f"no preview section (gle {gle})")
         return 1
 
+    # Wait until the channel actually holds a picture of THIS wallpaper. Two things are wrong with
+    # measuring immediately: the two in-flight GPU copies still show whatever was there before the
+    # re-target, and a video instance has to decode its first frame before the picture is anything
+    # but the shader sampling an empty plane (uniform green). Re-issuing `preview` also re-arms the
+    # renderer's 3 s beat, which is what keeps a pipe-driven pass alive across the wait.
+    waited, vf = 0.0, None
+    while waited < 4.0:
+        s = json.loads(ctl(exe, "status") or "{}")
+        p = s.get("preview", {})
+        vf = p.get("video_frames")
+        if p.get("on") and p.get("id") == ident and (vf is None or vf > 0):
+            break
+        subprocess.run([exe, "--ctl", "preview", ident], capture_output=True, check=False)
+        time.sleep(0.2)
+        waited += 0.2
+    print(f"  channel ready after {waited:.1f} s (preview.video_frames={vf})")
+
+    want = fnv(ident)
+    known = [p.get("id", "") for p in st.get("catalog", [])]
+
+    def name_of(h):
+        if h == want:
+            return ident
+        for k in known:
+            if fnv(k) == h:
+                return k
+        return f"unknown({h:x})"
+
     frames = []
+    foreign = {}
     owner = None
     deadline = time.time() + 2.6  # a pipe-driven preview is closed by its own watchdog after ~3 s
     while time.time() < deadline and len(frames) < 2:
         f = read_frame(view)
-        if f and (not frames or f[2] != frames[-1][2]):
-            frames.append(f)
-            owner = ctl(exe, "status")
+        if f:
+            # Refuse a frame whose own stamp is not the wallpaper under test, whatever `status` says.
+            # Two copies are always in flight, so right after a re-target the channel still carries the
+            # picture of the wallpaper that was showing before it.
+            if f[3] != want:
+                foreign[f[3]] = foreign.get(f[3], 0) + 1
+            elif not frames or f[2] != frames[-1][2]:
+                frames.append(f)
+                owner = ctl(exe, "status")
         time.sleep(0.04)
+    if foreign:
+        print("  refused " + ", ".join(f"{n} frame(s) stamped {name_of(h)}" for h, n in foreign.items())
+              + f" - the channel was still draining; only frames stamped {ident} were measured")
     if len(frames) < 2:
         print(f"got {len(frames)} distinct preview frame(s) in 2.6 s - cannot prove motion")
         return 1
@@ -129,7 +188,7 @@ def main():
                   f"not {ident} - these pixels are not the clip under test")
             return 2
 
-    w, h, buf = frames[0]
+    w, h, buf, _stamp = frames[0]
     print(f"preview surface {w}x{h}, 2 distinct frames collected")
 
     worst = 0

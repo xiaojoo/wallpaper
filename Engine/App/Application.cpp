@@ -1,16 +1,15 @@
 #include "Engine/App/Application.hpp"
 #include "Engine/App/IPCServer.hpp"
 #include "Engine/Core/Log.hpp"
-#include "Engine/Graphics/VideoPlayer.hpp"
+#include "Engine/Graphics/FFmpegPlayer.hpp"
 
 #include <psapi.h>
 #include <shellapi.h>
 #include <filesystem>
 #include <algorithm>
+#include <atomic>
+#include <thread>
 #include <wincodec.h>
-#include <mfapi.h>
-#include <mfidl.h>
-#include <mfreadwrite.h>
 #include <sstream>
 
 namespace sw {
@@ -35,6 +34,7 @@ Level LevelFromString(const std::string& s) {
 struct MemSample {
     double workingSetMb = 0, privateMb = 0;
     double cpuPercent = 0;
+    double cpuWindowS = 0;   // how long the window behind cpuPercent actually was
 };
 
 MemSample SampleProcess(ULONGLONG& lastWallNs, ULONGLONG& lastCpuNs) {
@@ -54,10 +54,26 @@ MemSample SampleProcess(ULONGLONG& lastWallNs, ULONGLONG& lastCpuNs) {
         QueryPerformanceCounter(&li);
         // Wall clock in 100 ns units, same scale as the FILETIMEs, so the ratio is real CPU percent.
         ULONGLONG wallNow = (ULONGLONG)((double)li.QuadPart * 1e7 / (double)freq.QuadPart);
-        if (lastWallNs && wallNow > lastWallNs && cpu > lastCpuNs)
-            m.cpuPercent = double(cpu - lastCpuNs) / double(wallNow - lastWallNs) * 100.0;
-        lastWallNs = wallNow;
-        lastCpuNs = cpu;
+        // The window must be the renderer's own, not "since whoever read the status last". The settings
+        // window polls this every second, so a plain delta reports whatever burst landed in that second:
+        // measured 2026-10-07, one and the same steady state read 168.9%, 29.0% and 18.0% in three
+        // samples, and the number in his status bar was the 168.9 one. Only a window of at least
+        // kCpuWindowNs is published; in between the last complete window is repeated, so the value
+        // never silently falls to 0 for a reader that polls faster than the window.
+        constexpr ULONGLONG kCpuWindowNs = 20000000ULL;   // 2 s, in 100 ns units
+        static double lastPct = 0.0;
+        static double lastWinS = 0.0;
+        if (lastWallNs == 0) {
+            lastWallNs = wallNow;
+            lastCpuNs = cpu;
+        } else if (wallNow > lastWallNs && cpu >= lastCpuNs && wallNow - lastWallNs >= kCpuWindowNs) {
+            lastPct = double(cpu - lastCpuNs) / double(wallNow - lastWallNs) * 100.0;
+            lastWinS = double(wallNow - lastWallNs) * 1e-7;
+            lastWallNs = wallNow;
+            lastCpuNs = cpu;
+        }
+        m.cpuPercent = lastPct;
+        m.cpuWindowS = lastWinS;
     }
     return m;
 }
@@ -118,12 +134,8 @@ bool Application::Start(const CommandLine& cl, std::string& error) {
         error = "D3D11 device init failed";
         return false;
     }
-    // After CoInitializeEx inside dev_.Init, and before any wallpaper asks for a decoder.
-    if (FAILED(MFStartup(MF_VERSION))) {
-        error = "Media Foundation startup failed (video wallpapers cannot decode)";
-        Error(MOD, "{}", error);
-        return false;
-    }
+    // COM is up (dev_.Init did CoInitializeEx) and WIC needs it; the video backend needs nothing
+    // process-wide any more - libavformat is opened per file and closed with the player.
     if (!renderer_.Init(dev_.dev.Get(), error)) {
         Error(MOD, "renderer: {}", error);
         return false;
@@ -324,42 +336,14 @@ std::string AddVideoPackage(const std::wstring& root, const std::wstring& srcFil
     namespace fs = std::filesystem;
     if (!fs::exists(srcFile)) { error = "file does not exist"; return {}; }
 
-    UINT w = 0, h = 0;
-    double rate = 0.0, duration = 0.0;
-    bool bt601 = false;
+    VideoProbe probe{};
     {
-        Com<IMFSourceReader> rd;
-        const HRESULT prh = MFCreateSourceReaderFromURL(srcFile.c_str(), nullptr, &rd);
-        if (FAILED(prh)) {
-            error = "Media Foundation cannot open this file: " + HResultToString(prh);
-            return {};
-        }
-        Com<IMFMediaType> mt;
-        const HRESULT mhr = rd->GetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &mt);
-        if (FAILED(mhr)) {
-            error = "no video stream in this file: " + HResultToString(mhr);
-            return {};
-        }
-        UINT32 ww = 0, hh = 0;
-        MFGetAttributeSize(mt.Get(), MF_MT_FRAME_SIZE, &ww, &hh);
-        w = UINT(ww);
-        h = UINT(hh);
-        UINT32 num = 0, den = 0;
-        if (SUCCEEDED(MFGetAttributeRatio(mt.Get(), MF_MT_FRAME_RATE, &num, &den)) && den)
-            rate = double(num) / double(den);
-        // Which matrix the encoder used. This SDK has no enum name for the primaries values, so the
-        // numbers are the ones MF defines: 1 BT.709, 2 unspecified, 4..7 the BT.601 family
-        // (625-line, 525-line, SMPTE-240M, SMPTE-C). Only a declared 601 family switches the shader.
-        UINT32 prim = 0;
-        if (SUCCEEDED(mt->GetUINT32(MF_MT_VIDEO_PRIMARIES, &prim)))
-            bt601 = (prim >= 4 && prim <= 7);
-        PROPVARIANT var{};
-        PropVariantInit(&var);
-        if (SUCCEEDED(rd->GetPresentationAttribute(DWORD(MF_SOURCE_READER_MEDIASOURCE), MF_PD_DURATION, &var)) &&
-            var.vt == VT_UI8)
-            duration = double(var.ulVal) / 1e7;
-        PropVariantClear(&var);
+        std::string perr;
+        if (!FfmpegProbeVideo(srcFile, probe, perr)) { error = perr; return {}; }
     }
+    const UINT w = probe.w, h = probe.h;
+    const double rate = probe.fps, duration = probe.duration_s;
+    const bool bt601 = probe.bt601;
     if (!w || !h) { error = "the video has no readable frame size"; return {}; }
 
     std::wstring dir;
@@ -408,7 +392,8 @@ std::string AddVideoPackage(const std::wstring& root, const std::wstring& srcFil
     pr.set("bt601", Json::Of(bt601 ? 1.0 : 0.0));
     j.set("params", std::move(pr));
     if (!WriteFileUtf8(dir + L"\\wallpaper.json", j.dump(2))) { error = "cannot write manifest"; return {}; }
-    Info(MOD, "added local video package {} ({}x{}, {:.2f} fps, {:.1f} s)", id, w, h, rate, duration);
+    Info(MOD, "added local video package {} ({}x{}, {:.2f} fps, {:.1f} s, decoded by {})", id, w, h, rate,
+         duration, probe.codec);
     return id;
 }
 } // namespace
@@ -429,6 +414,28 @@ std::string Application::DeleteImagePackage(const std::string& id) {
             return std::format(R"({{"ok":false,"code":"in_use","monitor":"{}","error":"assigned to {}","id":"{}"}})",
                                    a.monitor, a.monitor, id);
 
+    // Every handle this process holds on the package has to be closed *before* the directory goes: the
+    // preview's instance keeps `video.mp4` open while it exists, and Windows answers
+    // ERROR_SHARING_VIOLATION to removing a directory that contains an open file (measured 2026-10-08
+    // 14:21:50 - deleting the clip the hero was showing failed exactly that way, and the same click at
+    // 14:23:14 succeeded once the hero had moved off it). The teardown is deferred to the background
+    // thread, so this also waits for it to have actually run.
+    //
+    // The preview holds one compiled instance per id and that instance owns the loaded picture.
+    // An import takes the lowest free local_NN, so the next upload arrives under this same id and
+    // would be drawn with the deleted file's texture - the card thumbnails come off disk and look
+    // right while the big picture stays on the old one. Stopping the pass is what lets the next
+    // `preview` get past the "already on" shortcut and prepare the new package.
+    if (preview_.id == id) {
+        StopPreview("package deleted");
+        preview_.inst = nullptr;
+    }
+    if (auto it = preview_.cache.find(id); it != preview_.cache.end()) {
+        ReapLater(std::move(it->second));
+        preview_.cache.erase(it);
+    }
+    WaitBackgroundIdle();
+
     const std::wstring dir = wpm_.settings().root + L"\\Wallpapers\\" + ToWide(id);
     std::error_code ec;
     if (!fs::exists(dir, ec))
@@ -443,17 +450,6 @@ std::string Application::DeleteImagePackage(const std::string& id) {
     fs::remove_all(thumbDir_ + L"\\" + ToWide(id) + L"_frames", ec);
     thumbs_.erase(id);
 
-    // The preview holds one compiled instance per id and that instance owns the loaded picture.
-    // An import takes the lowest free local_NN, so the next upload arrives under this same id and
-    // would be drawn with the deleted file's texture - the card thumbnails come off disk and look
-    // right while the big picture stays on the old one. Stopping the pass is what lets the next
-    // `preview` get past the "already on" shortcut and prepare the new package.
-    if (preview_.id == id) {
-        StopPreview("package deleted");
-        preview_.inst = nullptr;
-    }
-    preview_.cache.erase(id);
-
     std::vector<std::string> skipped;
     wpm_.Scan(skipped);
     Info(MOD, "deleted local image package {}", id);
@@ -461,6 +457,9 @@ std::string Application::DeleteImagePackage(const std::string& id) {
 }
 
 bool Application::BuildSlots(std::string& error) {
+    // A shared preview instance lives inside a Slot, and slots_ is about to be cleared: stop the pass
+    // first so it cannot keep drawing - or worse, holding a pointer - into a destroyed slot.
+    StopPreview("slots rebuilt");
     slots_.clear();
     std::string firstFailure;
     int built = 0;
@@ -493,14 +492,96 @@ bool Application::BuildSlots(std::string& error) {
     return true;
 }
 
+// A clip costs 16-99 ms of container probing and 40-49 ms of decoder-plus-hardware-session, and a
+// package's HLSL costs 46-104 ms of D3DCompile - none of which touches our D3D11 device. Done inline -
+// which is how every switch worked until 2026-10-08 - they held the composited desktop on one picture
+// for 100-180 ms, and twice that when the settings window's hero carousel landed on a video, because
+// the eviction of the previous instance was also inline. That pause is what reads as 卡顿一下 when a
+// clip starts from the beginning. So the worker does everything that needs no device while this thread
+// keeps drawing and keeps the shell's messages moving; what is left inline is the pipeline creation,
+// the plane textures and the first decoded frame, ~10 ms together.
+std::unique_ptr<VideoSource> Application::WarmWhileDrawing(const WallpaperPackage& pkg, std::string& error,
+                                                           bool withPreview) {
+    const std::wstring root = wpm_.settings().root;
+    std::unique_ptr<VideoSource> warm;
+    std::atomic<bool> done{false};
+    std::thread worker([&] {
+        std::string serr;
+        WarmPackageShader(pkg, root, serr);   // Prepare reports a shader that cannot be found or built
+        if (pkg.isVideo()) warm = OpenPackageMedia(pkg, error);
+        done.store(true);
+    });
+    while (!done.load()) { DrainMessages(); DrawDue(withPreview); Sleep(1); }
+    worker.join();
+    return warm;
+}
+
+void Application::PostBackground(std::function<void()> work) {
+    { std::lock_guard lk(bgMtx_); bgWork_.push_back(std::move(work)); }
+    bgCv_.notify_one();
+}
+
+// A player's shutdown is its decode thread's join plus libav's own teardown of the decoder and the
+// hardware session, measured at 28 ms on a desktop switch and 59 ms when the settings window's cache
+// evicted a 4K clip - and it happens on the thread that presents the desktop, which is the difference
+// between a switch you can see and one you cannot. Nothing here touches the immediate context: COM
+// Release on a resource the GPU may still be using is safe, and the instance is out of every slot and
+// cache before it gets here.
+void Application::ReapLater(std::unique_ptr<WallpaperInstance> outgoing) {
+    if (!outgoing) return;
+    // The instance is captured by the job, so it is the job's own destruction - on the background
+    // thread - that runs ~WallpaperInstance. shared_ptr because std::function requires a copyable
+    // target; the only other reference is the one this function drops on return.
+    PostBackground([outgoing = std::shared_ptr<WallpaperInstance>(std::move(outgoing))] {});
+}
+
+void Application::BackgroundLoop() {
+    for (;;) {
+        std::function<void()> job;
+        {
+            std::unique_lock lk(bgMtx_);
+            bgCv_.wait(lk, [&] { return bgStop_ || !bgWork_.empty(); });
+            if (bgWork_.empty()) return;   // stopped, and the queue is drained first
+            job = std::move(bgWork_.front());
+            bgWork_.pop_front();
+            bgBusy_ = true;
+        }
+        // The payload of a deferred teardown lives *inside* the job object, so it is the job's own
+        // destruction that closes the file - and that has to happen while this thread is still marked
+        // busy, or `WaitBackgroundIdle` can return with the handle open (measured: the delete still
+        // came back as ERROR_SHARING_VIOLATION 23 ms before the player's own "closed a player" line).
+        job();
+        job = nullptr;
+        { std::lock_guard lk(bgMtx_); bgBusy_ = false; }
+    }
+}
+
+void Application::WaitBackgroundIdle() {
+    const ULONGLONG until = GetTickCount64() + 1000;
+    for (;;) {
+        bool busy;
+        { std::lock_guard lk(bgMtx_); busy = bgBusy_ || !bgWork_.empty(); }
+        if (!busy || GetTickCount64() >= until) return;
+        DrainMessages();
+        DrawDue(false);
+        Sleep(2);
+    }
+}
+
 bool Application::ReloadSlot(Slot& s, const std::string& wallpaperId, std::string& error) {
     const WallpaperPackage* pkg = wpm_.find(wallpaperId);
     if (!pkg) {
         error = "wallpaper '" + wallpaperId + "' is not installed";
         return false;
     }
+    // A preview that was pointed at this slot's own decoder must let go before the swap: after it, the
+    // instance it holds is moved out of and its player is on another thread's teardown list.
+    if (preview_.shared && preview_.inst == &s.instance) StopPreview("shared slot reloaded");
+    std::unique_ptr<VideoSource> warm = WarmWhileDrawing(*pkg, error);
+    if (pkg->isVideo() && !warm) return false;
     WallpaperInstance fresh;
-    if (!fresh.Prepare(wpm_.settings().root, *pkg, dev_, error)) return false;
+    if (!fresh.Prepare(wpm_.settings().root, *pkg, dev_, error, std::move(warm))) return false;
+    ReapLater(std::make_unique<WallpaperInstance>(std::move(s.instance)));
     s.instance = std::move(fresh);
     s.wallpaperId = wallpaperId;
     s.clock = FPSController::Slot{};
@@ -618,6 +699,11 @@ void Application::UpdateSnapshot() {
     r.set("pid", Json::Of((long long)GetCurrentProcessId()));
     r.set("host", Json::Of(std::string(desktop_.host().methodName())));
     r.set("host_detail", Json::Of(desktop_.host().detail));
+    // "which FFmpeg build is in this program" is a distribution obligation, not a debug detail, and it
+    // has to be answerable from the running binary. An empty string means the renderer answering is
+    // older than this window (the build now requires the LGPL shared libraries), so the UI says so
+    // rather than claiming a build it cannot prove.
+    r.set("ffmpeg", Json::Of(FfmpegBuildNote()));
     r.set("root", Json::Of(ToUtf8(wpm_.settings().root)));
     r.set("paused", Json::Of(paused_.load()));
     { std::string ae; r.set("autostart", Json::Of(IsAutostartEnabled(ae))); }
@@ -648,6 +734,18 @@ void Application::UpdateSnapshot() {
         Json pv = Json::Object();
         pv.set("on", Json::Of(preview_.on));
         pv.set("id", Json::Of(preview_.id));
+        // How many frames the channel has written that belong to a wallpaper other than the one now
+        // asked for - the two in-flight copies right after a switch. A reader that only looks at `id`
+        // would call those the new picture; this field is what says "the channel is still draining".
+        pv.set("draining", Json::Of((long long)preview_.draining));
+        // Whether the preview instance has a picture at all yet. A video instance needs its decoder to
+        // deliver before there is anything to sample, and the frames written in between are the shader
+        // reading an empty plane pair - the green picture. A reader that measures those reports a
+        // colour defect that does not exist, so the count has to be readable from outside.
+        if (VideoSource* v = preview_.inst ? preview_.inst->video() : nullptr) {
+            pv.set("video_frames", Json::Of((long long)v->delivered()));
+            pv.set("video_pos", Json::Of(v->position_s()));
+        }
         {
             const ULONGLONG now = GetTickCount64();
             if (preview_.reportAtMs == 0) {
@@ -723,6 +821,8 @@ void Application::UpdateSnapshot() {
     memj.set("working_set_mb", Json::Of(mem.workingSetMb));
     memj.set("private_mb", Json::Of(mem.privateMb));
     memj.set("cpu_percent", Json::Of(mem.cpuPercent));
+    // Named next to the number on purpose: a percent without its window is not a measurement.
+    memj.set("cpu_window_s", Json::Of(mem.cpuWindowS));
     r.set("process", std::move(memj));
 
     Json mons = Json::Array();
@@ -769,7 +869,7 @@ void Application::UpdateSnapshot() {
         j.set("particle_positions_hash", Json::Of(std::format("{:016x}", s.lastParticleHash_)));
         // The video instrument: frames_delivered climbing at the clip's own rate is the direct proof
         // that a decoder is running, and video_output says which path this machine actually gave us.
-        if (VideoPlayer* v = s.instance.video()) {
+        if (VideoSource* v = s.instance.video()) {
             j.set("video_pos", Json::Of(v->position_s()));
             j.set("video_duration", Json::Of(v->duration_s()));
             j.set("video_fps", Json::Of(v->fps()));
@@ -818,18 +918,27 @@ void Application::BuildThumbnails(bool onlyMissing) {
         }
         std::string err;
         Thumbnailer th;
+        // A video card parks the decoder on a named moment, and reaching that moment from the previous
+        // keyframe costs several hundred milliseconds of decode. That wait is inside the grab, on this
+        // thread, so it gets handed the same pump the switch uses: the desktop keeps drawing while the
+        // card is built instead of holding one picture.
+        th.setIdleHook([this] { DrainMessages(); DrawDue(); });
         // Previews are judged against the desktop, so they are told what the desktop is.
         if (const MonitorInfo* m = monitors_.byIndex(0)) th.setDesignSize(m->px.w, m->px.h);
         // Reuse the compiled instance when this wallpaper is what a monitor is already showing;
         // otherwise compile a throwaway one, which is what a fresh install has to do anyway.
-        // A video wallpaper must not be the live one: grabbing its card parks that player on the
-        // frame it was asked to show (ShowFrameAt arms holding_), and nothing clears that flag except
-        // a later seek - so reusing the live instance froze the desktop on a still picture at every
-        // start. Measured 2026-10-07: delivered stuck at 84, the thread parked in cv_.wait at 0% CPU,
-        // and one `--ctl video seek 0.5` brought it back.
+        // A video on screen used to be excluded here, because grabbing its card called ShowFrameAt on
+        // the live player - that parks the player and nothing but a later seek clears it, so the
+        // desktop froze on a still picture at every start (measured 2026-10-07: delivered stuck at 84,
+        // the thread parked in cv_.wait at 0% CPU, one `--ctl video seek 0.5` brought it back). The
+        // rule is carried by the flag now instead: a live instance is grabbed as it plays, which also
+        // avoids the throwaway decoder (the second 4K player we measured under the deleted Media
+        // Foundation backend cost ~900 MB of surface pool for the few seconds of the grab, and the
+        // process never gave that memory back).
         WallpaperInstance* use = nullptr;
         for (auto& s : slots_)
-            if (s.wallpaperId == p.id() && !s.instance.hasVideo()) use = &s.instance;
+            if (s.wallpaperId == p.id()) use = &s.instance;
+        th.setLiveSource(use != nullptr);
         WallpaperInstance temp;
         if (use) {
             if (!th.Build(dev_, renderer_, *use, thumbDir_, p.id(), thumbs_[p.id()], err))
@@ -871,7 +980,7 @@ bool Application::StartPreview(const std::string& id, std::string& error) {
     // and two plane textures - measured at about 200 MB for a 4K clip - and browsing through a dozen
     // took the process to 2.5 GB with 154 threads while only one of them was ever being drawn. Pictures
     // and shaders stay cached, because re-preparing those is the hitch this cache exists to avoid.
-    if (p.inst) {
+    if (p.inst && !p.shared) {
         p.inst->SetMediaActive(false);
         if (p.inst->hasVideo()) {
             for (auto it = p.cache.begin(); it != p.cache.end(); ++it)
@@ -879,8 +988,20 @@ bool Application::StartPreview(const std::string& id, std::string& error) {
                     p.cache.erase(it);
                     break;
                 }
-            p.inst = nullptr;
         }
+    }
+    // When the big picture is the wallpaper already on a screen, draw *that* instance into the preview
+    // surface instead of opening a second decoder for the same file. Measured 2026-10-07 on the 4K60
+    // clip this desktop runs: a second h264_cuvid for the same clip costs +79 points of one core
+    // (15.3% -> 94.7%) and +176 MB of working set (310 -> 486 MB), and both passes are driven off the
+    // same clock, so the picture would have been identical anyway. Particles are excluded because the
+    // draw path steps the simulation, and doing that twice per frame would run it at double speed.
+    p.shared = false;
+    for (auto& s : slots_) {
+        if (s.wallpaperId != id || !s.instance.hasVideo() || s.instance.hasParticles()) continue;
+        p.inst = &s.instance;
+        p.shared = true;
+        break;
     }
     if (!p.writer.open() && !p.writer.OpenWriter(error)) return false;
 
@@ -910,19 +1031,27 @@ bool Application::StartPreview(const std::string& id, std::string& error) {
         p.w = kPreviewW;
         p.h = kPreviewH;
         p.slotState[0] = p.slotState[1] = Preview::Free;
+        p.slotHash[0] = p.slotHash[1] = 0;
     }
 
-    if (!p.inst || p.inst->id() != id) {
+    if (!p.shared && (!p.inst || p.inst->id() != id)) {
         auto it = p.cache.find(id);
         if (it == p.cache.end()) {
             // Bounded: a library of imported pictures must not grow the cache without limit. The
             // instance in use is dropped with the rest, and re-prepared on the next look.
             if (p.cache.size() >= 12) {
+                for (auto& entry : p.cache) ReapLater(std::move(entry.second));
                 p.cache.clear();
                 p.inst = nullptr;
             }
+            // The hero switching is the same warm-up, and it is the surface he watches most: the
+            // carousel lands on another wallpaper every few seconds while the settings window is open.
+            // The preview itself is not drawn while this waits - `p.inst` is about to be replaced, and
+            // drawing it in that state is the "missing rtv or shader" failure.
+            std::unique_ptr<VideoSource> warm = WarmWhileDrawing(*pkg, error, false);
+            if (pkg->isVideo() && !warm) { error = "preview prepare: " + error; return false; }
             auto fresh = std::make_unique<WallpaperInstance>();
-            if (!fresh->Prepare(wpm_.settings().root, *pkg, dev_, error)) {
+            if (!fresh->Prepare(wpm_.settings().root, *pkg, dev_, error, std::move(warm))) {
                 error = "preview prepare: " + error;
                 return false;
             }
@@ -936,28 +1065,36 @@ bool Application::StartPreview(const std::string& id, std::string& error) {
     p.error.clear();
     p.on = true;
     p.lastBeatMs = GetTickCount64();
-    p.inst->SetMediaActive(true);
+    // A shared instance is already active because it is on a screen; asking again would be harmless
+    // but asking it to stop later (StopPreview) is not, so that side checks p.shared.
+    if (!p.shared) p.inst->SetMediaActive(true);
     pacer_.ConfigureSlot(p.clock, kPreviewFps, 0);
-    Info(MOD, "preview on: {} ({}x{} at {} fps)", id, kPreviewW, kPreviewH, kPreviewFps);
+    Info(MOD, "preview on: {} ({}x{} at {} fps{})", id, kPreviewW, kPreviewH, kPreviewFps,
+         p.shared ? ", sharing the live decoder" : "");
     return true;
 }
 
 void Application::StopPreview(const char* why) {
     if (!preview_.on) return;
     preview_.on = false;
-    if (preview_.inst) preview_.inst->SetMediaActive(false);
+    // Never park a shared instance: it is on a screen, and parking it is exactly the bug that made
+    // the desktop freeze on a still picture (see the live-source note in BuildThumbnails).
+    if (preview_.inst && !preview_.shared) preview_.inst->SetMediaActive(false);
     pacer_.ConfigureSlot(preview_.clock, 0, 0);
     // The textures and the compiled instance stay: the browse page comes back to the same wallpaper
     // seconds later, and re-preparing a shader mid-interaction is a visible hitch for 6 MB of VRAM.
     // Video instances are the exception - each one parked holds a decoder thread, its frame buffers
-    // and two plane textures (measured: a 4K clip is tens of MB and several MF worker threads), and
+    // and two plane textures (measured: tens of MB and a worker-thread group per 4K clip), and
     // browsing through a dozen of them is what took the process to 2.5 GB. Re-opening one costs the
     // next look at that clip, not the page.
     for (auto it = preview_.cache.begin(); it != preview_.cache.end();) {
-        if (it->second->hasVideo()) it = preview_.cache.erase(it);
-        else ++it;
+        if (it->second->hasVideo()) {
+            ReapLater(std::move(it->second));
+            it = preview_.cache.erase(it);
+        } else ++it;
     }
     preview_.inst = nullptr;
+    preview_.shared = false;
     Info(MOD, "preview off ({}): drew={} dropped={}", why, preview_.drew, preview_.dropped);
 }
 
@@ -982,8 +1119,12 @@ void Application::DrawPreview(double nowSeconds) {
         if (FAILED(hr) || !done) continue;
         D3D11_MAPPED_SUBRESOURCE mp{};
         if (SUCCEEDED(dev_.ctx->Map(p.stg[i].Get(), 0, D3D11_MAP_READ, 0, &mp))) {
+            // The slot's own hash, not p.idHash: this frame was rendered by whichever instance was
+            // current when the copy was issued, which after a switch is the wallpaper the reader is
+            // supposed to be able to refuse.
             p.writer.Write(p.w, p.h, static_cast<const BYTE*>(mp.pData), mp.RowPitch, GetTickCount64(),
-                           p.idHash);
+                           p.slotHash[i]);
+            if (p.slotHash[i] != p.idHash) ++p.draining;
             dev_.ctx->Unmap(p.stg[i].Get(), 0);
         }
         p.slotState[i] = Preview::Free;
@@ -1013,6 +1154,22 @@ void Application::DrawPreview(double nowSeconds) {
         f.sizeScale = std::min(float(p.w) / float(m->px.w), float(p.h) / float(m->px.h));
 
     DrawArgs args = p.inst->MakeArgs(f, dev_.ctx.Get());
+    // A video instance has nothing to bind until its decoder's first picture lands, and the draw comes
+    // out all black (WallpaperInstance::MakeArgs). On the desktop that is the lesser evil. The preview
+    // is a *switch*, and the window is holding the frame he was looking at, so publishing that black
+    // frame is the blink he calls 闪烁 - measured 2026-10-08 by reading the section across a
+    // re-target: one frame with mean RGB (1,0,1) and 100 % of its pixels near black, 11-30 ms wide, on
+    // every re-target that has to open a decoder (local_02 2 of 3 tries, local_03 3 of 3, never on the
+    // particle cards and never on a clip whose instance was already live). Not publishing costs
+    // nothing: the next frame carries the picture.
+    if (p.inst->hasVideo() && args.srvCount == 0) {
+        if (!p.waitingFirstFrame) {
+            p.waitingFirstFrame = true;
+            Info(MOD, "preview {}: no decoded frame yet, publishing held back", p.id);
+        }
+        return;
+    }
+    p.waitingFirstFrame = false;
     if (!renderer_.Render(dev_.ctx.Get(), p.rtv.Get(), p.w, p.h, args, err)) {
         p.error = err;
         Warn(MOD, "preview draw failed: {}", err);
@@ -1031,6 +1188,7 @@ void Application::DrawPreview(double nowSeconds) {
     dev_.ctx->Begin(p.q[i].Get());
     dev_.ctx->CopyResource(p.stg[i].Get(), p.rt.Get());
     dev_.ctx->End(p.q[i].Get());
+    p.slotHash[i] = p.idHash;   // what is in this copy, as of the frame that produced it
     p.slotState[i] = Preview::CopyPending;
     ++p.drew;
     p.error.clear();
@@ -1063,10 +1221,42 @@ void Application::DrainMessages() {
     }
 }
 
+// Draw everything the pacer says is due and commit one composition. This is the whole presenting step,
+// and it is a function rather than loop body because `ReloadSlot` has to keep doing it while a video
+// file is opened on a worker thread - the alternative, which is what shipped until 2026-10-08, held the
+// composited desktop on one picture for 100-180 ms at every switch to a video.
+void Application::DrawDue(bool withPreview) {
+    static const LARGE_INTEGER freq = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f; }();
+    LARGE_INTEGER li{};
+    QueryPerformanceCounter(&li);
+    const double t = double(li.QuadPart - qpcStart_.QuadPart) / double(freq.QuadPart);
+
+    bool drewAny = false;
+    ++sawDrawStage_;
+    for (auto& s : slots_) {
+        if (!pacer_.SlotDue(s.clock)) { pacer_.SlotIdle(s.clock); continue; }
+        DrawSlot(s, t);
+        pacer_.SlotRendered(s.clock);
+        ++drewTotal_;
+        drewAny = true;
+    }
+    if (withPreview && preview_.on) {
+        if (pacer_.SlotDue(preview_.clock)) {
+            DrawPreview(t);
+            pacer_.SlotRendered(preview_.clock);
+        } else {
+            pacer_.SlotIdle(preview_.clock);
+        }
+    }
+    if (drewAny) {
+        HRESULT hr = dev_.comp->Commit();
+        if (FAILED(hr)) Warn(MOD, "composition commit: {}", HResultToString(hr));
+    }
+}
+
 int Application::Run() {
     ULONGLONG startedAt = GetTickCount64();
-    LARGE_INTEGER freq{};
-    QueryPerformanceFrequency(&freq);
+    background_ = std::thread(&Application::BackgroundLoop, this);
     std::vector<FPSController::Slot*> clocks;
     UINT logCounter = 0;
 
@@ -1168,31 +1358,7 @@ int Application::Run() {
         }
         if (pacer_.WaitUntil(due)) continue;
 
-        LARGE_INTEGER li{};
-        QueryPerformanceCounter(&li);
-        double t = double(li.QuadPart - qpcStart_.QuadPart) / double(freq.QuadPart);
-
-        bool drewAny = false;
-        ++sawDrawStage_;
-        for (auto& s : slots_) {
-            if (!pacer_.SlotDue(s.clock)) { pacer_.SlotIdle(s.clock); continue; }
-            DrawSlot(s, t);
-            pacer_.SlotRendered(s.clock);
-            ++drewTotal_;
-            drewAny = true;
-        }
-        if (preview_.on) {
-            if (pacer_.SlotDue(preview_.clock)) {
-                DrawPreview(t);
-                pacer_.SlotRendered(preview_.clock);
-            } else {
-                pacer_.SlotIdle(preview_.clock);
-            }
-        }
-        if (drewAny) {
-            HRESULT hr = dev_.comp->Commit();
-            if (FAILED(hr)) Warn(MOD, "composition commit: {}", HResultToString(hr));
-        }
+        DrawDue();
 
         if (nowMs - lastSnapshotMs_ > 1000) {
             lastSnapshotMs_ = nowMs;
@@ -1254,8 +1420,15 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
     if (action == "apply") {
         std::string monitor = arg2.empty() ? "all" : arg2;
         wpm_.SetAssignment(monitor, arg);
-        std::string err;
-        wpm_.Save(err);
+        // The text is this thread's own state and costs microseconds; the file is 8-43 ms of disk on a
+        // machine with something scanning every write, which was a fifth of the held picture at a switch.
+        // What the deferral buys back costs a window of a few seconds in which a crash loses the last
+        // applied wallpaper - the queue is drained on a clean quit, so only a crash can drop it.
+        std::string cfg = wpm_.ConfigText();
+        PostBackground([this, text = std::move(cfg)] {
+            std::string e;
+            if (!wpm_.WriteConfigText(text, e)) Warn(MOD, "config save failed: {}", e);
+        });
         int applied = 0;
         for (auto& s : slots_) {
             MonitorInfo m = s.window.monitor();
@@ -1403,7 +1576,7 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         bool any = false;
         Json list = Json::Array();
         for (auto& s : slots_) {
-            VideoPlayer* v = s.instance.video();
+            VideoSource* v = s.instance.video();
             if (!v) continue;
             any = true;
             if (arg == "pause") v->Pause();
@@ -1418,7 +1591,7 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
             j.set("frames", Json::Of((long long)v->delivered()));
             list.push(std::move(j));
         }
-        if (VideoPlayer* v = preview_.inst ? preview_.inst->video() : nullptr) {
+        if (VideoSource* v = preview_.inst ? preview_.inst->video() : nullptr) {
             any = true;
             if (arg == "pause") v->Pause();
             else if (arg == "resume") v->Resume();
@@ -1563,10 +1736,18 @@ void Application::Shutdown() {
         std::lock_guard lk(mtx_);
         Info(MOD, "final: {}", statusLine_);
     }
-    // The preview keeps one compiled instance per id and an instance owns its decoder, so those have to
-    // go while Media Foundation is still up; ~VideoPlayer joins the decode thread.
+    // The preview keeps one compiled instance per id and an instance owns its decoder, so those have
+    // to go before the device does: ~FFmpegPlayer joins the decode thread and frees the codec context.
     preview_.cache.clear();
-    MFShutdown();
+    // The background thread may be holding an instance whose decoder it has not freed yet, and
+    // ~FFmpegPlayer joins that decoder's thread, so it has to finish before the device goes away. The
+    // queue drains first, so a config write posted just before quitting still lands.
+    {
+        std::lock_guard lk(bgMtx_);
+        bgStop_ = true;
+    }
+    bgCv_.notify_all();
+    if (background_.joinable()) background_.join();
     dev_.Shutdown();
     if (win_) {
         DestroyWindow(win_);

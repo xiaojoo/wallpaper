@@ -32,10 +32,10 @@ class Bridge final : public QObject {
     Q_PROPERTY(int maxFps READ maxFps NOTIFY stateChanged)
     Q_PROPERTY(bool paused READ paused NOTIFY stateChanged)
     Q_PROPERTY(QString hostMethod READ hostMethod NOTIFY stateChanged)
-    // second one is the licence notice's claim, so it has to be visible where a user can see it.
     Q_PROPERTY(QString rootDir READ rootDir NOTIFY stateChanged)
     Q_PROPERTY(QString logPath READ logPath NOTIFY stateChanged)
     Q_PROPERTY(double cpuPercent READ cpuPercent NOTIFY stateChanged)
+    Q_PROPERTY(double cpuWindowS READ cpuWindowS NOTIFY stateChanged)
     Q_PROPERTY(double workingSetMb READ workingSetMb NOTIFY stateChanged)
     Q_PROPERTY(double uptimeSeconds READ uptimeSeconds NOTIFY stateChanged)
     Q_PROPERTY(bool autostart READ autostart NOTIFY stateChanged)
@@ -78,6 +78,7 @@ public:
     QString rootDir() const { return root_; }
     QString logPath() const { return logPath_; }
     double cpuPercent() const { return cpu_; }
+    double cpuWindowS() const { return cpuWin_; }
     double workingSetMb() const { return ws_; }
     double uptimeSeconds() const { return uptime_; }
     bool autostart() const { return autostart_; }
@@ -202,6 +203,7 @@ private:
     QString settingsTabAtStart_;
     int maxFps_ = 60;
     double cpu_ = 0, ws_ = 0, uptime_ = 0;
+    double cpuWin_ = 0;   // the window the renderer averaged cpu_ over, not a constant here
     QString uiSettingsPath_;
 
     QTimer* previewTimer_ = nullptr;   // only sends the heartbeat; LivePreview reads the pixels
