@@ -178,6 +178,10 @@ ApplicationWindow {
         // at the start of every dissolve that followed a liquid one (3 of 4 switches in a probe run).
         heroSnap.opacity = 0
         heroFx = 0
+        // A switch that is still waiting for its first picture has no transition left to run: the
+        // watch would otherwise fire on a stopped effect and restart a fade nobody asked for.
+        heroWaitPicture = false
+        heroUncoverWatch.stop()
         // The transition just ended, so the frame on screen is now the frame a new capture would
         // have to start from. Replay the newest pick if one arrived while we were busy.
         if (heroRetry) { heroRetry = false; Qt.callLater(function () { root.startHeroSwap() }) }
@@ -202,6 +206,14 @@ ApplicationWindow {
         interval: 16
         onTriggered: root.heroLiquidArmed = true
     }
+    // The cap on waiting for the picked clip's first frame. The slowest switch measured here was
+    // 356 ms; this is that with room, and it is what hands the page back when the feed is never going
+    // to deliver (engine gone, clip unreadable) instead of holding his old picture forever.
+    Timer {
+        id: heroUncoverWatch
+        interval: 600
+        onTriggered: root.heroUncoverNow()
+    }
     // A second pick while a capture or a morph is in flight used to be dropped on the floor: the
     // guard below returned early and nothing replayed it, so the big picture stayed on the first
     // pick while the strip had already moved. The morph makes that window about a second long, so
@@ -211,6 +223,36 @@ ApplicationWindow {
     // capture would then come from the layer *under* the running morph, i.e. from a picture he is
     // not looking at, which is the pop this whole mechanism exists to avoid.
     property bool heroRetry: false
+    // The cover has to stand down when the picture *under* it is the one he picked, not 280 ms after
+    // the click. Measured across five real switches (probe copy, 8 ms timeline): the live feed carries
+    // the new wallpaper after 59 / 61 / 98 ms for the shader and particle cards, but 233 ms and 356 ms
+    // for a clip that has to open its decoder - and the cover is gone at ~320 ms. So on a clip he
+    // watched the previous wallpaper's held live frame sit there for the last stretch and then the new
+    // picture cut in underneath nothing. On 冷光-剪影, whose own picture is dark (mean 17/70/99), that
+    // cut is the 闪黑屏 he reports, and it is why a video switch does not look like the 切换动画 he set.
+    // Only the video path waits; the others land inside the cover already.
+    property bool heroWaitPicture: false
+    property real heroFramesAtSwap: 0
+    function heroPictureIsHere() {
+        return liveView.matching && liveView.frames > root.heroFramesAtSwap
+    }
+    function heroStartFx() {
+        if (heroFx === fxLiquid) {
+            heroLiquidArmed = false
+            heroLiquidArm.start()
+            // Like the reference's sprite: the turn is never wound back, so the next switch churns
+            // through a different part of the cell pattern.
+            heroLiquidRotBase = (heroLiquidRotBase + heroLiquidRotRad) % 6.28319
+            heroLiquidRun.restart()
+        }
+        else heroOutFade.restart()
+    }
+    function heroUncoverNow() {
+        if (!heroWaitPicture) return
+        heroWaitPicture = false
+        heroUncoverWatch.stop()
+        heroStartFx()
+    }
     function commitHeroSwap() {
         heroSnapFresh = snapUrl !== ""
         // Raise the cover *before* the swap, not after it. Both branches used to lean on their own
@@ -221,15 +263,16 @@ ApplicationWindow {
         // No capture means nothing to dissolve: cutting is the only honest remaining option, and an
         // overlay with an empty texture would show the box's base colour.
         if (!heroSnapFresh) { heroFxStop(); return }
-        if (heroFx === fxLiquid) {
-            heroLiquidArmed = false
-            heroLiquidArm.start()
-            // Like the reference's sprite: the turn is never wound back, so the next switch churns
-            // through a different part of the cell pattern.
-            heroLiquidRotBase = (heroLiquidRotBase + heroLiquidRotRad) % 6.28319
-            heroLiquidRun.restart()
+        // `matching` alone is not enough to ask for: the frame the section holds can be one that
+        // arrived before this swap and still carries the new id, and the counter is what tells the two
+        // apart. With the live pass off there is no picture to wait for, so it does not wait.
+        heroFramesAtSwap = liveView.frames
+        if (hero && hero.type === "video" && liveWanted && !heroPictureIsHere()) {
+            heroWaitPicture = true
+            heroUncoverWatch.restart()
+            return
         }
-        else heroOutFade.restart()
+        heroStartFx()
     }
     function startHeroSwap() {
         const nid = heroIdOf(pendingHero), cid = heroIdOf(hero)
@@ -523,6 +566,9 @@ ApplicationWindow {
                 Connections {
                     target: liveView
                     function onFrameArrived() {
+                        // First: the cover over a switch that was waiting for its picture can come
+                        // down now. This has to be checked before the hold below, which returns early.
+                        if (root.heroWaitPicture && root.heroPictureIsHere()) { root.heroUncoverNow(); return }
                         if (!root.liveHeld) return
                         if (liveView.matching || !root.liveFed) { root.liveHeld = false; liveGrace.stop() }
                     }

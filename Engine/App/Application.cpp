@@ -1154,15 +1154,22 @@ void Application::DrawPreview(double nowSeconds) {
         f.sizeScale = std::min(float(p.w) / float(m->px.w), float(p.h) / float(m->px.h));
 
     DrawArgs args = p.inst->MakeArgs(f, dev_.ctx.Get());
-    // A video instance has nothing to bind until its decoder's first picture lands, and the draw comes
-    // out all black (WallpaperInstance::MakeArgs). On the desktop that is the lesser evil. The preview
-    // is a *switch*, and the window is holding the frame he was looking at, so publishing that black
-    // frame is the blink he calls 闪烁 - measured 2026-10-08 by reading the section across a
-    // re-target: one frame with mean RGB (1,0,1) and 100 % of its pixels near black, 11-30 ms wide, on
-    // every re-target that has to open a decoder (local_02 2 of 3 tries, local_03 3 of 3, never on the
-    // particle cards and never on a clip whose instance was already live). Not publishing costs
-    // nothing: the next frame carries the picture.
-    if (p.inst->hasVideo() && args.srvCount == 0) {
+    // Until the decoder's first picture lands, a video instance's planes hold the video-black fill that
+    // Nv12Uploader::Ensure gave them, so the draw comes out all black. On the desktop that is the lesser
+    // evil. The preview is a *switch*, and the window is holding the frame he was looking at, so
+    // publishing that black frame is the blink he calls 闪烁: measured 2026-10-08 by reading the section
+    // across a re-target - one frame with mean RGB (1,0,1) and 100 % of its pixels near black, at
+    // 199/203 ms into the switch, on every re-target that had to open a decoder, never on a clip whose
+    // player was already live. Not publishing costs nothing: the next frame carries the picture, and
+    // until then the section keeps the picture he was looking at.
+    //
+    // `args.srvCount` cannot be the test. MakeArgs binds video_->FrameY(), and Ensure builds the plane
+    // textures before the decode thread starts (deliberately - it is what stopped a fresh plane from
+    // reading as green), so srvCount is 2 from the very first draw and a zero-SRV state does not exist.
+    // The decoder's own count is the only thing that knows whether a picture has been delivered.
+    // Re-measured after this change: 0 empty-plane frames across 7 switches onto two clips, first frame
+    // of the not-applied clip at 233-274 ms (144 ms of that is the container plus the decoder open).
+    if (p.inst->hasVideo() && p.inst->video()->delivered() == 0) {
         if (!p.waitingFirstFrame) {
             p.waitingFirstFrame = true;
             Info(MOD, "preview {}: no decoded frame yet, publishing held back", p.id);
