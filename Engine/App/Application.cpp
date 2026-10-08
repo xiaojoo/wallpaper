@@ -953,13 +953,29 @@ void Application::BuildThumbnails(bool onlyMissing) {
         for (auto& s : slots_)
             if (s.wallpaperId == p.id()) use = &s.instance;
         th.setLiveSource(use != nullptr);
+        // A refused grab must not take the tile down with it. Thumbnailer leaves the previous picture on
+        // disk when it refuses a uniform frame ("let the previous card stand"), but the catalog only
+        // advertises a card while the record says ok - so the window got no `thumb` at all, its Image
+        // bound to "", and the octagon mask underneath painted the card white (measured 2026-10-09:
+        // local_05 after a rebuild that came back luma 0..0). Stand the surviving files back up.
+        auto keepPrevious = [this](const std::string& id, ThumbSet& t) {
+            std::error_code ec;
+            if (t.still.empty() || t.large.empty() || !std::filesystem::exists(t.still, ec)
+                || !std::filesystem::exists(t.large, ec)) return;
+            t.ok = true;
+            Info(MOD, "thumbnail for {}: the rebuild was refused, keeping the previous card on disk", id);
+        };
         WallpaperInstance temp;
         if (use) {
-            if (!th.Build(dev_, renderer_, *use, thumbDir_, p.id(), thumbs_[p.id()], err))
+            if (!th.Build(dev_, renderer_, *use, thumbDir_, p.id(), thumbs_[p.id()], err)) {
                 Warn(MOD, "thumbnail for {} failed: {}", p.id(), err);
+                keepPrevious(p.id(), thumbs_[p.id()]);
+            }
         } else if (temp.Prepare(wpm_.settings().root, p, dev_, err)) {
-            if (!th.Build(dev_, renderer_, temp, thumbDir_, p.id(), thumbs_[p.id()], err))
+            if (!th.Build(dev_, renderer_, temp, thumbDir_, p.id(), thumbs_[p.id()], err)) {
                 Warn(MOD, "thumbnail for {} failed: {}", p.id(), err);
+                keepPrevious(p.id(), thumbs_[p.id()]);
+            }
         } else {
             thumbs_[p.id()].error = err;
             Warn(MOD, "thumbnail for {} could not prepare: {}", p.id(), err);
