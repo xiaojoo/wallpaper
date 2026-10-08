@@ -1,7 +1,8 @@
 // resources/app.rc - the icon both executables carry.
 //
-// The file is generated, never drawn by hand: `python tools/make-icon.py --ico 3` rebuilds
-// Wallpaper.ico from the same code that renders the candidate sheet, so what Explorer shows, what the
-// taskbar shows and what the two tray icons show cannot drift away from the design that was picked.
+// The .ico is generated, never drawn by hand: `python tools/make-icon.py --art <png>` cuts the plate
+// out of the supplied art and writes resources/Wallpaper.png (the 1024 master) plus Wallpaper.ico
+// from it, and `--ico-from` rewrites the .ico from that master alone. So what Explorer shows, what
+// the taskbar shows and what the two tray icons show all come from one asset.
 // Resource id 1 is what Engine/App/Tray.cpp loads with MAKEINTRESOURCEW(1).
 1 ICON "Wallpaper.ico"

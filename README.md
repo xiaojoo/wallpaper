@@ -14,6 +14,17 @@ cmake --build bld --config RelWithDebInfo
 产物 `bld/bin/RelWithDebInfo/WallpaperRenderer.exe`，`Wallpapers/` 与 `Shaders/` 每次构建自动
 拷到 exe 旁边（`stage` 目标，改 .hlsl 不用重编 C++）。
 
+视频解码只有 **FFmpeg** 一条路（Media Foundation 那条 2026-10-07 删掉了，见下面「视频解码后端」），
+所以它是**编译的硬依赖**：找不到 SDK 时 `configure` 直接失败，并把该跑的那条命令写在错误里。
+
+```
+bash tools/get-ffmpeg.sh        # 下载并校验 pinned 的 lgpl-shared 构建到 build/ffm-lgpl
+bash tools/ffmpeg-notice.sh     # 由真实二进制生成 licenses/FFmpeg.txt（分发的随附说明）
+```
+
+CMake 找 SDK 的顺序：`-DWALLPAPER_FFMPEG_DIR=<路径>` → 环境变量 `FFMPEG_DIR` → `build/ffm-lgpl`。
+两个许可证文件（`LICENSE-FFmpeg.txt` 与 `NOTICE-FFmpeg.txt`）由构建自动拷到 exe 目录，跟着程序一起分发。
+
 ## 运行与控制
 
 ```
@@ -46,12 +57,20 @@ WallpaperRenderer.exe --ctl addimage "D:\pics\a.jpg"   把一张图片变成壁�
 `SmartWallpaper.Renderer`、`QSettings` 的 `SmartWallpaper/ui.ini`、以及三个窗口类名。
 理由写在 `tools/rename-app.py` 头部：**动 QSettings 那一对，下次启动语言/收藏/目标屏会静默回到默认；
 动管道或互斥体，第二个实例就能起来抢连接**（这两件真要做是"改名 + 迁移"两步，不是顺手替换）。
-图标是 `tools/make-icon.py` 画出来的（不是手描的资产，`--ico 3` 一条命令重生成 `resources/Wallpaper.ico`，
-16/20/24/32/40/48/64/128/256 九帧），经 `resources/app.rc` 嵌进两个 exe；设置窗的托盘和任务栏读 exe 旁边
-那份 `.ico`，渲染器的托盘从自己的资源里 `MAKEINTRESOURCEW(1)` 取。判据是**把图标从编译产物里取回来再看**
-（`tools/exe-icon.ps1` → `build/icons/from-exe.png`，两个 exe 都回 32×32 的蓝底 W），以及真实任务栏
-"显示隐藏的图标"飞板里那颗 16 px 也认得出（`build/shots/flyout-z.png`）。选这张的理由就是 16 px：
-另外两版（屏幕框+山+太阳、带揭角的壁纸）在 16 px 塌成"深蓝块加一个白点"，山形全丢。
+图标（2026-10-07 换成他给的那张图）：`python tools/make-icon.py --art <png>` 从原图里抠出那块圆角板，写
+`resources/Wallpaper.png`（1024 母版）和 `resources/Wallpaper.ico`（16/20/24/32/40/48/64/128/256 九帧，
+每帧各自从母版降采样一次，不链式）；只想重打 `.ico` 就 `--ico-from`。抠法是"非白连通域里取最大那块，并用
+这块自己的轮廓当 alpha"：右下角的"豆包 AI 生成"水印是独立连通域（3828 px，板本身 1573873 px），不用裁就
+掉出去了；圆角因此就是画出来的那一个（左边缘走到直边是板高的 18%，按 iOS 那档 22% 猜半径会削掉外圈浅灰
+描边）；原图那块 1259x1291，2.5% 的非正方压平而不是补白 —— 补白会让图标在每个消费者给的方框里都小一圈。
+三张手绘候选还留在 `tools/make-icon.py` 里（`--ico N`）。
+
+经 `resources/app.rc` 嵌进两个 exe；设置窗的托盘和任务栏读 exe 旁边那份 `.ico`，渲染器的托盘从自己的资源里
+`MAKEINTRESOURCEW(1)` 取。判据是**把图标从编译产物里取回来再看**（`tools/exe-icon.ps1` →
+`build/icons/from-exe.png`），以及真实任务栏"显示隐藏的图标"飞板里那颗 16 px（`build/shots/flyout-z.png`）。
+16 px 的代价在 `.ico` 帧上量过：板边缘一圈对 `#151C27` 的亮度差从上一版（蓝底 W）的 +97/255 掉到
+**+35/255**，轮廓还在但明显弱一档，板内最暗的 5% 只有 26（≈任务栏底色）—— 深底任务栏上认得出的是那团
+亮光，不是"一块方"这件事。
 
 日志：`logs/renderer-<pid>.log`；配置：exe 同目录 `config.json`（首次运行自动写出）。
 
@@ -547,6 +566,12 @@ Esc 一次只关两层（先下拉列表，再设置）—— 两条都按过键
 两条踩过的坑：**别用 `Image` 每帧换 URL** —— 那样 Qt 每帧新建一张纹理并在加载期间把图元清空，
 实测只有 16~18 帧/秒且整块大图一闪一闪；`LivePreview` 是自绘图元，同一块底图反复重绘，才既不断流也不闪。
 **`preview.fps` 这个字段以前会说谎**（pacer 自己在 15 和 30 之间跳），现在按 `drew` 计数每秒算一次。
+**每一帧自带归属**：段头里的 `idHash` 是**发起那次拷贝的实例**留下的（两块 staging 轮转、驱动常晚一帧，
+所以"此刻请求的那张"并不等于"手里这帧是谁"——2026-10-07 之前正是拿当前请求盖章，切换后头 1 帧
+带着上一张的画面却被标成新那张，`status.preview.id` 与段头两个来源同时说话，就没有仪器能发现）。
+现在 `status.preview.draining` 数得出这种帧（实测每次 re-target 恰好 1 帧），设置窗按 `wantedHash` 拒收，
+`tools/preview-pixels.py` 也按段头逐帧过滤、并在采集前等 `preview.video_frames > 0`
+（视频实例刚建好时着色器采的是空平面，整幅是均一 (0,76,0) 的绿）。
 三条护栏：设置窗每 ~700 ms 一次 `previewbeat`，**3 秒没心跳渲染器自停**（窗口崩了不会留一路常驻 GPU）；
 这条心跳以前**按 tick 计数**，而 `root.current` 是每秒 status 刷新时重绑的 JS 对象，每次重绑都会把计数
 清零，于是心跳从来没发出去过——第二路每切换一次只活 3 秒就退回帧条，帧条又从头开始放，这正是"切换有
@@ -614,6 +639,61 @@ main.hlsl     CSMain 积分 / PSBackground 夜空 / ParticleVS 每粒子 6 顶�
 `--ctl status` 里每张粒子壁纸带 `particles` / `particle_moved_samples` / `particle_out_of_bounds` /
 `particle_positions_hash`：把结构化缓冲回读到 CPU 再哈希，是"仿真真的在动"的直接证据，
 和像素角点回读互相独立（角点可以一动不动而粒子仍在跑）。
+
+## 视频解码后端（FFmpeg，NVDEC 优先；唯一一条）
+
+2026-10-07 起视频壁纸用 libavformat + libavcodec，先问硬件解码器（`h264_cuvid` / `hevc_cuvid` /
+`av1_cuvid`），驱动不给就退回库自带的原生解码器。**同一天把 Media Foundation 那条后端删了**，
+所以这里没有"第二套实现互证"了 —— 像素判据改为对**外部参照**（`build/ffm-lgpl/bin/ffmpeg.exe`
+把夹具解成 PNG）和夹具的已知值（`tools/preview-pixels.py` 读预览共享内存）：8 条饱和色条最大
+|Δ| ≤ 2/255、11 格灰阶 +0/+1、通道裂格 0、白块两帧有位移、头 8 行白条 / 尾 8 行黑条在正确一侧。
+删之前留下的对照数（同一把尺子量的三个后端，桌面那张真实 3840x2160@60 循环片、10 秒窗口）：
+
+| 后端 | CPU（100% = 1 核） | 工作集 | 交付 | 现状 |
+|---|---|---|---|---|
+| Media Foundation | 290–313% | 779–790 MB | 59.8–60.4 帧/秒 | **已删除** |
+| FFmpeg 原生 h264 | 216% | 556 MB | 54.8 帧/秒 | 兜底 |
+| FFmpeg h264_cuvid | 37–49% | 299–328 MB | 60.0–60.7 帧/秒 | 默认 |
+
+删它的理由不是"少 700 行"，是**导入那一步当时用 MF 探测**，于是"这个库能收哪些格式"由一个不再用的
+后端决定；而代价上它全面落后。删的同时把探测搬到了 FFmpeg（`FfmpegProbeVideo`）：量到的清单字段与
+MF 版逐位相同（夹具 `duration_s 9.966633`、`1920x1080`、`fps 30`、`src_aspect 1.777778`、`bt601 0`），
+并且现在**没有解码器就在导入这一步拒绝**，不再等到上屏才失败。
+
+只剩一个环境变量，用来在"驱动解码坏了"和"我们管线坏了"之间做判别，不用重编：
+
+```
+WALLPAPER_VIDEO=sw   WallpaperRenderer.exe   只要原生解码器，不问 NVDEC
+（不设）                                     NVDEC 优先，驱动拒绝则自动退回原生
+```
+
+哪条在跑、以及装的是哪个 FFmpeg，都能从运行中的程序读回来：`--ctl status` 的
+`monitors[].video_output` 与 `ffmpeg` 字段、日志开头两行 `FFmpeg backend:` / `FFmpeg was configured:`、
+设置界面 → 通用 → 最下面那两行。`ffmpeg` 那串是从已加载的 DLL 里问出来的
+（`av_version_info` / `avcodec_version` / `avcodec_license`），换了 DLL 它跟着变。
+
+循环接缝：回绕到片头时不再 flush 解码器（IDR 本来就刷新全部参考帧）。4K60 那张片每圈的
+"下一圈第一帧"从 105–118 ms 降到 3.8–17.7 ms，并且不再每圈丢掉留在队列里的 15 帧片尾。
+
+**设置窗开着时的第二路**（大图是渲染器同一着色器再画一遍的 1280x720@30）：大图若正好是桌面上这张片，
+就**共用同一个解码器**（日志写 `preview on: <id> (…, sharing the live decoder)`），因为两路本来就跑同一
+时间轴。三档代价（4K60 真实片、修好后的仪表）：只有桌面 25.3% / 347 MB；大图=桌面这张 26.0% / 335 MB；
+大图是**另一张**视频 66.5% / 503 MB —— 重复解一张 4K 要 +41 个百分点单核、+156 MB 工作集。
+每帧也不再经 CPU 中转（`Nv12Uploader` 直接 `UpdateSubresource` 带 box 上传，box 顺手做 coded→display
+裁行），4K60 的 `FrameY` 从 2.0 ms 降到 0.99–1.41 ms。
+
+**状态条上的 CPU 是一个 ≥2 秒窗口的平均值**，字段 `process.cpu_window_s` 会把它一起显示出来。
+以前它是"两次 status 调用之间"的差值，而设置窗每秒调一次，于是 1 秒里的一次尖峰（导入、开解码器、
+重建缩略图）会被当成持续占用报出来 —— 同一稳态读出过 168.9% / 29.0% / 18.0% 三个数。
+
+判"两路是不是都在动"用 `python build/tmp/cost.py 8`（它读 `status`，并从日志里问"第二路是不是共享"，
+不能只看 `preview.video_frames` —— 共享时那个数本来就是桌面那个实例的）。
+
+许可：只用 LGPL 的 **shared** 构建（`tools/get-ffmpeg.sh` 见到 `--enable-gpl` / `--enable-nonfree`
+直接拒绝下载完成后的校验），随程序分发 `LICENSE-FFmpeg.txt`（许可证全文）与 `NOTICE-FFmpeg.txt`
+（哪个构建、对应源码在哪、怎么替换 DLL）。后者由 `tools/ffmpeg-notice.sh` 从真实二进制生成，
+两个负面自检都跑过：喂它一个带 `--enable-gpl` 的假构建、以及一个读不出 configuration 的假构建，
+都返回 REFUSE/2 而不是写出一份"看起来合规"的说明。
 
 ## 实测（这台机器：i9-14900KF + RTX 4080 SUPER，单显示器 3840x2160 @144Hz，缩放 100%）
 
@@ -715,12 +795,16 @@ Progman 及其子链 `SHELLDLL_DefView` / `SysListView32` / 壁纸 `WorkerW`）�
    `tools/guarded-click.ps1 -Post` 是同一件事的**不占光标**版本：直接 `PostMessage` 三个鼠标消息给窗口
    自己的队列。桌面被 topmost 的游戏客户端盖住时只有这条路能走（`HWND_TOPMOST` 也压不住它，
    `WindowFromPoint` 会连着两次拒绝发点击 —— 拒得对，那一下会落进他的游戏里）。
-2. **视频壁纸：能播，但只有命令行入口**。`WallpaperRenderer.exe --ctl addvideo "<路径>"` 建包（导入时用 MF
-   探分辨率/帧率/时长写进 `wallpaper.json`），再 `--ctl apply <id> [M0|all]` 上屏；`--ctl video
-   pause|resume|seek <秒>` 是这条 clip 的走带，和全局 `pause`（停整幅壁纸）不是一件事。本机只支持 **H.264**：
-   NVIDIA 没把 NVDEC 注册给 Media Foundation，所以走 `Microsoft H264 Video Decoder MFT` 软解，实测
-   1080p30 满速 ≈16–40% 单核、4K30 满速 ≈43–83%（均值 ≈62% 单核）、工作集 4K ≈873 MB。
-   设置界面的导入按钮/播放控件**一行都没动**，HEVC/VP9/MKV 这类会在打开解码器时才失败而不是在导入时拒绝。
+2. **视频壁纸：能播，但只有命令行入口**。`WallpaperRenderer.exe --ctl addvideo "<路径>"` 建包
+   （导入时 `FfmpegProbeVideo` 探分辨率/帧率/时长/矩阵写进 `wallpaper.json`，**没有解码器就在这一步拒绝**），
+   再 `--ctl apply <id> [M0|all]` 上屏；`--ctl video pause|resume|seek <秒>` 是这条 clip 的走带，
+   和全局 `pause`（停整幅壁纸）不是一件事。以前那几笔数 —— "本机只支持 H.264、软解 4K ≈62% 单核、
+   工作集 ≈873 MB"、"HEVC/VP9/MKV 会在打开解码器时才失败而不是在导入时拒绝" —— 都是
+   **Media Foundation 时代的**，2026-10-07 删掉那条后端后作废，代价数见上面「视频解码后端」那张表。
+   现在剩下的真缺点是三条：① 设置界面的导入按钮/播放控件**一行都没动**（只有这条命令行）；
+   ② 文件选择框的过滤器还是 `*.png *.jpg ... *.mp4`，所以 MKV/WebM 在**界面上选不到**
+   （命令行 `addvideo` 给路径就能收）；③ HEVC/VP9/AV1 虽然探测与解码器选择都按 codec id 走，
+   但**一行都没量过**，别当做了。
    矩阵/行序/平面几何的判据和剩下的欠账在 `BACKLOG.md` 第 3 条。图像壁纸已做：`addimage` 建壁纸包 +
    `Shaders/Image.hlsl` 覆盖裁切 + 缓慢 Ken Burns；**导入项已可删除**（设置 → 壁纸 的预览卡角标，
    两下确认，正在用作壁纸的那张会被拒绝），**重命名仍未做**。
@@ -736,6 +820,11 @@ Progman 及其子链 `SHELLDLL_DefView` / `SysListView32` / 壁纸 `WorkerW`）�
    清单是 `"renderer": "d3d11"`、`_comment` 是字符串。**残留：改之前导入的那几张（`local_01`）清单里
    仍然是 `true`**，读清单时 `strOr` 拿默认值，行为不变，只有重新导入才会写对。托盘那条这台机
    `tray: false`，没实测过。
+   **视频后端剩下的三条欠账（2026-10-07）**：① 仓库根目录**没有 LICENSE 文件** —— LGPL 那套义务是
+   针对 FFmpeg 那部分的，他自己这份代码的授权还没定，这一条要他拍板；② 画面方向只在**预览共享内存**
+   那一层量过（桌面被应用窗口盖着，`CopyFromScreen` 抓到的是窗口不是壁纸），桌面那一层没有直接读数；
+   ③ NVDEC 的 `private` 反而比软解高（657–716 MB vs 607 MB，工作集却低一半），差在哪没查，
+   报数的时候别把两个混成一个"内存更省"。
 3. **粒子已做**（GPU compute，见"GPU 粒子壁纸"一节）；**3D / 后处理没做**。粒子的质量档还没接：
    `particles.count` 现在是包里的固定值，不随 battery/low 档缩水。另外那路"仿真在动"的回读是
    每秒把整块结构化缓冲拷回 CPU（25 万粒 = 12 MB），量具有代价，正式版应当只在一开始几秒开。

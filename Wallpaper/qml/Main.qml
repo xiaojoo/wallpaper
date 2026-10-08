@@ -72,6 +72,11 @@ ApplicationWindow {
     onMotionT0Changed: previewFrame = 0
     onHeroMotionChanged: if (heroMotion) motionT0 = Date.now()
     property string settingsTab: "general"
+    // A command result is shown on the page that produced it and for three seconds: it used to sit at
+    // the bottom of the dialog until the next one came, which is how 「已删除」 ended up greeting him on
+    // the 显示器 page (2026-10-08). `msgTab` is the page the message was born on, not the page open now.
+    property string msgTab: ""
+    property bool msgLive: false
     property Item openField: null    // the Choice whose list is up; only one at a time
     property bool carouselPlaying: true
     // The big picture shows the wallpaper being drawn right now (Wallpaper/LivePreview.cpp).
@@ -918,9 +923,15 @@ ApplicationWindow {
                                 color: Bridge.connected ? th.ok : th.err
                             }
                             Text {
+                                // The window travels with the percent: a CPU number without one is what
+                                // made a 2-second burst look like a sustained 177% load.
                                 text: trs(Bridge.connected ? "running" : "stopped") + " · "
                                       + root.num(Bridge.cpuPercent, 2) + "% · "
                                       + root.num(Bridge.workingSetMb, 1) + " MB"
+                                      + (Bridge.cpuWindowS > 0
+                                         ? " · " + trs("cpu_over") + " "
+                                           + root.num(Bridge.cpuWindowS, 1) + " s"
+                                         : "")
                                 color: "#C6CEDA"; font.family: root.fontFamily; font.pixelSize: 12
                             }
                         }
@@ -994,11 +1005,18 @@ ApplicationWindow {
                                     // Imported photos carry "本地图片" in their wallpaper.json, so the
                                     // order names that string rather than looking it up in the
                                     // translation table - the data is Chinese in both languages.
+                                    //
+                                    // The two imported kinds sit together at the right end, photos first
+                                    // then videos (he asked for 本地视频 to the right of 本地图片 on
+                                    // 2026-10-08). Nothing else about the rule changed: 本地图片 is still
+                                    // always there, 本地视频 still only appears once a clip is in the
+                                    // library, which is where it came from before.
                                     Repeater {
                                         model: ["all"]
                                                .concat(Object.keys(root.categoryCounts).filter(
-                                                       function (k) { return k !== "本地图片" }))
+                                                       function (k) { return k !== "本地图片" && k !== "本地视频" }))
                                                .concat(["fav", "本地图片"])
+                                               .concat(root.categoryCounts["本地视频"] ? ["本地视频"] : [])
                                         delegate: Btn {
                                             required property var modelData
                                             readonly property string cat: modelData === "all" ? "" : modelData
@@ -1573,6 +1591,7 @@ ApplicationWindow {
                                 color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
                             }
                         }
+
                     }
 
                     // ---------------------------------------------------------- 显示器
@@ -1879,7 +1898,9 @@ ApplicationWindow {
 
                         Group {
                             StatLine { k: trs("host_layer"); v: Bridge.connected ? Bridge.hostMethod : trs("none") }
-                            StatLine { k: trs("cpu"); v: root.num(Bridge.cpuPercent, 2) + " %" }
+                            StatLine { k: trs("cpu"); v: root.num(Bridge.cpuPercent, 2) + " % · "
+                                                    + trs("cpu_over") + " "
+                                                    + root.num(Bridge.cpuWindowS, 1) + " s" }
                             StatLine { k: trs("working_set"); v: root.num(Bridge.workingSetMb, 1) + " MB" }
                             StatLine { k: trs("uptime"); v: root.num(Bridge.uptimeSeconds, 0) + " s" }
                         }
@@ -1925,12 +1946,18 @@ ApplicationWindow {
                         }
                     }
 
-                    // Command results belong to the dialog, not to one tab: the action that
-                    // produced one may live in any of them.
+                    // A command result belongs to the page that produced it and to three seconds. The
+                    // actions are spread over four pages (import/delete on 壁纸, fps on 显示器, caps on
+                    // 省电, start/quit on 渲染器), so hiding every message that was not born on 壁纸
+                    // would leave those three with no feedback at all - hence "born here, dies here".
                     Rectangle {
-                        visible: Bridge.lastMessage.length > 0
+                        visible: Bridge.lastMessage.length > 0 && root.msgLive
+                                 && root.msgTab === root.settingsTab
                         Layout.fillWidth: true
-                        height: msgLbl.height + 16
+                        // Layout.preferredHeight, not height: qmllint calls a bare `height` on a
+                        // layout-managed item undefined behaviour, and this row's visibility now flips
+                        // every three seconds, which is exactly when that would show.
+                        Layout.preferredHeight: msgLbl.height + 16
                         radius: 6
                         color: Bridge.lastMessageIsError ? "#2A1A1C" : "#16231C"
                         Text {
@@ -1942,6 +1969,19 @@ ApplicationWindow {
                             color: Bridge.lastMessageIsError ? th.err : th.ok
                             font.family: root.fontFamily; font.pixelSize: 12
                             wrapMode: Text.WordWrap
+                        }
+                        Connections {
+                            target: Bridge
+                            function onMessageChanged() {
+                                root.msgTab = root.settingsTab
+                                root.msgLive = true
+                                msgHide.restart()
+                            }
+                        }
+                        Timer {
+                            id: msgHide
+                            interval: 3000
+                            onTriggered: root.msgLive = false
                         }
                     }
                 }

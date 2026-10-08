@@ -2,6 +2,7 @@
 // Engine/Packages/Thumbnailer.hpp - renders a wallpaper offscreen to PNG files for the settings
 // window: a card still, a large preview, and a short frame strip for the motion preview.
 #include "Engine/Core/Platform.hpp"
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,23 @@ public:
     // *proportions* as the desktop at 3840x2160, or it is a different wallpaper.
     void setDesignSize(UINT w, UINT h) { designW_ = w; designH_ = h; }
 
+    // True when `inst` passed to Build() is the instance a monitor is *currently showing*. Then a
+    // video must not be asked to jump to baseTime_: ShowFrameAt parks that player on the frame it
+    // grabbed, and nothing but a later seek clears it - which is how the desktop ended up frozen on a
+    // still picture at every start (measured 2026-10-07: delivered stuck at 84, thread parked at 0%
+    // CPU, one `--ctl video seek` brought it back). The frame already on screen is representative of
+    // a clip anyway, and taking it costs no decoder. Without this flag a video card needs its own
+    // throwaway instance, and a throwaway 4K decoder cost ~900 MB of surface pool
+    // for the two or three seconds the grab takes.
+    void setLiveSource(bool live) { liveSource_ = live; }
+
+    // Called while a video grab waits for the decoder to reach the requested moment. For a clip whose
+    // previous keyframe is far back that is several hundred milliseconds (measured 2026-10-08: 521 ms
+    // for a 3440x1440 and 699 ms for a 4K card), and the only caller is the thread that presents the
+    // desktop - so without this hook the pass is a freeze, which is the 3.78 s stall BACKLOG records for
+    // the old 26-grab version. Application passes a lambda that draws what is due.
+    void setIdleHook(std::function<void()> idle) { idle_ = std::move(idle); }
+
     UINT stillWidth() const { return stillW_; }
     UINT stillHeight() const { return stillH_; }
 
@@ -52,6 +70,8 @@ private:
     int frameCount_ = 24;
     double frameSpan_ = 1.0;   // seconds of shader time covered by the strip
     double baseTime_ = 2.0;    // past the fade-in of most shaders, so the still is representative
+    bool liveSource_ = false;  // see setLiveSource
+    std::function<void()> idle_;   // see setIdleHook
     UINT designW_ = 0, designH_ = 0;   // the monitor these previews have to look like
 };
 

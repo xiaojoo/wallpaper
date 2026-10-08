@@ -2,8 +2,8 @@
 
 // Video wallpapers: the decoded frame arrives as two planes because that is what every video decoder
 // produces - luma in R8, chroma in R8G8 at half height. The engine uploads them top-down and cropped
-// to the display height, so this shader needs no row flip (the plane's own bottom-up order and the
-// coded-vs-display extra rows are handled once, in VideoPlayer's upload).
+// to the display height, so this shader needs no row flip (the coded-vs-display extra rows and the
+// plane order are handled once, in Nv12Uploader).
 //
 // The placement block below is deliberately a copy of Image.hlsl's: it is the same fit contract
 // (uPerf.w = the 壁纸铺展 setting) applied to a picture instead of a photo. Keep the two in step if

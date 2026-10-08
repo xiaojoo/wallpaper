@@ -120,7 +120,12 @@ int main(int argc, char** argv) {
     inType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
     inType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     inType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
-    inType->SetUINT32(MF_MT_DEFAULT_STRIDE, UINT32(INT32(-4 * w)));  // negative stride: rows top-down
+    // POSITIVE stride: in Media Foundation a negative MF_MT_DEFAULT_STRIDE declares BOTTOM-UP rows, and
+    // the rows below are written top-down. Declaring it negative (as this line used to) makes the sink
+    // writer store the picture upside down - measured 2026-10-07: the fixture decoded by an external
+    // reference (ffmpeg -> PNG) came back with the bars in the BOTTOM third, and every colour ruler run
+    // since has been measuring through that inversion.
+    inType->SetUINT32(MF_MT_DEFAULT_STRIDE, UINT32(4 * w));
     inType->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
     inType->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
     inType->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);

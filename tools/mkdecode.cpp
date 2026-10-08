@@ -265,10 +265,14 @@ int main(int argc, char** argv) {
                     long sum = 0;
                     const long long plane = yStride * h;
                     for (long long p = 0; p + 0 < (long long)ll && p < plane; p += 997) sum += py[p];
-                    // Sample the fixture's known bars at two symmetric rows: if the plane is stored
-                    // bottom-up, the "top" row reads as the picture's bottom band (flat grey 128) and
-                    // the mirrored row reads as the bar. Both are printed so the row order is measured
-                    // rather than assumed. x = 11w/16 is inside bar 5, the pure-red one.
+                    // Sample the fixture's known bars at two symmetric rows and print both, so the row
+                    // order is measured rather than assumed. x = 11w/16 is inside bar 5, the pure-red one.
+                    // WHAT THIS PROBE GOT WRONG (kept as the lesson): the "top" row read as flat grey
+                    // 128, which was reported as proof that the decoder stores NV12 bottom-up. It is
+                    // only proof of that if the FILE is stored with its bars at the top - and the
+                    // fixture generator declared a negative MF_MT_DEFAULT_STRIDE over top-down rows, so
+                    // the file itself is stored inverted. An external reference decode (ffmpeg -> PNG)
+                    // settles which end is which; a probe against synthetic content cannot.
                     const int px = int(w * 11 / 16), prow = int(h * 10 / 100);
                     const long long plane2 = plane;
                     auto At = [&](int row, int* out) {

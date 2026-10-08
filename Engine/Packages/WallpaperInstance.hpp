@@ -8,7 +8,7 @@
 namespace sw {
 
 class D3D11Device;
-class VideoPlayer;
+class VideoSource;
 
 class WallpaperInstance {
 public:
@@ -20,7 +20,11 @@ public:
     WallpaperInstance& operator=(WallpaperInstance&&) = default;
 
     // Compiles the package's HLSL against the shared Shaders directory.
-    bool Prepare(const std::wstring& rootDir, const WallpaperPackage& pkg, D3D11Device& dev, std::string& error);
+    // `warmMedia` is a video source whose file is already open (opened on a worker thread by
+    // Application::ReloadSlot, because the container probe costs 16-93 ms and the presenting thread may
+    // not stop to wait for it). Empty means "open it here", which is what a cold start does.
+    bool Prepare(const std::wstring& rootDir, const WallpaperPackage& pkg, D3D11Device& dev,
+                 std::string& error, std::unique_ptr<VideoSource> warmMedia = {});
 
     const std::string& id() const { return pkg_.id(); }
     const WallpaperPackage& package() const { return pkg_; }
@@ -38,7 +42,7 @@ public:
     ParticleSystem& particles() { return particles_; }
 
     bool hasVideo() const { return video_ != nullptr; }
-    VideoPlayer* video() { return video_.get(); }
+    VideoSource* video() { return video_.get(); }
     // Idle the decoder while this wallpaper is not being drawn (paused, or covered by a fullscreen app).
     void SetMediaActive(bool active);
 
@@ -46,11 +50,23 @@ private:
     WallpaperPackage pkg_;
     Shader shader_;
     ParticleSystem particles_;
-    std::unique_ptr<VideoPlayer> video_;
+    std::unique_ptr<VideoSource> video_;
     std::vector<float> paramStore_;
     ID3D11ShaderResourceView* srvs_[8] = {};
     UINT srvCount_ = 0;
     std::vector<std::string> unboundParams_;
 };
+
+// The media half of a package, on its own so a worker thread can run it: builds the video source with
+// the same decoder preference Prepare would have used and opens the package's clip. Nothing here touches
+// the D3D11 device, which is the whole point - the device half is VideoSource::Attach, and it has to
+// stay on the presenting thread. Returns null (with `error` filled) for a package that has no video.
+std::unique_ptr<VideoSource> OpenPackageMedia(const WallpaperPackage& pkg, std::string& error);
+
+// Compiles a package's shader into the blob cache without touching the device, so the presenting
+// thread's Prepare finds a cache hit instead of paying 46-104 ms of D3DCompile. Same reason as above:
+// it belongs on the worker. Returns false only for a package whose shader cannot be found or read,
+// which Prepare will report identically when it runs.
+bool WarmPackageShader(const WallpaperPackage& pkg, const std::wstring& rootDir, std::string& error);
 
 } // namespace sw

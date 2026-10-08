@@ -11,6 +11,13 @@ public:
     bool Create(const DesktopHost& host, const MonitorInfo& monitor, std::string& error);
     void Destroy();
 
+    // The HWND is ours to clean up. `BuildSlots` clears slots_ on every 重载壁纸 and on every monitor
+    // change, and without this each of those left a visible full-screen child of WorkerW behind
+    // (measured 2026-10-08: 3 -> 4 -> 5 of our windows after successive reloads) with the live one
+    // underneath, so the desktop looked like it had dropped out to the plain Windows wallpaper while
+    // the engine went on presenting at 48 fps into a window nobody could see.
+    ~DesktopWindow() { Destroy(); }
+
     HWND hwnd() const { return hwnd_; }
     const MonitorInfo& monitor() const { return monitor_; }
     RenderSurface& surface() { return surface_; }

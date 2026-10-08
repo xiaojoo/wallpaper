@@ -3,6 +3,7 @@
 #include "Engine/Core/Log.hpp"
 
 #include <filesystem>
+#include <mutex>
 
 namespace sw {
 static constexpr const char* MOD = "wpmgr";
@@ -94,7 +95,9 @@ bool WallpaperManager::Load(const std::wstring& exeDir, std::string& error) {
     return true;
 }
 
-bool WallpaperManager::Save(std::string& error) {
+bool WallpaperManager::Save(std::string& error) { return WriteConfigText(ConfigText(), error); }
+
+std::string WallpaperManager::ConfigText() const {
     Json r = Json::Object();
     r.set("log_level", Json::Of(s_.logLevel));
     r.set("tray", Json::Of(s_.tray));
@@ -123,7 +126,16 @@ bool WallpaperManager::Save(std::string& error) {
           Json::Of("quality: package|ultra|high|medium|low|battery. image_fit (image wallpapers only): "
                    "fill|fit|stretch|center|tile. monitors[] may repeat per M0/M1 or use all. "
                    "rotate: {on,interval_min,monitor,pool[]}"));
-    std::string text = r.dump(2) + "\n";
+    return r.dump(2) + "\n";
+}
+
+// The file write on its own, so the thread that presents the desktop can serialise its own state (a
+// microsecond) and hand the disk - measured 8-43 ms for this file on this machine - to a worker. The
+// mutex is what keeps a deferred write and an inline `Save` from another command landing on the same
+// file at the same time.
+bool WallpaperManager::WriteConfigText(const std::string& text, std::string& error) {
+    static std::mutex writeMtx;
+    std::lock_guard lk(writeMtx);
     if (!WriteFileUtf8(s_.configFile, text)) {
         error = "cannot write " + ToUtf8(s_.configFile);
         return false;
