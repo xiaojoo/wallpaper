@@ -18,6 +18,20 @@ std::wstring ExeDir() {
     return slash == std::wstring::npos ? L"." : path.substr(0, slash);
 }
 
+void AppendStartupLog(const std::string& text) {
+    // The failure paths run before log::Open, and the settings window relaunches this exe detached
+    // with no console attached, so there is nowhere else the message could go.
+    std::wstring dir = ExeDir() + L"\\logs";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    HANDLE h = CreateFileW((dir + L"\\startup-error.log").c_str(), FILE_APPEND_DATA,
+                           FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    std::string line = std::to_string(GetCurrentProcessId()) + " " + text;
+    DWORD written = 0;
+    WriteFile(h, line.data(), DWORD(line.size()), &written, nullptr);
+    CloseHandle(h);
+}
+
 void PrintToParentConsole(const std::string& text) {
     static bool attached = [] {
         if (GetConsoleWindow()) return true;
@@ -28,7 +42,10 @@ void PrintToParentConsole(const std::string& text) {
         std::fputs(text.c_str(), stdout);
         std::fflush(stdout);
     } else {
-        MessageBoxA(nullptr, text.c_str(), "Wallpaper", MB_OK | MB_ICONINFORMATION);
+        // Never a modal dialog: he asked for this process to just exit when it cannot do its job,
+        // and a message box sits on top of the desktop he is working on.
+        OutputDebugStringA(text.c_str());
+        AppendStartupLog(text);
     }
 }
 
@@ -68,6 +85,12 @@ void Usage() {
 } // namespace
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    // A crash in this process has to be a crash and nothing else. With the default error mode an
+    // unhandled access violation puts Windows' "WallpaperRenderer.exe has stopped working" dialog on
+    // top of the desktop he is working on: the screen waits on it, and the wallpaper is black behind
+    // it until someone dismisses it. Silencing the prompt does not hide a fault - the process still
+    // dies, still leaves its log, and the settings window now brings the engine back.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     CommandLine cl;
@@ -134,10 +157,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     if (!app.Start(cl, error)) {
         std::string text = "Wallpaper could not start: " + error +
                            "\nSee logs/renderer-<pid>.log for the full trace.";
-        // A modal dialog would sit on the desktop the user is working on: only pop up when the
-        // renderer was started with no arguments at all (double-click), otherwise print.
-        if (argc <= 1) MessageBoxA(nullptr, text.c_str(), "Wallpaper", MB_OK | MB_ICONERROR);
-        else PrintToParentConsole(text + "\n");
+        PrintToParentConsole(text + "\n");
         return 1;
     }
     int rc = app.Run();

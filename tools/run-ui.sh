@@ -1,10 +1,20 @@
 #!/bin/bash
-# Stages qml/ + runs the settings window with Qt's bin on PATH. Edits to Main.qml only need this
-# script again, not a rebuild.
+# Stages qml/ + the hero transition's compiled shader, then runs the settings window with Qt's bin
+# on PATH. Edits to Main.qml or to shaders/*.frag only need this script again, not a rebuild.
 set -u
 QT=/d/Program/Qt/6.11.2/msvc2022_64
 BIN=/h/wallpaper/bld/bin/RelWithDebInfo
 "/d/Program/CMake/bin/cmake" -E copy_directory /h/wallpaper/Wallpaper/qml "$BIN/qml" >/dev/null
+# Same flags Qt's own qt_add_shaders uses. The stage is taken from the file *extension*, so the
+# source has to stay named .frag - a .qsl suffix makes qsb bake a vertex shader, which the scene
+# graph then refuses with "Failed to create pixel shader" while QML still reports status Ready.
+if [ -x "$QT/bin/qsb.exe" ]; then
+  "$QT/bin/qsb.exe" --glsl "100es,120,150" --hlsl 50 --msl 12 \
+    /h/wallpaper/Wallpaper/shaders/HeroLiquid.frag --o "$BIN/qml/HeroLiquid.frag.qsb" \
+    && echo "shader staged" || { echo "SHADER COMPILE FAILED"; exit 1; }
+else
+  echo "no qsb.exe in $QT/bin - the staged shader next to the exe is whatever was there before"
+fi
 cd "$BIN" || exit 1
 export PATH="$QT/bin:$PATH"
 export QML_IMPORT_PATH="$QT/qml"

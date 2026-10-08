@@ -24,10 +24,15 @@ class Bridge final : public QObject {
     Q_PROPERTY(bool qualityIsGlobal READ qualityIsGlobal NOTIFY stateChanged)
     Q_PROPERTY(QStringList fitLevels READ fitLevels CONSTANT)
     Q_PROPERTY(QString imageFit READ imageFit NOTIFY stateChanged)
+    // How the big preview changes when a different wallpaper is picked. The window draws this
+    // itself, so it is a ui.ini preference like the language, not a renderer setting.
+    Q_PROPERTY(QStringList transitionLevels READ transitionLevels CONSTANT)
+    Q_PROPERTY(QString transition READ transition WRITE setTransition NOTIFY transitionChanged)
     Q_PROPERTY(int trayAlpha READ trayAlpha NOTIFY stateChanged)
     Q_PROPERTY(int maxFps READ maxFps NOTIFY stateChanged)
     Q_PROPERTY(bool paused READ paused NOTIFY stateChanged)
     Q_PROPERTY(QString hostMethod READ hostMethod NOTIFY stateChanged)
+    // second one is the licence notice's claim, so it has to be visible where a user can see it.
     Q_PROPERTY(QString rootDir READ rootDir NOTIFY stateChanged)
     Q_PROPERTY(QString logPath READ logPath NOTIFY stateChanged)
     Q_PROPERTY(double cpuPercent READ cpuPercent NOTIFY stateChanged)
@@ -59,6 +64,12 @@ public:
     QString quality() const { return quality_; }
     bool qualityIsGlobal() const { return qualityIsGlobal_; }
     QStringList fitLevels() const;
+    // The hero switch transition the settings window draws for itself. Not a renderer setting:
+    // the desktop wallpaper is not repainted when this changes, so it lives in the ui.ini next to
+    // the language rather than in the renderer's config.json.
+    QStringList transitionLevels() const;
+    QString transition() const { return transition_; }
+    Q_INVOKABLE void setTransition(const QString& mode);
     QString imageFit() const { return imageFit_; }
     int trayAlpha() const { return trayAlpha_; }
     int maxFps() const { return maxFps_; }
@@ -135,6 +146,7 @@ signals:
     void targetChanged();
     void messageChanged();
     void favoritesChanged();
+    void transitionChanged();
 
 private:
     void poll();
@@ -144,6 +156,10 @@ private:
     void ingest(const Json& status, const Json& list);
     void say(const QString& msg, bool isError);
     void reportStep();
+    QString rendererExePath() const;
+    bool launchRenderer(bool announce);
+    void engineDied();
+    bool engineStoppedItself() const;
 public:
     void setSelectAtStart(const QString& id) { selectAtStart_ = id; }
     void setSettingsAtStart(bool on) { settingsAtStart_ = on; }
@@ -154,6 +170,14 @@ private:
     QTimer* timer_ = nullptr;
     bool connected_ = false;
     int misses_ = 0;
+    // The engine going away unasked is relaunchable; the user pressing 退出壁纸进程 in this window
+    // is not. The three numbers behind it are the rate limit on relaunches.
+    bool quitAsked_ = false;
+    int relaunches_ = 0;
+    qint64 relaunchAtMs_ = 0, relaunchWindowMs_ = 0;
+    qint64 lastPid_ = 0;
+    // A crashed engine is relaunched by engineDied(); an engine the user stopped from this window
+    // is not, and the relaunches are rate-limit
     QString lang_ = QStringLiteral("zh");
     QString target_ = QStringLiteral("all");
     QString lastMessage_, lastError_;
@@ -161,6 +185,7 @@ private:
     QVariantList monitors_, catalog_, caps_;
     QString quality_, host_, root_, logPath_;
     QString imageFit_ = QStringLiteral("fill");
+    QString transition_ = QStringLiteral("liquid");
     int trayAlpha_ = 0;
     bool qualityIsGlobal_ = false, paused_ = false, autostart_ = false;
     bool rotateOn_ = false;

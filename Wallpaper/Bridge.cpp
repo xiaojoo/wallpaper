@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QProcess>
 #include <QUrl>
@@ -101,6 +102,10 @@ const Entry kStrings[] = {
     {"quality", "画质档", "Quality"},
     {"quality_package", "跟随壁纸", "Per wallpaper"},
     {"image_fit", "壁纸铺展", "Wallpaper fit"},
+    {"transition", "切换动画", "Switch animation"},
+    {"transition_none", "无", "None"},
+    {"transition_dissolve", "溶解", "Dissolve"},
+    {"transition_liquid", "液态", "Liquid"},
     {"fit_fill", "裁剪填充", "Fill (crop)"},
     {"fit_fit", "适应", "Fit"},
     {"fit_stretch", "拉伸", "Stretch"},
@@ -248,6 +253,7 @@ Bridge::Bridge(QObject* parent) : QObject(parent) {
     lang_ = s.value("lang", "zh").toString();
     favorites_ = s.value("favorites").toStringList();
     target_ = s.value("target", "all").toString();
+    transition_ = s.value("transition", "liquid").toString();
     timer_ = new QTimer(this);
     connect(timer_, &QTimer::timeout, this, &Bridge::tick);
     timer_->start(1000);
@@ -269,6 +275,10 @@ QStringList Bridge::qualityLevels() const {
 // The order is the number the shaders branch on (Contract.hlsl, uPerf.w); adding one here means
 // adding a case in Image.hlsl and an Engine/Packages/WallpaperManager.hpp enum member, in order.
 QStringList Bridge::fitLevels() const { return {"fill", "fit", "stretch", "center", "tile"}; }
+
+// The three ways the big preview can change when a different wallpaper is picked. "none" skips
+// the frame capture as well, which is the only setting that makes a switch cost nothing.
+QStringList Bridge::transitionLevels() const { return {"none", "dissolve", "liquid"}; }
 
 QString Bridge::t(const QString& key) const {
     const bool en = lang_ == "en";
@@ -293,6 +303,14 @@ void Bridge::setTargetMonitor(const QString& tag) {
     QSettings s(QSettings::IniFormat, QSettings::UserScope, "SmartWallpaper", "ui");
     s.setValue("target", target_);
     emit targetChanged();
+}
+
+void Bridge::setTransition(const QString& mode) {
+    if (mode == transition_ || mode.isEmpty()) return;
+    transition_ = mode;
+    QSettings s(QSettings::IniFormat, QSettings::UserScope, "SmartWallpaper", "ui");
+    s.setValue("transition", transition_);
+    emit transitionChanged();
 }
 
 QString Bridge::pipeName() const { return QStringLiteral(R"(\\.\pipe\SmartWallpaper.Renderer)"); }
@@ -331,6 +349,7 @@ void Bridge::refresh() {
         if (++misses_ >= 2 && connected_) {
             connected_ = false;
             emit stateChanged();
+            engineDied();
         }
         if (!connected_ && timer_->interval() != 2000) timer_->start(2000);
         reportStep();   // a renderer that went away mid-step must not leave the wait armed
@@ -346,6 +365,9 @@ void Bridge::refresh() {
 
 void Bridge::ingest(const Json& status, const Json& list) {
     uptime_ = status.numOr("uptime_s");
+    // Which process this snapshot came from: the watchdog reads that engine's own log to tell a
+    // crash from a stop he asked for.
+    lastPid_ = status.numOr("pid");
     host_ = QString::fromStdString(status.strOr("host"));
     root_ = QString::fromStdString(status.strOr("root"));
     paused_ = status.boolOr("paused");
@@ -476,20 +498,85 @@ bool Bridge::apply(const QString& wallpaperId) {
     return ok;
 }
 
-bool Bridge::startRenderer() {
-    const QString exe = QDir(root_.isEmpty() ? QCoreApplication::applicationDirPath()
-                                             : root_)
-                            .absoluteFilePath("WallpaperRenderer.exe");
-    QString path = exe;
-    if (!QFileInfo::exists(path))
-        path = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../RelWithDebInfo/WallpaperRenderer.exe");
-    if (!QFileInfo::exists(path)) {
-        say(t("failed") + ": WallpaperRenderer.exe", true);
+QString Bridge::rendererExePath() const {
+    // Prefer the folder the engine itself reported in its status snapshot: that is the copy which was
+    // actually running, and on a dev tree the window and the engine do not necessarily live together.
+    QStringList cand;
+    if (!root_.isEmpty()) cand << QDir(root_).absoluteFilePath(QStringLiteral("WallpaperRenderer.exe"));
+    cand << QDir(QCoreApplication::applicationDirPath())
+                .absoluteFilePath(QStringLiteral("WallpaperRenderer.exe"));
+    cand << QDir(QCoreApplication::applicationDirPath())
+                .absoluteFilePath(QStringLiteral("../RelWithDebInfo/WallpaperRenderer.exe"));
+    for (const QString& p : cand)
+        if (QFileInfo::exists(p)) return QFileInfo(p).absoluteFilePath();
+    return QString();
+}
+
+bool Bridge::launchRenderer(bool announce) {
+    const QString path = rendererExePath();
+    if (path.isEmpty()) {
+        if (announce) say(t("failed") + ": WallpaperRenderer.exe", true);
+        else qInfo("engine went away, no WallpaperRenderer.exe under %s", qPrintable(root_));
         return false;
     }
-    QProcess::startDetached(QFileInfo(path).absoluteFilePath(), {});
-    say(t("start"), false);
+    QProcess::startDetached(path, {});
+    if (announce) say(t("start"), false);
     return true;
+}
+
+bool Bridge::startRenderer() {
+    // His button: clear the watchdog's budget so a manual start is followed by a fresh allowance,
+    // and drop the deliberate-quit flag in case he stopped it here earlier.
+    relaunches_ = 0;
+    relaunchWindowMs_ = 0;
+    relaunchAtMs_ = 0;
+    quitAsked_ = false;
+    return launchRenderer(true);
+}
+
+// The engine dying takes the desktop wallpaper with it and leaves this window reading "渲染器未启动"
+// over a black screen, so the window that saw it running is the only thing that can bring it back.
+// Quietly: he asked for a crash to be a crash, not a prompt. Bounded, because an engine that dies
+// again as soon as it starts would otherwise be relaunched on every poll forever - at most one
+// relaunch per 30 s and three per 10 min, then it waits for the button in 壁纸进程管理.
+// A stop he asked for and a crash look the same from here: the pipe simply stops answering. The
+// engine's own log tells them apart - it writes "final: ..." as its last act on a clean shutdown
+// (`Application::Stop` logs "stopping: <why>" up to ~41 KB / 450 lines before it, so only the last
+// line is usable), and a crash ends on whatever it was logging: the file of the one that took his
+// wallpaper down at 02:20:56 ends mid-video-line with no farewell. No log readable counts as a
+// crash, because "he stopped it" is the claim that needs the evidence.
+bool Bridge::engineStoppedItself() const {
+    if (root_.isEmpty() || lastPid_ <= 0) return false;
+    QFile f(QDir(root_).absoluteFilePath(
+        QStringLiteral("logs/renderer-%1.log").arg(lastPid_)));
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    const qint64 back = qMin<qint64>(f.size(), qint64(1) << 17);
+    f.seek(f.size() - back);
+    const QStringList lines = QString::fromUtf8(f.readAll()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    return !lines.isEmpty() && lines.last().contains(QStringLiteral("final:"));
+}
+
+void Bridge::engineDied() {
+    if (quitAsked_) return;
+    if (engineStoppedItself()) {
+        qInfo("engine stopped itself (%lld), leaving it down", static_cast<long long>(lastPid_));
+        return;
+    }
+    if (engineStoppedItself()) {
+        qInfo("engine stopped on request, leaving it down");
+        return;
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - relaunchWindowMs_ > 600000) { relaunchWindowMs_ = now; relaunches_ = 0; }
+    if (relaunches_ >= 3) {
+        qInfo("engine went away, giving up after %d relaunches", relaunches_);
+        return;
+    }
+    if (now - relaunchAtMs_ < 30000) return;
+    relaunchAtMs_ = now;
+    ++relaunches_;
+    qInfo("engine went away, relaunching (attempt %d)", relaunches_);
+    launchRenderer(false);
 }
 
 void Bridge::setPaused(bool p) {
@@ -697,10 +784,12 @@ void Bridge::reload() {
 
 void Bridge::showPreview(const QString& id) {
     if (id.isEmpty()) return;
-    // A window sitting in the tray must not keep the renderer drawing a second pass nobody can see.
-    // Item.visible does not follow the window's, so the carousel timer keeps re-aiming the preview
-    // after a hide - this is the one gate that catches every caller.
-    if (chromeHwnd_ && !IsWindowVisible(reinterpret_cast<HWND>(chromeHwnd_))) return;
+    // No visibility gate here. There was one until 2026-10-08 ("a window sitting in the tray must not
+    // keep the renderer drawing a second pass nobody can see"), but stopping the pass is what made
+    // coming back show a still for the ~0.7 s the renderer needs to resume, and he asked for the
+    // motion to keep playing through a minimise or a trip to the tray instead. The renderer still
+    // ends the pass on its own if this window stops beating, so a crashed window cannot leave it
+    // burning; `useLivePreview` in the QML is the switch that means it now.
     if (previewId_ != id) {
         previewId_ = id;
         previewBeatMs_ = 0;   // a new wallpaper asks for a beat straight away
@@ -737,6 +826,8 @@ void Bridge::previewBeat() {
 void Bridge::quitRenderer() {
     Json out;
     request(R"({"cmd":"quit"})", 1500, &out);
+    // His choice, not a fault: the watchdog above must not put the engine back up.
+    quitAsked_ = true;
     connected_ = false;
     emit stateChanged();
 }

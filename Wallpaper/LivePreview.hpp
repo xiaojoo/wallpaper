@@ -24,6 +24,13 @@ class LivePreview : public QQuickPaintedItem {
     // wallpaper's already-loaded picture instead of the previous one still moving.
     Q_PROPERTY(QString wantedId READ wantedId WRITE setWantedId NOTIFY frameArrived)
     Q_PROPERTY(bool matching READ matching NOTIFY frameArrived)
+    // The pass is off because *this window* asked for it - minimised, hidden to the tray, or the
+    // carousel page switched away. Then the last delivered frame must keep painting: dropping it is
+    // what made coming back show the wallpaper's still for the ~0.7 s the renderer takes to resume,
+    // i.e. a jump between two different moments of the same clip. A pass that stopped on its own (the
+    // renderer exited, its heartbeat watchdog ended it) is not paused, and the staleness below still
+    // hands the page back to the saved strip.
+    Q_PROPERTY(bool paused READ paused WRITE setPaused NOTIFY frameArrived)
 
 public:
     explicit LivePreview(QQuickItem* parent = nullptr);
@@ -39,6 +46,8 @@ public:
     QString wantedId() const { return wantedId_; }
     void setWantedId(const QString& id);
     bool matching() const { return matching_; }
+    bool paused() const { return paused_; }
+    void setPaused(bool on);
 
 signals:
     void activeChanged();
@@ -62,6 +71,7 @@ private:
     QString wantedId_;
     quint64 wantedHash_ = 0, frameHash_ = 0;
     bool matching_ = false;
+    bool paused_ = false;
 };
 
 } // namespace sw

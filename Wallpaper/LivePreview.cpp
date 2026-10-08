@@ -38,6 +38,16 @@ void LivePreview::setActive(bool on) {
     timer_.start(15);
 }
 
+void LivePreview::setPaused(bool on) {
+    if (paused_ == on) return;
+    paused_ = on;
+    // Coming back gets the whole staleness window from *now*, not from the frame it was left on, so
+    // a renderer that is really gone still loses the held frame after the same 1200 ms anybody else
+    // would wait for.
+    if (!on) lastSeenMs_ = QDateTime::currentMSecsSinceEpoch();
+    emit frameArrived();
+}
+
 void LivePreview::poll() {
     if (!reader_.open()) {
         std::string err;
@@ -46,8 +56,9 @@ void LivePreview::poll() {
     }
     // Frames stopped arriving: the renderer exited, or its own heartbeat watchdog ended the pass.
     // Without this the item would sit on the last live picture forever and never hand the page back
-    // to the saved strip.
-    if (haveFrame_ && QDateTime::currentMSecsSinceEpoch() - lastSeenMs_ > 1200) {
+    // to the saved strip. Not while this window paused the pass itself - that hold is the whole
+    // point of `paused`, and resuming shows the frame it stopped on instead of the wallpaper's still.
+    if (haveFrame_ && !paused_ && QDateTime::currentMSecsSinceEpoch() - lastSeenMs_ > 1200) {
         haveFrame_ = false;
         matching_ = false;
         fps_ = 0;
@@ -103,6 +114,12 @@ void LivePreview::setWantedId(const QString& id) {
     wantedId_ = id;
     wantedHash_ = IdHash(id.toUtf8().constData());
     matching_ = (frameHash_ == wantedHash_);
+    // The held frame belongs to this window's wallpaper only while its hash says so. If the
+    // selection moved during the pause (the tray menu's 下一张 works while the window is minimised),
+    // keeping it painted would keep painting the *previous* wallpaper on screen. Outside a pause the
+    // frame is not dropped here: the handover onto a newly picked wallpaper deliberately keeps the
+    // outgoing live frame painted until its own first frame lands.
+    if (paused_ && !matching_) haveFrame_ = false;
     emit frameArrived();
 }
 
