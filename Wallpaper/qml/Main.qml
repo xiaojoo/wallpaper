@@ -530,14 +530,22 @@ ApplicationWindow {
                     // asked for the motion to keep playing through a minimise or a trip to the tray:
                     // stopping it cost ~0.7 s of still/held picture on the way back). What is left in
                     // this gate is the two cases that genuinely have no picture to animate.
-                    // `paused` still matters for them: a pass this window stopped keeps painting the
-                    // frame it stopped on instead of revealing a still of a different moment.
                     const want = root.hero !== null && root.useLivePreview
-                    liveView.paused = !want
                     if (want)
                         Bridge.showPreview(root.hero.id)
                     else
                         Bridge.hidePreview()
+                    // Set after the request, because a *new* id clears the pause flag inside it: the
+                    // clip the page moved to is not the one he stopped.
+                    // While a clip is paused the window has to hold the frame it stopped on - the engine
+                    // publishes nothing more while the pause is on the pass (that is how pausing the
+                    // picture stays off his wallpaper when the same clip is on screen), and after 1200 ms
+                    // of silence the item would otherwise hand the page back to the still.
+                    liveView.paused = !want || Bridge.previewVideoPaused
+                }
+                Connections {
+                    target: Bridge
+                    function onPreviewVideoPausedChanged() { carousel.syncPreview() }
                 }
                 onVisibleChanged: syncPreview()
                 Component.onCompleted: syncPreview()
@@ -813,14 +821,26 @@ ApplicationWindow {
                             // On-state is the icon's own colour, like the favourite - not a border.
                             IconBtn {
                                 id: motionBtn
+                                // On a clip this button is the transport, not the strip switch: an
+                                // imported video has no 24-frame strip by design (its card plays
+                                // live), so the button that means 动/不动 on every other card had
+                                // nothing to act on and sat disabled - which is how he read it:
+                                // 「自己上传的视频，这个播放、暂停按钮不能用」.
+                                readonly property bool isClip: root.hero !== null && root.hero.type === "video"
                                 icon: "motion"
-                                tip: trs("preview_motion")
+                                tip: isClip ? trs(Bridge.previewVideoPaused ? "video_resume" : "video_pause")
+                                            : trs("preview_motion")
                                 flat: true
                                 veil: "#40FFFFFF"      // a dark veil on a dark bar is no feedback at all
                                 glyph: 17
-                                enabled: root.hero !== null && root.framesOf(root.hero).length > 1
-                                tint: root.previewMotion ? th.err : th.text
-                                onClicked: root.previewMotion = !root.previewMotion
+                                enabled: root.hero !== null && (isClip || root.framesOf(root.hero).length > 1)
+                                // Red while it is moving, either way that is decided.
+                                tint: isClip ? (Bridge.previewVideoPaused ? th.text : th.err)
+                                             : (root.previewMotion ? th.err : th.text)
+                                onClicked: {
+                                    if (isClip) Bridge.previewVideoPaused = !Bridge.previewVideoPaused
+                                    else root.previewMotion = !root.previewMotion
+                                }
                                 Hint { label: motionBtn.tip; hovered: motionBtn.hoverArea; place: "top" }
                             }
                             IconBtn {
@@ -1680,12 +1700,6 @@ ApplicationWindow {
                                         + modelData.corner_samples_static + " · " + trs("draw_errors") + ": " + modelData.draw_errors
                                     color: Number(modelData.draw_errors) > 0 ? th.err : th.muted
                                     font.family: root.fontFamily; font.pixelSize: 11
-                                    wrapMode: Text.WordWrap
-                                    Layout.fillWidth: true
-                                }
-                                Text {
-                                    text: trs("reason") + ": " + modelData.state_reason
-                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
                                     wrapMode: Text.WordWrap
                                     Layout.fillWidth: true
                                 }

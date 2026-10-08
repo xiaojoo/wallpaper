@@ -31,6 +31,10 @@ class Bridge final : public QObject {
     Q_PROPERTY(int trayAlpha READ trayAlpha NOTIFY stateChanged)
     Q_PROPERTY(int maxFps READ maxFps NOTIFY stateChanged)
     Q_PROPERTY(bool paused READ paused NOTIFY stateChanged)
+    // Whether the clip in the big preview is frozen. This is the browse page's own transport and is
+    // scoped to the preview player, so it is deliberately not 暂停渲染 (which stops the drawing).
+    Q_PROPERTY(bool previewVideoPaused READ previewVideoPaused WRITE setPreviewVideoPaused
+               NOTIFY previewVideoPausedChanged)
     Q_PROPERTY(QString hostMethod READ hostMethod NOTIFY stateChanged)
     Q_PROPERTY(QString rootDir READ rootDir NOTIFY stateChanged)
     Q_PROPERTY(QString logPath READ logPath NOTIFY stateChanged)
@@ -74,6 +78,7 @@ public:
     int trayAlpha() const { return trayAlpha_; }
     int maxFps() const { return maxFps_; }
     bool paused() const { return paused_; }
+    bool previewVideoPaused() const { return previewPaused_; }
     QString hostMethod() const { return host_; }
     QString rootDir() const { return root_; }
     QString logPath() const { return logPath_; }
@@ -109,6 +114,7 @@ public:
     Q_INVOKABLE void refresh();
     Q_INVOKABLE bool apply(const QString& wallpaperId);
     Q_INVOKABLE void setPaused(bool paused);
+    Q_INVOKABLE void setPreviewVideoPaused(bool paused);
     Q_INVOKABLE void setQuality(const QString& level);
     Q_INVOKABLE void setFit(const QString& mode);
     Q_INVOKABLE void setTrayAlpha(int pct);
@@ -148,6 +154,7 @@ signals:
     void messageChanged();
     void favoritesChanged();
     void transitionChanged();
+    void previewVideoPausedChanged();
 
 private:
     void poll();
@@ -209,6 +216,8 @@ private:
     QTimer* previewTimer_ = nullptr;   // only sends the heartbeat; LivePreview reads the pixels
     QString previewId_;
     qint64 previewBeatMs_ = 0;   // wall clock of the last heartbeat; see Bridge::previewBeat
+    // The preview player's own transport state, read back from the engine rather than remembered.
+    bool previewPaused_ = false;
 
     quintptr chromeHwnd_ = 0;   // the settings window, for showCommand
 };

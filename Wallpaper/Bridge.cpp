@@ -88,6 +88,10 @@ const Entry kStrings[] = {
     {"reload", "重载壁纸", "Reload wallpapers"},
     {"pause", "暂停渲染", "Pause rendering"},
     {"resume", "恢复渲染", "Resume rendering"},
+    // The clip's own transport on the big picture - a different thing from the two above, which stop
+    // the wallpaper drawing itself, so the wording has to name the video.
+    {"video_pause", "暂停视频", "Pause clip"},
+    {"video_resume", "继续播放视频", "Resume clip"},
     {"monitors", "显示器", "Monitors"},
     {"all_monitors", "全部显示器", "All monitors"},
     // The licence notice is a distribution obligation for the FFmpeg DLLs, so it has to be readable
@@ -162,7 +166,6 @@ const Entry kStrings[] = {
     {"state_fullscreen", "全屏应用", "fullscreen"},
     {"state_locked", "已锁屏", "locked"},
     {"state_display_off", "屏幕已关闭", "display off"},
-    {"reason", "判定依据", "Why"},
     {"adapter", "显卡", "Adapter"},
     {"device", "设备", "Device"},
     {"wallpaper", "壁纸", "Wallpaper"},
@@ -198,6 +201,13 @@ QVariant toVariant(const Json& j) {
     }
     return {};
 }
+
+// The clip kinds the picker offers and the ones it routes to `addvideo`. The engine's import is
+// extension-agnostic - it probes the file with FFmpeg, keeps the real suffix in the package and lets
+// the manifest's "renderer": "video" decide how it is drawn - so this list exists only to tell a clip
+// from a picture, which WIC cannot do for a video. The bundled avcodec registers the matroska/webm
+// demuxer and vp8 / vp9 / av1 decoders, so a webm needs nothing but the name here.
+const QStringList kVideoExt { "mp4", "webm" };
 
 } // namespace
 
@@ -389,10 +399,20 @@ void Bridge::ingest(const Json& status, const Json& list) {
     // and showPreview only sends when the id changes, so nothing would bring it back until the user
     // switched wallpaper. The once-a-second snapshot already says whether it is running.
     if (!previewId_.isEmpty()) {
-        if (const Json* p = status.find("preview"); p && p->isObject() && !p->boolOr("on")) {
-            const QString id = previewId_;
-            previewId_.clear();
-            showPreview(id);
+        if (const Json* p = status.find("preview"); p && p->isObject()) {
+            // The clip's own transport state, from the same snapshot as everything else here. When the
+            // pass is off the field is absent, which is "not paused" - the next look at that clip
+            // starts playing, because a video instance does not survive the pass ending.
+            const bool pz = p->boolOr("video_paused");
+            if (pz != previewPaused_) {
+                previewPaused_ = pz;
+                emit previewVideoPausedChanged();
+            }
+            if (!p->boolOr("on")) {
+                const QString id = previewId_;
+                previewId_.clear();
+                showPreview(id);
+            }
         }
     }
     qualityIsGlobal_ = status.boolOr("quality_is_global");
@@ -597,6 +617,22 @@ void Bridge::setPaused(bool p) {
     emit stateChanged();
 }
 
+void Bridge::setPreviewVideoPaused(bool p) {
+    // The transport is per player and this one names the surface he is looking at, so pausing the big
+    // picture cannot stop the wallpaper behind it (Application's `video` command, arg2 = "preview").
+    const std::string body = std::format(R"({{"cmd":"video","arg":"{}","arg2":"preview"}})",
+                                         p ? "pause" : "resume");
+    Json out;
+    request(body.c_str(), 1500, &out);
+    // `video` is a queued command, so the pipe answers "queued" and the real reply only ever appears
+    // in the engine's log: the state cannot be read back from here. The button is enabled exactly when
+    // the preview player exists (a video hero with a live pass), so apply the request now and let the
+    // snapshot correct it within a second if the engine disagreed.
+    if (p == previewPaused_) return;
+    previewPaused_ = p;
+    emit previewVideoPausedChanged();
+}
+
 void Bridge::setQuality(const QString& level) {
     Json out;
     std::string body = std::format(R"({{"cmd":"quality","arg":"{}"}})", level.toStdString());
@@ -717,11 +753,11 @@ void Bridge::reportStep() {
 void Bridge::addImageFile() {
     const QString file = QFileDialog::getOpenFileName(
         nullptr, t("add_image"), QDir::homePath(),
-        "Images and video (*.png *.jpg *.jpeg *.bmp *.webp *.tiff *.mp4)");
+        "Images and video (*.png *.jpg *.jpeg *.bmp *.webp *.tiff *.mp4 *.webm)");
     if (file.isEmpty()) return;
     // One picker for both kinds, but two different packages: addimage hands the file to WIC, which
     // answers "not a decodable image" for a clip, so the extension decides which command to send.
-    const bool video = QFileInfo(file).suffix().compare("mp4", Qt::CaseInsensitive) == 0;
+    const bool video = kVideoExt.contains(QFileInfo(file).suffix(), Qt::CaseInsensitive);
     Json out;
     std::string body = std::format(R"({{"cmd":"{}","arg":"{}"}})", video ? "addvideo" : "addimage",
                                    file.toStdString());
@@ -737,7 +773,6 @@ void Bridge::addImageFolder() {
     const QString dir = QFileDialog::getExistingDirectory(nullptr, t("add_folder"), QDir::homePath());
     if (dir.isEmpty()) return;
     static const QStringList imgExt { "png", "jpg", "jpeg", "bmp", "webp", "tiff" };
-    static const QStringList vidExt { "mp4" };
     QDir d(dir);
     const QFileInfoList entries = d.entryInfoList(QDir::Files, QDir::Name);
     int queued = 0;
@@ -745,7 +780,7 @@ void Bridge::addImageFolder() {
     // on the import itself - the copies and their pictures appear as the render loop gets to them.
     for (const QFileInfo& f : entries) {
         const QString suffix = f.suffix().toLower();
-        const bool isVideo = vidExt.contains(suffix);
+        const bool isVideo = kVideoExt.contains(suffix);
         if (!isVideo && !imgExt.contains(suffix)) continue;
         Json out;
         const std::string body = std::format(R"({{"cmd":"{}","arg":"{}"}})", isVideo ? "addvideo" : "addimage",
@@ -803,6 +838,10 @@ void Bridge::showPreview(const QString& id) {
     // burning; `useLivePreview` in the QML is the switch that means it now.
     if (previewId_ != id) {
         previewId_ = id;
+        // The clip the page moved to is a fresh player and is not paused, and the state only comes
+        // back on the next snapshot - a second later. Clearing it here is what keeps the button from
+        // showing 已暂停 over a picture that is already running.
+        if (previewPaused_) { previewPaused_ = false; emit previewVideoPausedChanged(); }
         previewBeatMs_ = 0;   // a new wallpaper asks for a beat straight away
         std::string body = std::format(R"({{"cmd":"preview","arg":"{}"}})", id.toStdString());
         Json out;

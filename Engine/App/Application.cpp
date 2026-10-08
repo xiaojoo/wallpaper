@@ -745,6 +745,9 @@ void Application::UpdateSnapshot() {
         if (VideoSource* v = preview_.inst ? preview_.inst->video() : nullptr) {
             pv.set("video_frames", Json::Of((long long)v->delivered()));
             pv.set("video_pos", Json::Of(v->position_s()));
+            // "paused" as the page experiences it: either the player is stopped, or the pass is holding
+            // its picture because the player is the wallpaper's own.
+            pv.set("video_paused", Json::Of(v->paused() || preview_.held));
         }
         {
             const ULONGLONG now = GetTickCount64();
@@ -1064,6 +1067,9 @@ bool Application::StartPreview(const std::string& id, std::string& error) {
     p.idHash = IdHash(id.c_str());
     p.error.clear();
     p.on = true;
+    // A new target is never the picture the page stopped on. Re-beating the same id keeps the pause
+    // (that path returns before this line).
+    p.held = false;
     p.lastBeatMs = GetTickCount64();
     // A shared instance is already active because it is on a screen; asking again would be harmless
     // but asking it to stop later (StopPreview) is not, so that side checks p.shared.
@@ -1080,6 +1086,9 @@ void Application::StopPreview(const char* why) {
     // Never park a shared instance: it is on a screen, and parking it is exactly the bug that made
     // the desktop freeze on a still picture (see the live-source note in BuildThumbnails).
     if (preview_.inst && !preview_.shared) preview_.inst->SetMediaActive(false);
+    // A pause the page put on the pass dies with the pass. The player itself is only ever stopped by
+    // this window when it belongs to the preview alone, and such an instance is reaped just below.
+    preview_.held = false;
     pacer_.ConfigureSlot(preview_.clock, 0, 0);
     // The textures and the compiled instance stay: the browse page comes back to the same wallpaper
     // seconds later, and re-preparing a shader mid-interaction is a visible hitch for 6 MB of VRAM.
@@ -1130,6 +1139,12 @@ void Application::DrawPreview(double nowSeconds) {
         p.slotState[i] = Preview::Free;
         freeSlot = i;
     }
+
+    // The page asked for a pause on a player that is also running his wallpaper. Nothing is drawn and
+    // nothing is published, so the section keeps holding the frame he stopped on - and this has to sit
+    // *after* the collection loop above, or the two staging slots would never be freed and every frame
+    // after resuming would find nowhere to copy to.
+    if (p.held) return;
 
     FrameCB f{};
     // Same clock as the desktop slots, so the preview is the wallpaper at the same moment rather
@@ -1579,13 +1594,22 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
     } else if (action == "video") {
         // Per-clip transport, distinct from the global `pause`: that one stops the wallpaper drawing
         // (and idles the decoder with it), this one freezes the picture while the budget stays.
+        //
+        // `arg2` says *which* player, because the settings window pauses the picture he is looking at
+        // and must not stop the wallpaper behind it: "preview", a monitor tag ("M0"), or empty for
+        // every player - which is what the command line does when nobody says. `seek` keeps arg2 as
+        // its number of seconds, so the one transport that needs a value is unaffected.
         const bool known = arg == "pause" || arg == "resume" || arg == "seek";
-        bool any = false;
+        const std::string target = (arg == "seek") ? std::string() : arg2;
+        const auto hits = [&target](const std::string& who) { return target.empty() || target == who; };
+        bool any = false, touched = false;
         Json list = Json::Array();
         for (auto& s : slots_) {
             VideoSource* v = s.instance.video();
             if (!v) continue;
             any = true;
+            if (!hits(s.window.monitor().tag)) continue;
+            touched = true;
             if (arg == "pause") v->Pause();
             else if (arg == "resume") v->Resume();
             else if (arg == "seek") v->Seek(std::atof(arg2.c_str()));
@@ -1600,15 +1624,22 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         }
         if (VideoSource* v = preview_.inst ? preview_.inst->video() : nullptr) {
             any = true;
-            if (arg == "pause") v->Pause();
-            else if (arg == "resume") v->Resume();
-            else if (arg == "seek") v->Seek(std::atof(arg2.c_str()));
+            if (hits("preview")) {
+                touched = true;
+                if (arg == "seek") v->Seek(std::atof(arg2.c_str()));
+                // The pause belongs to the pass, in both cases: the page stops receiving pictures, so
+                // the window keeps painting the frame it stopped on. Stopping the *player* as well is
+                // only possible when the preview owns it - a shared instance is the player his wallpaper
+                // runs on, and pausing it there is the bug he reported ("有时候桌面的壁纸也被暂停了").
+                else if (arg == "pause") { preview_.held = true; if (!preview_.shared) v->Pause(); }
+                else if (arg == "resume") { preview_.held = false; if (!preview_.shared) v->Resume(); }
+            }
             Json j = Json::Object();
             j.set("where", Json::Of(std::string("preview")));
             j.set("wallpaper", Json::Of(preview_.id));
             j.set("pos", Json::Of(v->position_s()));
             j.set("duration", Json::Of(v->duration_s()));
-            j.set("paused", Json::Of(v->paused()));
+            j.set("paused", Json::Of(v->paused() || preview_.held));
             j.set("frames", Json::Of((long long)v->delivered()));
             list.push(std::move(j));
         }
@@ -1616,6 +1647,8 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
             result = std::format(R"({{"ok":false,"error":"video command is pause | resume | seek <seconds>, not '{}'"}})", arg);
         else if (!any)
             result = R"({"ok":false,"error":"no video wallpaper is loaded"})";
+        else if (!touched)
+            result = std::format(R"({{"ok":false,"error":"no video player is on '{}'"}})", target);
         else
             result = std::format(R"({{"ok":true,"players":{}}})", list.dump(0));
     } else if (action == "delimage") {

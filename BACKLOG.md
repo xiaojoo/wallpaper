@@ -468,6 +468,38 @@
   预览 1280x720、图片本身 3840x2160 三者同比例，拉伸在这批内容上是恒等操作 —— 也就是说**我复现不出来**，
   等他点名是哪块表面/哪一张（卡片、大图、还是桌面）。
 
+- **字幕条第一颗在视频上是死控件**（2026-10-08 18:20，他截图圈住那颗图标：「自己上传的视频，这个播放、
+  暂停按钮不能用啊」）。原因不是坏了，是**从来没有一条路**：那颗的 `enabled` 写的是
+  `framesOf(hero).length > 1`，而导入的视频按设计不出 24 帧切片（`Thumbnailer::Build` 里
+  `framesToGrab = inst.hasVideo() ? 0 : frameCount_`，卡片放活帧），所以视频卡上它永远灰着；引擎那边
+  `--ctl video pause|resume|seek` 早就有，只是 UI 没有任何地方调过（`grep '"video"' Wallpaper/` 零命中）。
+  改法：`hero.type === "video"` 时这颗走 `video pause|resume preview`，提示语 `暂停视频`/`继续播放视频`，
+  红色=正在放；`Bridge.previewVideoPaused` 从快照的 `preview.video_paused` 读回，换卡时立刻清掉
+  （否则按钮会在已经放起来的下一张上挂着"已暂停"最多 1 秒）。
+  **作用域是这次的关键**：`video` 原来一把梭所有播放器，从浏览页按暂停会把他桌面那张一起冻住；现在 `arg2`
+  点名（`preview` / `M0` / 空=全部），未知目标回 `ok:false` 而不是静默什么都不做。实测
+  （`build/tmp/video-transport-check.py` + `build/tmp/uipkg8/run9.py`，后者让探针窗真的按按钮）：
+  预览冻在 136 帧期间桌面 `video_frames_delivered` 11599→11620→11648 继续走、`monitors[0].video_paused`
+  全程 false；反向 `video pause M0` 时桌面 +0 / 预览 +121；命令落地 42~44 ms。
+  **①的那条边界当时是错的**：我写的是"预览的正好是桌面在放的那张时共用同一个解码器，暂停必然两边一起停"，
+  于是 2026-10-08 19:20 他报回来「这个播放有bug，有时候桌面的壁纸也被暂停了，有时候只暂停预览」——
+  不一致的来源就是 4 秒轮播把大图停在"是不是壁纸上那一张"之间来回换。改法是把暂停从播放器搬到**这一遍画面**
+  上（`Preview::held`）：置位后 `DrawPreview` 不再出帧，共享内存留着他停住的那帧，窗口 `liveView.paused`
+  挂住它（否则 1200 ms 超时就把页面交回静帧）；只有非共享的播放器才顺手 `Pause()` 省一个解码线程。
+  两个坑：早退必须放在**在途拷贝的收集循环之后**（放前面两个 staging 槽永不释放，恢复后每帧都记 dropped，
+  实测恢复后 `preview.dropped` 仍为 0 才算对）；`syncPreview` 里 `liveView.paused` 要放在
+  `Bridge.showPreview()` **之后**赋值，因为换卡那一刻 showPreview 会清掉暂停标志。
+  复测四档（`build/tmp/video-transport-check.py`）：非壁纸那张 暂停期间 预览解码 +0 / 发布 +1 / 桌面 +62；
+  壁纸那张 共享播放器仍解码 +61、`monitors[0].video_paused` 全程 false、发布 +1；反向 `video pause M0`
+  桌面 +0 而预览照常 +121；未知目标 `ok:false`。UI 侧探针窗真按 4.5 秒：563 个采样 `paused` 恒 1、
+  活帧链路恒在、静帧露头 0 次。发布那一两帧是标志落地前已在途的拷贝，判据放宽到 ≤3 并注明原因。
+  **②仍然成立**：`video` 是队列命令，管道只回 `"queued"`，真正的回复只在引擎日志里，所以按钮是
+  "先按请求显示、下一秒快照纠正"，不是从回复读回来的 —— 想要真读回就得把 `video` 变成本地命令，
+  那要处理 `preview_.inst` 的跨线程指针，暂时没做。
+  踩到的坑：`Q_PROPERTY` 只写 `READ ... NOTIFY ...` 忘了 `WRITE`，从 QML 赋值会抛
+  "Cannot assign to read-only property"，而 QML 的异常只进 `ui.log`、界面上完全看不出来 —— 探针第一次
+  跑就是 `enabled=1` 但 `flag seen=0`、`PB8 ACT` 一行都没有，才定位到这里。
+
 - **`WallpaperRenderer.exe` 会崩，崩在"桌面槽放 4K 视频 + 第二遍预览同时开 4K60"那条路上**
   （2026-10-08 02:20:56，他报「突然退出桌面壁纸，但是程序还是打开的」）：WER 记的是
   `APPCRASH / c0000005 / 偏移 00000000000831a4`，报表在
