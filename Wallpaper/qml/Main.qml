@@ -26,10 +26,11 @@ ApplicationWindow {
     // Closing the window must not leave the renderer drawing a second pass forever: the heartbeat
     // would stop, but its watchdog only fires after three seconds. Coming back out of the tray has
     // to re-arm it here too - the carousel's own visible flag never changed, so nothing else does.
-    // Focus is the other half of "nobody is watching it": while another program is in front, the
-    // second pass and the saved strip both stand down.
+    // Minimising and restoring are the same question in a different form: Qt keeps `visible` true
+    // while a window is minimised, so `visibility` is the signal that actually moves. Losing focus
+    // deliberately no longer re-syncs anything - motion continues while the window is on screen.
     onVisibleChanged: carousel.syncPreview()
-    onActiveChanged: carousel.syncPreview()
+    onVisibilityChanged: carousel.syncPreview()
 
     QtObject {
         id: th
@@ -101,31 +102,54 @@ ApplicationWindow {
         for (let m = 0; m < mons.length; ++m) { const w = find(mons[m].wallpaper); if (w !== null) return w }
         return null
     }
-    // Switching the big picture used to be a hard cut, and painting the outgoing wallpaper's *still*
-    // over it to crossfade made it worse: with the live pass on screen (measured: 12 of 12 switches)
-    // that overlay is a different picture of a different wallpaper arriving at full opacity, which is
-    // the flash he saw. So nothing is painted over the live pass. Instead the whole content stack dips
-    // to 22 % and `hero` - the value every layer, the caption and the preview request read - is swapped
-    // at the trough, so the change happens where it is least visible and one mechanism covers the
-    // live, motion and still cases alike.
     // Switching the big picture used to be a hard cut. Painting the outgoing wallpaper's *still* over
     // it to fake a crossfade made it worse (measured: 12 of 12 switches had the live pass on screen,
     // so that overlay was a foreign picture arriving at full opacity - the flash he saw), and dipping
     // the whole stack to the box's dark base was rejected for the same reason: it dims. So the
-    // outgoing frame is *captured* instead: the frame he is actually looking at is grabbed, laid on
-    // top at full opacity, and only then is `hero` swapped underneath it and the grab dissolved away.
+    // outgoing frame is *captured* instead - whichever layer really is on screen, which is why one
+    // mechanism covers the live, motion and still cases alike - and the swap happens underneath it
+    // while that capture is taken away by the transition picked in 设置 > 通用 > 切换动画: "dissolve"
+    // fades it, "liquid" churns it into the new picture (shaders/HeroLiquid.frag), "none" cuts.
     readonly property var pendingHero: current !== null ? current : applied
     property var hero: null
+    // 0 = nothing in flight, 1 = the capture is fading out, 2 = the liquid morph is running.
+    property int heroFx: 0
+    readonly property int fxDissolve: 1
+    readonly property int fxLiquid: 2
+    // The reference's own numbers: a 1.3 s sweep, displaceScale 300 px against its 1920 px render
+    // target, a 512 px map tile with ~9.5 Voronoi cells across it, and the map sprite turning while
+    // it churns. 0.78 rad is the *total* the reference accumulates at 60 fps (it adds
+    // progress * 0.02 once per frame), so this port keeps the total rather than the per-frame step,
+    // which would run about twice as far at this window's measured ~125 fps.
+    property int heroLiquidMs: 1300
+    property real heroLiquidScalePx: 300
+    property real heroLiquidStageW: 1920
+    property real heroLiquidCells: 9.5
+    property real heroLiquidRotRad: 0.78
+    // The reference never resets the map's rotation, so every switch starts where the last one
+    // ended and the cells are turned by a different amount each time.
+    property real heroLiquidRotBase: 0
+    // Ready == 0; anything else means the .qsb did not load, and a morph with no texture would show
+    // the box's base colour, so the fade is used instead.
+    readonly property bool heroLiquidUsable: Bridge.transition === "liquid" && heroLiquid.status === 0
+    function heroFxMode() {
+        if (Bridge.transition === "none") return 0
+        return heroLiquidUsable ? fxLiquid : fxDissolve
+    }
     // saveToFile takes a QUrl, and QUrl("C:/Users/...") is not an absolute local file - it has to be
     // spelled file:/// or the write silently fails and the overlay is left with nothing to show.
     // Two names, alternated: an Image whose `source` is assigned the same URL it already holds does
     // not reload, so a single path would show the *first* grabbed frame on every later switch.
     // Not Qt.temporaryPath - measured undefined in this QML, which wrote the file to the working
     // directory under the name "undefinedwallpaper-hero-out.png".
+    // The extension is what makes or breaks the frame: writing the grab as PNG measured
+    // 13-40 ms on the GUI thread (and 2 ms as BMP, which is the same 24-bit pixels with no encoder),
+    // and a 40 ms stall is presented as one near-black frame over the whole window.
+    // .bmp is also what the grab already is, so nothing is decoded on the way back either.
     property int snapFlip: 0
     function snapUrlFor(i) {
         const dir = Bridge.rootDir.replace(/\\/g, "/")
-        return "file:///" + dir + "/cache/hero-out-" + (i ? "b" : "a") + ".png"
+        return "file:///" + dir + "/cache/hero-out-" + (i ? "b" : "a") + ".bmp"
     }
     property url snapUrl: ""
     property bool snapBusy: false
@@ -136,14 +160,82 @@ ApplicationWindow {
         if (heroMotion) return frameStack
         return heroImg
     }
-    function commitHeroSwap() {
-        hero = pendingHero
-        heroOutFade.restart()
+    function heroFxStop() {
+        heroOutFade.stop()
+        heroLiquidRun.stop()
+        heroLiquid.prog = 0
+        heroLiquidArmed = false
+        heroSnapFresh = false
+        // Stand the capture down completely, including its opacity. The morph leaves it at 1 because
+        // that is what its `from` texture needs, and `visible` for a dissolve is `opacity > 0.001`,
+        // so the next switch would raise a *previous* switch's frame the moment heroFx is set -
+        // which happens before that switch's own grab lands. Measured 9-24 ms of the wrong picture
+        // at the start of every dissolve that followed a liquid one (3 of 4 switches in a probe run).
+        heroSnap.opacity = 0
+        heroFx = 0
+        // The transition just ended, so the frame on screen is now the frame a new capture would
+        // have to start from. Replay the newest pick if one arrived while we were busy.
+        if (heroRetry) { heroRetry = false; Qt.callLater(function () { root.startHeroSwap() }) }
     }
-    onPendingHeroChanged: {
+    // The morph may not paint before the grab of the outgoing frame has reached the GPU. On the
+    // pass where it has not, the `from` texture is null and overBase() in the shader turns the
+    // picture area into the box's own #080B10 - caught in a captured frame once: picture area mean
+    // 11.7 with its brightest pixel 16.0, i.e. nothing but the base colour, while the rest of the
+    // window was drawn normally. So the capture is painted as-is for one frame first (that is the
+    // overlay mechanism he already accepted, and it is the same pixels he was looking at), and the
+    // effect takes over on the frame after.
+    property bool heroLiquidArmed: false
+    // The capture is only worth painting once it is the *current* frame. heroFx is set before the
+    // grab lands (the morph's two texture feeds hang off it), so painting on that alone shows the
+    // previous switch's capture for as long as the grab takes - measured 7-12 ms on the still
+    // wallpapers and 33-158 ms on the particle ones, which is the fast flicker he saw on every
+    // liquid switch. Dissolve never had it because its overlay appears with the fade, after the
+    // capture lands.
+    property bool heroSnapFresh: false
+    Timer {
+        id: heroLiquidArm
+        interval: 16
+        onTriggered: root.heroLiquidArmed = true
+    }
+    // A second pick while a capture or a morph is in flight used to be dropped on the floor: the
+    // guard below returned early and nothing replayed it, so the big picture stayed on the first
+    // pick while the strip had already moved. The morph makes that window about a second long, so
+    // the request is remembered and applied as soon as the swap in flight commits.
+    // Only the *newest* pick is ever replayed (`pendingHero` is a binding, not a queue), so clicking
+    // fast five times costs two morphs, not five. A morph is never restarted from underneath: the
+    // capture would then come from the layer *under* the running morph, i.e. from a picture he is
+    // not looking at, which is the pop this whole mechanism exists to avoid.
+    property bool heroRetry: false
+    function commitHeroSwap() {
+        heroSnapFresh = snapUrl !== ""
+        // Raise the cover *before* the swap, not after it. Both branches used to lean on their own
+        // first value arriving with the next animation tick (the fade's `from: 1`, the morph's
+        // opacity), which leaves the new picture as the thing on screen for that frame.
+        if (heroSnapFresh) heroSnap.opacity = 1
+        hero = pendingHero
+        // No capture means nothing to dissolve: cutting is the only honest remaining option, and an
+        // overlay with an empty texture would show the box's base colour.
+        if (!heroSnapFresh) { heroFxStop(); return }
+        if (heroFx === fxLiquid) {
+            heroLiquidArmed = false
+            heroLiquidArm.start()
+            // Like the reference's sprite: the turn is never wound back, so the next switch churns
+            // through a different part of the cell pattern.
+            heroLiquidRotBase = (heroLiquidRotBase + heroLiquidRotRad) % 6.28319
+            heroLiquidRun.restart()
+        }
+        else heroOutFade.restart()
+    }
+    function startHeroSwap() {
         const nid = heroIdOf(pendingHero), cid = heroIdOf(hero)
         if (nid === cid) { hero = pendingHero; return }      // same wallpaper, new object: no fade
-        if (snapBusy || heroSnapWatch.running) return        // a swap is already in flight
+        // The first picture has nothing to dissolve *from*, and before the window has been drawn the
+        // morph's shader has no status to report either, so it must land at once.
+        if (hero === null) { hero = pendingHero; return }
+        if (snapBusy || heroSnapWatch.running || heroFx !== 0) { heroRetry = true; return }
+        if (Bridge.transition === "none") { heroFxStop(); snapUrl = ""; hero = pendingHero; return }
+        // Set before the capture starts: the two grabs the morph needs are switched on by this.
+        heroFx = heroFxMode()
         snapBusy = true
         heroSnapWatch.start()
         const it = heroOutItem()
@@ -164,6 +256,7 @@ ApplicationWindow {
             commitHeroSwap()
         }
     }
+    onPendingHeroChanged: startHeroSwap()
     // The grab is asynchronous and a hidden or occluded window can leave it never completing; the
     // picture must not freeze on the old wallpaper because of that.
     Timer {
@@ -184,17 +277,32 @@ ApplicationWindow {
     // every switch. When the renderer dies the feed goes stale, running falls to false, and the
     // saved strip loads again so the picture keeps moving instead of freezing.
     readonly property bool liveFed: liveWanted && liveView.running
-    // Motion is authored for the window in front of him. While this window is not the foreground
-    // one, neither the renderer's second pass nor the 24 saved strip frames is worth keeping, so
-    // the big picture rests on the still it already has loaded. Comes back with focus.
-    readonly property bool motionWanted: root.active
-    // A switch costs the renderer one beat: measured 20-58 ms before the section holds the newly
-    // picked wallpaper. Hiding the live item for that stretch stops the motion, and the still and
-    // the live frame are different moments of the animation, so it reads as a hitch. Holding the
-    // outgoing frame covers the gap; past liveGraceMs (a cold Prepare takes far longer) the still
-    // takes over instead of leaving the wrong wallpaper moving.
-    property int liveGraceMs: 120
+    // Motion is wanted while this window is on screen - not only while it is the foreground window.
+    // Gating it on `active` made the big picture freeze the moment he clicked into another program
+    // (measured 2026-10-07: with the window visible and the game client in front, 0 of 724,880 hero
+    // pixels changed over 1.5 s and status.preview.on read false), and a wallpaper that stops when
+    // nobody is looking at it is the opposite of what this app is for. The case that *should* stop -
+    // a full-screen game taking the screen over - is the renderer's own occlusion rule, not this one.
+    // This is the gate for *painting* the saved strip. It deliberately does not gate the renderer's
+    // second pass any more (2026-10-08, he asked): stopping that pass is what made a minimise cost
+    // ~0.7 s of held/still picture on the way back.
+    readonly property bool motionWanted: root.visible && root.visibility !== Window.Minimized
+    // A switch costs the renderer one beat: measured 34-158 ms before the section holds the newly
+    // picked wallpaper (20 switches through every card in the catalogue). Hiding the live item for
+    // that stretch stops the motion, and the still and the live frame are different moments of the
+    // animation, so it reads as a hitch. Holding the outgoing frame covers the gap; the cap is there
+    // so a feed that never delivers the new wallpaper hands the page back to the still instead of
+    // showing the wrong one forever.
+    //
+    // The window has to count from the switch and from nothing else: `hero` is also reassigned with
+    // a new object carrying the *same* id once a second, when Bridge::tick re-reads the renderer's
+    // status and the `current`/`applied` binding rebuilds it, and `onHeroChanged` cannot tell the two
+    // apart. Re-arming on those puts the deadline after a refresh rather than after the switch, and
+    // if the new wallpaper never arrives the picture alternates between the outgoing live frame and
+    // the incoming still once a second.
+    property int liveGraceMs: 350
     property bool liveHeld: false
+    property string liveHeldFor: ""
     readonly property bool heroLive: liveFed && (liveView.matching || liveHeld)
     readonly property bool heroMotion: !liveFed && previewMotion && motionWanted && hero !== null
                                        && framesOf(hero).length > 1
@@ -234,6 +342,15 @@ ApplicationWindow {
         for (let i = 0; i < Bridge.fitLevels.length; ++i) {
             const f = Bridge.fitLevels[i]
             out.push({ value: f, label: trs("fit_" + f) })
+        }
+        return out
+    }
+    readonly property var transitionItems: {
+        const _lang = Bridge.lang
+        const out = []
+        for (let i = 0; i < Bridge.transitionLevels.length; ++i) {
+            const t = Bridge.transitionLevels[i]
+            out.push({ value: t, label: trs("transition_" + t) })
         }
         return out
     }
@@ -356,11 +473,20 @@ ApplicationWindow {
                 // has no other way out.
                 visible: Bridge.catalog.length > 0
 
-                // The live pass runs only while this page is on screen and this window is the one
-                // he is looking at; leaving it, minimising it, or clicking to another program hands
-                // the GPU back to the desktop.
+                // The live pass runs while this page is on screen, whether or not this window is the
+                // foreground one - see motionWanted for why focus is not part of it. Hiding the page,
+                // minimising the window, or closing it to the tray hands the GPU back.
                 function syncPreview() {
-                    if (visible && root.motionWanted && root.hero && root.useLivePreview)
+                    // The second pass is asked for whenever there is a big picture to show and the
+                    // live-preview switch is on - window visibility is not part of it (2026-10-08, he
+                    // asked for the motion to keep playing through a minimise or a trip to the tray:
+                    // stopping it cost ~0.7 s of still/held picture on the way back). What is left in
+                    // this gate is the two cases that genuinely have no picture to animate.
+                    // `paused` still matters for them: a pass this window stopped keeps painting the
+                    // frame it stopped on instead of revealing a still of a different moment.
+                    const want = root.hero !== null && root.useLivePreview
+                    liveView.paused = !want
+                    if (want)
                         Bridge.showPreview(root.hero.id)
                     else
                         Bridge.hidePreview()
@@ -377,9 +503,13 @@ ApplicationWindow {
                     target: root
                     function onHeroChanged() {
                         carousel.syncPreview()
+                        const id = root.heroIdOf(root.hero)
+                        if (id === root.liveHeldFor) return
+                        root.liveHeldFor = id
                         // Held unconditionally rather than only when the feed is mismatched: the
-                        // wantedId binding may or may not have re-evaluated by the time this signal
-                        // runs, and reading the stale value is exactly the miss this guards.
+                        // `wantedId` binding may or may not have re-evaluated by the time this signal
+                        // runs, so `matching` here can still describe the wallpaper just left, and
+                        // reading the stale value is exactly the miss this guards.
                         root.liveHeld = root.liveFed
                         if (root.liveHeld) liveGrace.restart()
                         else liveGrace.stop()
@@ -412,65 +542,88 @@ ApplicationWindow {
                     // frame gone that inset was the last thing between the wallpaper and the glass
                     // (the outermost column read #080B10), so they are flush now.
 
-                    // The renderer's live second pass: the same wallpaper drawn now, on the same
-                    // clock as the desktop, so the snow never stops and there is no loop to see.
-                    LivePreview {
-                        id: liveView
-                        anchors.fill: parent
-                        anchors.margins: 0
-                        active: root.liveWanted
-                        wantedId: root.hero ? root.hero.id : ""
-                    }
-
-                    Image {
-                        id: heroImg
-                        anchors.fill: parent
-                        anchors.margins: 0
-                        fillMode: Image.PreserveAspectCrop
-                        asynchronous: true
-                        visible: !root.heroMotion && !root.heroLive
-                        source: root.hero ? (root.hero.thumb_large !== undefined ? root.hero.thumb_large
-                                                                                 : root.hero.thumb) : ""
-                    }
-
-                    // Every frame of the strip is loaded once and kept, so playing it back is a
-                    // visibility flip. Pointing one Image at the next file every 42 ms instead
-                    // costs a fresh read plus a 3-20 ms decode, and the picture lands a tick late.
+                    // The picture itself, in whichever form is alive right now, in one Item: the
+                    // liquid morph takes the whole stack as its incoming texture and must not care
+                    // which of the three layers happens to be up.
                     Item {
-                        id: frameStack
+                        id: heroContent
                         anchors.fill: parent
-                        anchors.margins: 0
-                        visible: root.heroMotion
-                        Repeater {
-                            // Only while the strip really is the picture on screen: a hidden Image
-                            // still fetches its source, and 24 of them is 22 MB of textures for
-                            // nobody to see - whether because the live pass is up or because this
-                            // window is not the focused one.
-                            model: root.heroMotion ? root.framesOf(root.hero) : []
-                            delegate: Image {
-                                required property int index
-                                required property var modelData
-                                anchors.fill: parent
-                                fillMode: Image.PreserveAspectCrop
-                                asynchronous: true
-                                visible: index === root.previewFrame
-                                source: modelData
+
+                        // The renderer's live second pass: the same wallpaper drawn now, on the same
+                        // clock as the desktop, so the snow never stops and there is no loop to see.
+                        LivePreview {
+                            id: liveView
+                            anchors.fill: parent
+                            anchors.margins: 0
+                            active: root.liveWanted
+                            wantedId: root.hero ? root.hero.id : ""
+                        }
+
+                        Image {
+                            id: heroImg
+                            anchors.fill: parent
+                            anchors.margins: 0
+                            fillMode: Image.PreserveAspectCrop
+                            asynchronous: true
+                            visible: !root.heroMotion && !root.heroLive
+                            source: root.hero ? (root.hero.thumb_large !== undefined ? root.hero.thumb_large
+                                                                                     : root.hero.thumb) : ""
+                        }
+
+                        // Every frame of the strip is loaded once and kept, so playing it back is a
+                        // visibility flip. Pointing one Image at the next file every 42 ms instead
+                        // costs a fresh read plus a 3-20 ms decode, and the picture lands a tick late.
+                        Item {
+                            id: frameStack
+                            anchors.fill: parent
+                            anchors.margins: 0
+                            visible: root.heroMotion
+                            Repeater {
+                                // Only while the strip really is the picture on screen: a hidden Image
+                                // still fetches its source, and 24 of them is 22 MB of textures for
+                                // nobody to see - whether because the live pass is up or because this
+                                // window is not the focused one.
+                                model: root.heroMotion ? root.framesOf(root.hero) : []
+                                delegate: Image {
+                                    required property int index
+                                    required property var modelData
+                                    anchors.fill: parent
+                                    fillMode: Image.PreserveAspectCrop
+                                    asynchronous: true
+                                    visible: index === root.previewFrame
+                                    source: modelData
+                                }
                             }
                         }
                     }
 
-                    // The captured outgoing frame, dissolving away over the new picture. Loaded
-                    // synchronously and uncached on purpose: the file was written microseconds ago, an
-                    // asynchronous Image would leave the first fade frames transparent (the new
-                    // picture showing before the old one was ever seen), and the cache keys on the URL
-                    // - which is the same path every time.
+                    // The new picture, taken as a texture. Live only while the morph runs: an always
+                    // on grab here would render the whole stack twice per frame for nothing.
+                    ShaderEffectSource {
+                        id: heroToSrc
+                        sourceItem: heroContent
+                        live: root.heroFx === root.fxLiquid
+                        visible: false
+                    }
+
+                    // The captured outgoing frame. Loaded synchronously and uncached on purpose: the
+                    // file was written microseconds ago, an asynchronous Image would leave the first
+                    // transition frames empty (the new picture showing before the old one was ever
+                    // seen), and the cache keys on the URL - which is the same path every time.
+                    // In the liquid mode it is never painted at all, only sampled; a hidden sourceItem
+                    // still yields a valid texture (measured), so the grab does not double-paint.
                     Image {
                         id: heroSnap
                         anchors.fill: parent
                         fillMode: Image.PreserveAspectCrop
                         asynchronous: false
                         cache: false
-                        visible: opacity > 0.001
+                        // Dissolving: this *is* the overlay, so it paints for the whole fade.
+                        // Morphing: it paints until the effect has taken over, then stands down -
+                        // the effect is opaque over the same rect, so painting both is for nothing.
+                        visible: root.heroFx === root.fxDissolve ? opacity > 0.001
+                                 : root.heroFx === root.fxLiquid ? (!root.heroLiquidArmed && root.heroSnapFresh)
+                                 : false
                         opacity: 0
                         source: root.snapUrl
                         NumberAnimation {
@@ -481,7 +634,48 @@ ApplicationWindow {
                             to: 0
                             duration: 280
                             easing.type: Easing.InOutQuad
+                            // The morph clears its own state when it finishes; the fade has nothing
+                            // else watching it, and leaving heroFx set would keep the capture painted
+                            // in the layer list for the next switch's mode decision.
+                            onFinished: if (root.heroFx === root.fxDissolve) root.heroFxStop()
                         }
+                    }
+
+                    ShaderEffectSource {
+                        id: heroFromSrc
+                        sourceItem: heroSnap
+                        live: root.heroFx === root.fxLiquid
+                        visible: false
+                    }
+
+                    // The morph itself: both textures displaced by the same field and crossfaded, so
+                    // the picture churns as it swaps instead of being wiped. prog is driven by
+                    // heroLiquidRun; the curve shapes live in the shader. The property order below is
+                    // the uniform block's order in shaders/HeroLiquid.frag - it is not free.
+                    ShaderEffect {
+                        id: heroLiquid
+                        anchors.fill: parent
+                        visible: root.heroFx === root.fxLiquid && root.heroLiquidArmed
+                        property variant fromTex: heroFromSrc
+                        property variant toTex: heroToSrc
+                        property real prog: 0
+                        property real aspect: heroBox.height > 0 ? heroBox.width / heroBox.height : 1.6
+                        property real scalePx: root.heroLiquidScalePx
+                        property real stageW: root.heroLiquidStageW
+                        property real cells: root.heroLiquidCells
+                        property real rotRad: root.heroLiquidRotRad
+                        property real rotBase: root.heroLiquidRotBase
+                        fragmentShader: "HeroLiquid.frag.qsb"
+                    }
+
+                    NumberAnimation {
+                        id: heroLiquidRun
+                        target: heroLiquid
+                        property: "prog"
+                        from: 0
+                        to: 1
+                        duration: root.heroLiquidMs
+                        onFinished: root.heroFxStop()
                     }
 
                     // The clock is a Timer aimed at the wall clock, not at a fixed interval: a
@@ -1318,6 +1512,26 @@ ApplicationWindow {
                                     value: Bridge.imageFit
                                     enabled: Bridge.connected
                                     onPicked: function (v) { Bridge.setFit(v) }
+                                }
+                            }
+                        }
+
+                        // How the big preview changes when another wallpaper is picked. This one is
+                        // drawn by the settings window itself, so it stays live with the renderer
+                        // stopped and is not gated on the pipe.
+                        Group {
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("transition")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Choice {
+                                    items: root.transitionItems
+                                    value: Bridge.transition
+                                    onPicked: function (v) { Bridge.setTransition(v) }
                                 }
                             }
                         }

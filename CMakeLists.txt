@@ -62,7 +62,7 @@ set_target_properties(WallpaperRenderer PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${C
 # ---------------------------------------------------------------- Qt settings window
 # Optional: the renderer must still build on a machine without Qt.
 list(APPEND CMAKE_PREFIX_PATH "$ENV{QT_DIR}")
-find_package(Qt6 QUIET COMPONENTS Quick Qml Gui Widgets)
+find_package(Qt6 QUIET COMPONENTS Quick Qml Gui Widgets ShaderTools)
 if(Qt6_FOUND)
   set(CMAKE_AUTOMOC ON)
   qt_add_executable(Wallpaper WIN32
@@ -79,12 +79,23 @@ if(Qt6_FOUND)
   target_compile_definitions(Wallpaper PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(Wallpaper PRIVATE /utf-8 /W4 /permissive- /Zc:__cplusplus /EHsc)
   target_link_libraries(Wallpaper PRIVATE Qt6::Quick Qt6::Qml Qt6::Gui Qt6::Widgets)
+  # The hero transition's fragment shader. Qt's own baker is the only thing that knows which
+  # shader versions the scene graph asks for, so it is invoked through qt_add_shaders rather than
+  # by hand - and the result is copied next to the QML instead of being embedded, because Main.qml
+  # is loaded from disk on purpose (see main.cpp).
+  qt_add_shaders(Wallpaper "wallpaper_qml_shaders"
+    PREFIX "/shaders"
+    FILES Wallpaper/shaders/HeroLiquid.frag
+    OUTPUT_TARGETS wallpaper_shader_resources)
   add_custom_command(TARGET Wallpaper POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
       "${CMAKE_SOURCE_DIR}/Wallpaper/qml" "$<TARGET_FILE_DIR:Wallpaper>/qml"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_BINARY_DIR}/.qsb/Wallpaper/shaders/HeroLiquid.frag.qsb"
+      "$<TARGET_FILE_DIR:Wallpaper>/qml/HeroLiquid.frag.qsb"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${CMAKE_SOURCE_DIR}/resources/Wallpaper.ico" "$<TARGET_FILE_DIR:Wallpaper>/Wallpaper.ico"
-    COMMENT "staging qml/ and Wallpaper.ico next to the settings window")
+    COMMENT "staging qml/, HeroLiquid.frag.qsb and Wallpaper.ico next to the settings window")
   set_target_properties(Wallpaper PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
   message(STATUS "Qt6 found: building Wallpaper settings window")
 else()
