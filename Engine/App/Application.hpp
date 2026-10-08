@@ -120,6 +120,10 @@ private:
         // Set while a freshly re-targeted video has no decoded picture yet, so the "publishing held
         // back" line is logged once per re-target instead of thirty times a second.
         bool waitingFirstFrame = false;
+        // The browse page's pause when the preview is drawing a *shared* desktop instance. That player
+        // cannot be paused without stopping his wallpaper too, so the pause is taken here instead: the
+        // pass stops publishing and the window keeps painting the frame it holds.
+        bool held = false;
         // ... and each slot remembers which wallpaper it was drawn from, because that is not the same
         // question as "which one is asked for now": with two slots and the driver a frame behind, the
         // first frames collected after a switch were rendered from the wallpaper the user just left.

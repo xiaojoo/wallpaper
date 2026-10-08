@@ -316,6 +316,25 @@ margin **不计进 contentWidth**（Qt 自己打的日志：`width=1236 leftMarg
 等于没有反馈，所以 `IconBtn` 加了可换的 `veil`）。**开关状态用图标自己的颜色表示，不加边框**：
 开着 = `th.err` 红（和收藏心一个路子），关着 = `th.text` 灰白；设置那颗的"开着"是 `th.accent` 蓝
 （对话框开着的时候它必须跟着变蓝，实测蓝 (24,50,94) / 白 (232,236,243) 两个构型各拍到一次）。
+**第一颗在视频上是那条片自己的播放/暂停**（2026-10-08，他指着自己上传的视频问「这个播放、暂停按钮不能用啊」）：
+导入的视频按设计没有 24 帧切片（卡片放活帧），所以那颗原本只对切片生效的 `动态预览` 在视频卡上是
+`enabled: false` 的死控件。现在 `hero.type === "video"` 时它走 `video pause|resume preview`，提示语换成
+`暂停视频` / `继续播放视频`，红色表示"正在放"。**暂停属于这一遍画面，不属于解码器**
+（`Preview::held`）：置位后第二遍直接不出帧（`DrawPreview` 在收完在途拷贝之后早退，早退必须放在收集循环
+*后面*，否则两个 staging 槽永远不释放、恢复之后每帧都算 dropped —— 实测恢复后 `preview.dropped` 仍是 0），
+共享内存里留着他停住的那一帧，窗口那边 `liveView.paused` 一起挂住，所以过了 1200 ms 的超时也不会退回静帧。
+只有当这张片**不是**桌面正在放的那一张时，才顺手把播放器也 `Pause()`（省掉一个空转的解码线程）。
+
+为什么必须这样：第一版直接 `Pause()` 播放器，而预览桌面正在放的那张时两边**共用同一个解码器**（省掉第二个
+4K h264_cuvid 的 +79% 单核和 +176 MB 是刻意的），于是"有时候桌面的壁纸也被暂停了，有时候只暂停预览"
+（他 2026-10-08 19:20 报的）—— 差别来自 4 秒轮播把大图停在哪一张上。现在两种情况是同一条路。
+
+实测（`build/tmp/video-transport-check.py`，四档）：不是壁纸的那张 —— 暂停期间预览解码 +0、发布 +1、
+桌面 +62；是壁纸的那张 —— 暂停期间共享播放器仍解码 +61、桌面 `video_paused` 全程 false、发布 +1；
+反向对照 `video pause M0` 桌面 +0 而预览照常 +121；未知目标回 `ok:false`。命令落地 42~44 ms
+（`video` 走队列，管道只回 "queued"，所以按钮先按请求显示、下一秒的快照再纠它）。
+UI 侧另开探针窗按同一颗按钮按住 4.5 秒：563 个采样里 `liveView.paused` 恒 1、活帧链路恒在、
+静帧露头 0 次（`build/tmp/uipkg8/run9.py`）。
 气泡一律**朝上**（`Hint.place: "top"`）；
 收藏那颗的气泡一开始画不出来，原因是 `Hint` 挂在 `Icon`（Canvas）里面不渲染，改成 28 px 的 `Item`
 容器装图标 + MouseArea + 气泡就好了。
@@ -679,6 +698,18 @@ main.hlsl     CSMain 积分 / PSBackground 夜空 / ParticleVS 每粒子 6 顶�
 后端决定；而代价上它全面落后。删的同时把探测搬到了 FFmpeg（`FfmpegProbeVideo`）：量到的清单字段与
 MF 版逐位相同（夹具 `duration_s 9.966633`、`1920x1080`、`fps 30`、`src_aspect 1.777778`、`bt601 0`），
 并且现在**没有解码器就在导入这一步拒绝**，不再等到上屏才失败。
+
+**能收的片格式由 FFmpeg 决定，不由文件名决定**（2026-10-08 他要「.webm 这个格式的视频，也可以上传」）。
+`AddVideoPackage` 从来就是扩展名无关的：`FfmpegProbeVideo` 探内容、复制时保留真实后缀、manifest 写
+`"renderer": "video"`，所以拦住 webm 的只有设置窗那三处按 `== "mp4"` 判"这是不是一段片"的地方，现在收进
+`kVideoExt { "mp4", "webm" }`（选择框的过滤串、单文件导入的分流、整文件夹导入的分流）。随包的 avcodec 本来就
+注册了 `matroska,webm` 解容器和 vp8 / vp9 / av1 解码器（364 个 demuxer 全在），**不需要重编 FFmpeg**。
+拿夹具实测过两条路（`build/ffm-lgpl/bin/ffmpeg.exe -f lavfi testsrc2=size=640x360:rate=30` 生成，
+`build/tmp/webm-vp9.webm` / `webm-av1.webm`）：VP9 走 **`nvdec libavcodec vp9_cuvid`**、pix fmt nv12、
+打开 77.5 ms（容器只 1.4 ms，其余是解码器），按自己的 30 帧/秒稳定出帧，平面 luma 125 / chroma 128，
+卡片 480x270 + 1280x720 正常，循环接缝 31.3 ms；AV1 走 **`sw libavcodec libdav1d`**、pix fmt yuv420p，
+也正常出帧（`FFmpegPlayer` 的 yuv420p 分支）。**VP8 没测到**：这个 pin 的构建只带 vp8 解码器、没有编码器，
+造不出夹具 —— 解码器在注册表里，但没有真文件验过。测试用的两个包已从库里删掉。
 
 只剩一个环境变量，用来在"驱动解码坏了"和"我们管线坏了"之间做判别，不用重编：
 
