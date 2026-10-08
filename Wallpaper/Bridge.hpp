@@ -39,6 +39,14 @@ class Bridge final : public QObject {
     Q_PROPERTY(QString rootDir READ rootDir NOTIFY stateChanged)
     Q_PROPERTY(QString logPath READ logPath NOTIFY stateChanged)
     Q_PROPERTY(double cpuPercent READ cpuPercent NOTIFY stateChanged)
+    // The card's busy percent, or -1 when this machine has nothing to ask it from (no NVML). The status
+    // line leaves the whole segment out rather than showing a 0 that would read as an idle GPU.
+    Q_PROPERTY(double gpuPercent READ gpuPercent NOTIFY stateChanged)
+    // This process's own GPU share: the per-engine percentages added up, the way Task Manager's
+    // per-process column does it. -1 when the counters have nothing to report.
+    Q_PROPERTY(double gpuSelfPercent READ gpuSelfPercent NOTIFY stateChanged)
+    Q_PROPERTY(double gpuSelf3d READ gpuSelf3d NOTIFY stateChanged)
+    Q_PROPERTY(double gpuSelfDecode READ gpuSelfDecode NOTIFY stateChanged)
     Q_PROPERTY(double cpuWindowS READ cpuWindowS NOTIFY stateChanged)
     Q_PROPERTY(double workingSetMb READ workingSetMb NOTIFY stateChanged)
     Q_PROPERTY(double uptimeSeconds READ uptimeSeconds NOTIFY stateChanged)
@@ -83,6 +91,10 @@ public:
     QString rootDir() const { return root_; }
     QString logPath() const { return logPath_; }
     double cpuPercent() const { return cpu_; }
+    double gpuPercent() const { return gpu_; }
+    double gpuSelfPercent() const { return gpuSelf_; }
+    double gpuSelf3d() const { return gpu3d_; }
+    double gpuSelfDecode() const { return gpuDec_; }
     double cpuWindowS() const { return cpuWin_; }
     double workingSetMb() const { return ws_; }
     double uptimeSeconds() const { return uptime_; }
@@ -210,6 +222,8 @@ private:
     QString settingsTabAtStart_;
     int maxFps_ = 60;
     double cpu_ = 0, ws_ = 0, uptime_ = 0;
+    double gpu_ = -1;   // -1 = no answer available, which is not the same as 0 (see gpuPercent)
+    double gpuSelf_ = -1, gpu3d_ = -1, gpuDec_ = -1;
     double cpuWin_ = 0;   // the window the renderer averaged cpu_ over, not a constant here
     QString uiSettingsPath_;
 

@@ -1,6 +1,7 @@
 #pragma once
 // Engine/App/Application.hpp - owns the device, the per-monitor slots, pacing, tray and IPC.
 #include "Engine/App/PreviewStream.hpp"
+#include "Engine/App/GpuMonitor.hpp"
 #include "Engine/App/Tray.hpp"
 #include "Engine/Desktop/DesktopWindow.hpp"
 #include "Engine/Desktop/MonitorManager.hpp"
@@ -209,6 +210,9 @@ private:
     Tray tray_;
     std::unique_ptr<IPCServer> ipc_;
     Preview preview_;
+    // The status line's GPU number. A member rather than a per-call load because NVML's init is what
+    // enumerates the device; sampling afterwards costs under 0.05 ms.
+    GpuMonitor gpu_;
     std::map<std::string, ThumbSet> thumbs_;
     std::wstring thumbDir_;
 

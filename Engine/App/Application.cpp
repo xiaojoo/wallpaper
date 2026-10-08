@@ -826,6 +826,17 @@ void Application::UpdateSnapshot() {
     memj.set("cpu_percent", Json::Of(mem.cpuPercent));
     // Named next to the number on purpose: a percent without its window is not a measurement.
     memj.set("cpu_window_s", Json::Of(mem.cpuWindowS));
+    // The card's busy percent (whole machine) and this process's own share of it. Two numbers, two
+    // denominators - see Engine/App/GpuMonitor.hpp. Absent when there is nothing to ask.
+    {
+        const GpuUse g = gpu_.Sample();
+        if (g.device >= 0.0) memj.set("gpu_percent", Json::Of(g.device));
+        if (g.self >= 0.0) {
+            memj.set("gpu_self_percent", Json::Of(g.self));
+            memj.set("gpu_self_3d", Json::Of(g.self3d));
+            memj.set("gpu_self_decode", Json::Of(g.selfDecode));
+        }
+    }
     r.set("process", std::move(memj));
 
     Json mons = Json::Array();
