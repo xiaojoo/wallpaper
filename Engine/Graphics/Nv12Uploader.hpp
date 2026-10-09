@@ -39,12 +39,41 @@ public:
     // how a half-filled buffer shows up before it can paint the wallpaper green.
     bool Upload(ID3D11DeviceContext* ctx, const BYTE* nv12, size_t have, Out& out);
 
+    // The zero-copy alternative to Upload: hand the shader views over one surface of a D3D11VA decoder's
+    // NV12 array instead of copying 12.4 MB through the CPU first. `slice` is `AVFrame::data[1]`, and
+    // both planes live at that same slice - the plane is chosen by the view's format (R8 for luma,
+    // R8G8 for chroma), which is what tools/dxvaspike.cpp measured rather than assumed: sampling slice
+    // 17 gave the frame's luma and chroma, slices nobody had written gave 0, and 17 + ArraySize could
+    // not even be viewed.
+    //
+    // False (and nothing changes) when the texture cannot be sampled - a decoder pool built without
+    // D3D11_BIND_SHADER_RESOURCE, or geometry that does not describe it - so the caller keeps using the
+    // CPU path for that frame. Views are cached per slice: the pool is 24 surfaces deep and the decoder
+    // recycles through it, so building two per frame would be 96 COM allocations a second for something
+    // that repeats.
+    bool AdoptDecoded(ID3D11Texture2D* tex, UINT slice, UINT codedW, UINT codedH, UINT displayH);
+
+    // Back to the textures Upload() fills. Called by Upload itself, so a stream that mixes hardware
+    // and software frames cannot leave the shader reading a recycled decoder surface.
+    void UseCpuViews();
+
+    bool Adopted() const { return adopted_; }
+
     ID3D11ShaderResourceView* Y() const { return ySrv_.Get(); }
     ID3D11ShaderResourceView* UV() const { return uvSrv_.Get(); }
 
 private:
+    struct Views {
+        UINT slice = 0;
+        Com<ID3D11ShaderResourceView> y, uv;
+    };
+
     Com<ID3D11Texture2D> yTex_, uvTex_;
-    Com<ID3D11ShaderResourceView> ySrv_, uvSrv_;
+    Com<ID3D11ShaderResourceView> ySrv_, uvSrv_;         // whichever pair the shader is reading now
+    Com<ID3D11ShaderResourceView> cpuY_, cpuUv_;         // restored by UseCpuViews
+    Com<ID3D11Texture2D> decTex_;                         // the decoder's array we are viewing into
+    std::vector<Views> decViews_;
+    bool adopted_ = false;
     ID3D11Device* dev_ = nullptr;
     UINT codedW_ = 0, codedH_ = 0, dispH_ = 0;
 };

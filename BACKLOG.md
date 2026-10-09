@@ -248,12 +248,12 @@
    - **删 MF 时我把一件仪表一起删了**：`closed a player: N still live` 和 `gLivePlayers` 计数器原本在
      `VideoPlayer.cpp` 里，导致这轮 `opened=3 / closed=0` 根本没法解读（其实那 3 个是"缩略图临时实例 +
      桌面实例"，配对正常）。已在 FFmpeg 侧补回同名日志。**教训：删一个后端要连它携带的仪表一起清点。**
-   - 仍未做：**D3D11VA 零拷贝**（解码直接写进 GPU 纹理数组，连 `Pack` 那一次 memcpy 都省掉，
-     这才是字面意义的"全程 GPU"）；测量噪声：我那个每秒起一个 `--ctl` 进程的心跳循环会把预览拖到
-     1.3 fps、桌面拖到 36 f/s，被污染的那组读数（97.0% / 108.5%）已排除，不进任何结论。
+   - 2026-10-09 已做：**D3D11VA 零拷贝**（见本节末尾那一段和 README 的 ④ 小节）。测量噪声（这条没治）：
+     我那个每秒起一个 `--ctl` 进程的心跳循环会把预览拖到 1.3 fps、桌面拖到 36 f/s，被污染的那组读数
+     （97.0% / 108.5%）已排除，不进任何结论。
 
    **2026-10-08 他说"按这个顺序从 ① 开始做"（针对我给的降资源排序 ①缓冲复用 ②解码跟显示同速 ③预览降频）。
-   ①②已做，③④没做。做 ① 的过程中先发现我自己的资源表有两把尺子坏了，这件事比改动本身更要紧：**
+   ①②④已做，③没做。做 ① 的过程中先发现我自己的资源表有两把尺子坏了，这件事比改动本身更要紧：**
 
    - **尺子一：进程 CPU 不能当绝对值用。**同一张 48 帧/秒的粒子壁纸，四个窗口读出 0.0% / 1.1% / 6.5% / 24.5%。
      三个来源都查到了实据：(a) 渲染器启动的头几十秒在给**整个壁纸库**编译 HLSL + 生成缩略图（日志每条
@@ -275,8 +275,8 @@
      的判据；片速 1.012 倍墙钟（31.633 s 的片，跨接缝样本已剔除）、帧率 24.0、`late_frames` 0、角点 69 变 8 不变。
    - 两处合计的绝对数：同一无客户端、已坐稳的进程、60.2 s 窗口差值 **10.17% → 9.11% 单核**；与"少拷 6 帧 ×
      1.24 ms = 0.74 点"相互对上，差值落在上面那把尺子的 ±1 点散度里 ⇒ 这是下限不是上限。
-   - **没做**：③ 预览在窗口不可见时降频（现在是 30 fps 一直跑，`kPreviewFps` 写死），④ D3D11VA 零拷贝。
-     ③ 之前不该再动 ④：④ 会重写 `Pack`/`Nv12Uploader`，没有 ①② 这类实测数字当地基就是白干。
+   - **没做**：③ 预览在窗口不可见时降频（现在是 30 fps 一直跑，`kPreviewFps` 写死）。④ D3D11VA 零拷贝
+     2026-10-09 已做并设为默认。
 
 
    **2026-10-07 23:05 那张绿卡片：根因是"平面没绑上/没上传"，不是颜色管理。**
@@ -689,13 +689,15 @@
   （头文件写明 "applies globally to all AVD3D11VAFramesContext allocated from this device context"）。
   设完之后 `bind=0x208`，**R8（亮度）与 R8G8（色度）按切片建视图全部 OK**，解码器自己那个切片（17）也 OK。
   `DXGI_FORMAT_NV12` 的整资源视图 FAIL —— 不需要它，走的就是 R8/R8G8 两条平面视图。
-- **下一步必须先证再改的一件事**：切片/平面的**寻址**对不对。D3D11 里 NV12 数组纹理的 subresource 计算把
-  平面算进去（`plane * ArraySize + slice`），R8G8 视图覆盖的是不是就是色度平面 —— **探针没证成**：
-  `CopySubresourceRegion` 把 `BIND_DECODER` 纹理拷进普通 STAGING 2D 再 Map，三个候选 subresource 读回来
-  全是 mean 0.0（帧持有与不持有都一样），这条拷贝路本来就不是 libavcodec 搬帧回 CPU 的路（它走
-  `av_hwframe_transfer_data`）。**所以 0.0 是"探针读不到"，不是"平面在那儿不对"** —— 这个未知数只能在
-  真路上用色条门禁判（`tools/preview-pixels.py`，历史标准色条 Δ≤2），别拿"视图建出来了"当"颜色对了"，
-  这条搞错就是当年那批绿卡的颜色。
+- **平面寻址已经证完了（2026-10-09，探针第 6 步，用着色器采样而不是拷贝）**：`CopySubresourceRegion`
+  把 `BIND_DECODER` 纹理拷进普通 STAGING 这条路在这台机器上读回来全是 0 —— 而且我第一版的读回路本身有两处
+  自伤（拿 STAGING 纹理当渲染目标、Draw 之后 Clear 且根本没 CopyResource 就 Map），所以那批 0.0 是"探针读不到"，
+  不是结论。改成 DEFAULT 渲染目标 + `CopyResource` 到 staging + 像素着色器采样视图之后，判据是**跨切片对照**：
+  切片 0/1/5 采到 0.0（这些表面这次没被写过）、解码器给的那个切片 17 采到 **R8=52.0 / R8G8=154.0**
+  （引擎自己同一张片的日志是 luma 84 / chroma 148，色度对得上），而 `17 + ArraySize = 37` **建不出视图**。
+  ⇒ **两个平面共用同一个切片号，靠视图格式区分**（R8=亮度、R8G8=色度，`.r` 就是 U）；色度**不在**
+  `slice + ArraySize` 那里。实现要绑的就是：Y 用 `DXGI_FORMAT_R8_UNORM`、UV 用 `R8G8_UNORM`，
+  都是 `TEXTURE2DARRAY` + `FirstArraySlice = frame->data[1]` + `ArraySize = 1`，着色器里按 `float3(uv, 0)` 采。
 - **改动面（为什么它比 ①② 大一个数量级）**：`Nv12Uploader` 的两段 `UpdateSubresource` 换成"按帧建/缓存
   (texture, slice) 的两个 SRV"；`Video.hlsl` 从 `Texture2D` 双平面改成 `Texture2DArray` 采样；循环接缝、
   `ShowFrameAt` 的 park 抓帧、缩略图、`--ctl preview` 那一路都要跟着走新帧格式；**AV1 走 libdav1d 是 CPU
@@ -766,3 +768,71 @@ Repeater 重建，`running: thumbCell.sel` 的 4.5 s 计时器走不满，改成
 会被折成一个反斜杠再被 Python 解释成 `
 `（回车），路径变成 `logs<CR>renderer-…` 报 `OSError 22` ——
 Windows 路径在探针里一律用正斜杠。
+
+## ④ D3D11VA：崩溃已定位并修掉，颜色门已过（2026-10-09）
+
+开着 `SW_D3D11VA=1` 的渲染器会在启动阶段自己退掉。用 `build/tmp/cdb-gpu.bat`（cdb 一次跑，命令
+`g; .cxr; k 24; q`）拿到栈，不是猜的：
+
+```
+Critical error detected c0000374                       ← 堆损坏（HEAP_CORRUPTION），不是访问违例
+ntdll!RtlReportCriticalFailure / RtlpHeapHandleError
+ntdll!RtlFreeHeap ← ucrtbase!free_base ← ucrtbase!aligned_free
+avutil!av_buffer_unref ← avcodec!avcodec_free_context
+FFmpegPlayer::Free ← ~FFmpegPlayer ← WallpaperInstance::~WallpaperInstance
+Application::BuildThumbnails ← Application::Start
+```
+
+**页堆确认坏的是"释放"不是"写"**：`build/tmp/cdb-vf.bat` 用 cdb 的 `-vf`（Application Verifier 只挂在
+被调试的子进程上，不写注册表、不留全局状态）再跑一次，仍然停在 `RtlFreeHeap` 而不是撞上守卫页 ——
+所以是解码器自己的账本里有一个悬空的 `AVBufferRef`，不是我们越界写。
+
+**两处单变量改动**（同一次只动一行，都能复现）：
+
+1. `OpenFile` 在允许 GPU 路时**不再打开 cuvid 包装**（`preferNvdec_ && !gpuAllowed_`）。崩溃从
+   `avcodec_free_context` 移到 `avcodec_send_packet`，同一类问题 —— 一个生命周期里先建 CUDA 设备上下文、
+   再建 D3D11 设备上下文并夹一次 free，是原来的现场。
+2. `TryD3D11` 里 `c->thread_count = 1`（原来是 0＝按核数自动）。**这一行就是崩溃的开关**：改完之后
+   2.5 分钟浸泡 0 次崩溃、日志里 0 条 error/warn。软件帧线程在这里没有活可分（解码在卡上），
+   4K60 的 decode step 实测 **0.6 ms**，CPU 路是 4.3 ms。
+
+**没证到的部分说清楚**：帧线程到底弄坏了 `hw_frames_ctx` 引用的哪一本账，没有查到底 —— 只知道
+`0 → 1` 这一个变量把 c0000374 变成了不崩。
+
+**颜色门（`tools/preview-pixels.py`，夹具 `build/fixtures/fixture_2160.mp4` 临时 `addvideo` 进来，
+量完 `delimage` 清掉，M0 全程没动）**：GPU 路与 CPU 路**逐条同数** —— 8 条饱和色条 max|Δ| =
+0,1,1,1,1,3,2,1；11 格灰阶带灰度误差 0..1，通道差 >2 的格子 0 个。整幅静态区（上 2/3）逐像素比：
+99.07% 完全相同，最大通道差 4。对照组（同一夹具、CPU 路、两个不同时刻的帧）：96.17% 相同，最大差 7
+—— 也就是说 GPU 路与 CPU 路的差别**小于这条片子自己的帧间量化噪声**；尺子的分辨力另有依据：矩阵选错
+（BT.601）会把红条推 54。
+
+**顺手修的一条假读数**：`LogStats` 原来在 GPU 路也打 `planes hold luma mean 0 chroma mean 0` —— 那条
+量的是 CPU 双平面纹理，而这条路根本不写它们，报出来的 0 是纹理初值（看着就像绿卡那个症状）。现在这条路
+改打"绑定了几张解码面，CPU 平面没被写"，颜色从合成后的像素量。
+
+**代价（2026-10-09 A/B，`build/tmp/ab-video.py cpu|gpu 60 3`，同一台机、同一个 4K60 桌面壁纸、每边 3 个
+60 秒窗口取中位数；跑之前设置窗关掉、`vmwp` 不在）**：
+
+| | CPU 中转 | 零拷贝 |
+|---|---|---|
+| 进程 CPU | 14.38%（12.33~16.87） | **1.51%**（1.12~1.97） |
+| 解码步长 | 2.70 ms | **0.40 ms** |
+| 12.4 MB 拷贝/秒 | 47 | **0** |
+| 从解码面直接画/秒 | 0 | **48** |
+| 工作集 / private | 348.4 / 709.4 MB | **142.3 / 174.7 MB** |
+| 本进程显存 | 418.8 MB | 615.6 MB（+197） |
+| 帧率 | 48.18 | 48.18 |
+
+**当时量不干净的两条，2026-10-09 11:57 亮屏后收掉了**：
+1. `late_frames` 不是这条路带来的：默认开的实例（pid 8168）亮屏后累计 `late 7 / 13742 帧`、worst 37.51 ms、
+   measured 48.80、errors 0 —— 和 CPU 路的 6 同一档。之前 324 是我那 5 分钟里那些探针造的（`--ctl` 子进程 +
+   `Get-Counter` + `nvidia-smi`）。
+2. 循环接缝在亮屏下确实是**多约一个呈现周期**：这条路 70 圈样本 min 7.0 / 中位 22.1 / p90 38.1 / max 40.5 ms
+   （设置窗开着、第二遍在跑），CPU 路关着设置窗是 7.4~7.7 ms。断电 + `--no-power` 环境里两条路都会冒出
+   ~108 ms 那一档 ⇒ 那种环境的接缝数不作数。
+   严格同条件的一对（关掉设置窗）：`bash build/tmp/path-ab.sh gpu 70` / `... cpu 70`，代价两次重启、
+   桌面各空 2~4 秒。**如果 22 ms 他肉眼算"接缝卡"，候选修法按代价从小到大**：① 把呈现环从 4 格收到 2 格
+   （解码面更早还池）；② 循环点不等解码器、把上一圈尾帧多留几帧再切；③ 池加大（已试过 24→32，不可复现
+   地改善，已退回）。
+封面重算正常。绑定层（设备 VIDEO_SUPPORT + 多线程保护、`Video.hlsl` 的 `Texture2DArray`、
+`Nv12Uploader::AdoptDecoded` + 4 格引用环）都在树里，未提交。

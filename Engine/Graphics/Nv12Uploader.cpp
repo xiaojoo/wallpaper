@@ -29,6 +29,63 @@ void Nv12Uploader::Reset() {
     uvTex_.Reset();
     ySrv_.Reset();
     uvSrv_.Reset();
+    cpuY_.Reset();
+    cpuUv_.Reset();
+    decTex_.Reset();
+    decViews_.clear();
+    adopted_ = false;
+}
+
+void Nv12Uploader::UseCpuViews() {
+    if (!adopted_ && ySrv_ == cpuY_) return;
+    adopted_ = false;
+    ySrv_ = cpuY_;
+    uvSrv_ = cpuUv_;
+}
+
+bool Nv12Uploader::AdoptDecoded(ID3D11Texture2D* tex, UINT slice, UINT codedW, UINT codedH,
+                                UINT displayH) {
+    if (!dev_ || !tex || !codedW || !codedH || !displayH) return false;
+    D3D11_TEXTURE2D_DESC d{};
+    tex->GetDesc(&d);
+    // The whole plan rests on this flag being on the pool. It is not by default: FFmpeg builds the
+    // decoder's textures as D3D11_BIND_DECODER only, and every CreateShaderResourceView then fails with
+    // E_INVALIDARG. The flag that fixes it is the DEVICE-level one (AVD3D11VADeviceContext::BindFlags),
+    // not the frames-level one - measured, see BACKLOG's D3D11VA entry.
+    if (!(d.BindFlags & D3D11_BIND_SHADER_RESOURCE)) return false;
+    if (d.Width < codedW || d.Height < codedH || (d.Format != DXGI_FORMAT_NV12 && d.Format != 103))
+        return false;
+    if (decTex_.Get() != tex) {           // a new pool (resolution change, flush): the views are stale
+        decViews_.clear();
+        decTex_ = tex;
+    }
+    for (auto& v : decViews_) {
+        if (v.slice != slice) continue;
+        ySrv_ = v.y;
+        uvSrv_ = v.uv;
+        adopted_ = true;
+        return true;
+    }
+    auto view = [&](DXGI_FORMAT fmt, Com<ID3D11ShaderResourceView>* out) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+        vd.Format = fmt;
+        vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        vd.Texture2DArray.MostDetailedMip = 0;
+        vd.Texture2DArray.MipLevels = 1;
+        vd.Texture2DArray.FirstArraySlice = slice;
+        vd.Texture2DArray.ArraySize = 1;
+        return SUCCEEDED(dev_->CreateShaderResourceView(tex, &vd, out->GetAddressOf()));
+    };
+    Views v;
+    if (!view(DXGI_FORMAT_R8_UNORM, &v.y) || !view(DXGI_FORMAT_R8G8_UNORM, &v.uv)) {
+        return false;
+    }
+    v.slice = slice;
+    decViews_.push_back(std::move(v));
+    ySrv_ = decViews_.back().y;
+    uvSrv_ = decViews_.back().uv;
+    adopted_ = true;
+    return true;
 }
 
 bool Nv12Uploader::Ensure(ID3D11Device* dev, UINT codedW, UINT codedH, UINT displayH) {
@@ -42,6 +99,20 @@ bool Nv12Uploader::Ensure(ID3D11Device* dev, UINT codedW, UINT codedH, UINT disp
     Reset();   // the geometry moved (or the device did): the old pair cannot describe the new frame
 
     D3D11_TEXTURE2D_DESC td{};
+    // Explicit ARRAY views: a null descriptor on a 1-slice texture gives a TEXTURE2D view, and Video.hlsl
+    // now declares Texture2DArray so that a D3D11VA decoder's slices (which can only be viewed as
+    // TEXTURE2DARRAY + FirstArraySlice) bind to the same slot. The two sources have to be interchangeable
+    // at the shader, so the CPU path presents itself as a one-slice array too.
+    auto arrayView = [&](ID3D11Texture2D* tex, Com<ID3D11ShaderResourceView>& srv) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+        vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        vd.Texture2DArray.MostDetailedMip = 0;
+        vd.Texture2DArray.MipLevels = 1;
+        vd.Texture2DArray.FirstArraySlice = 0;
+        vd.Texture2DArray.ArraySize = 1;
+        return SUCCEEDED(dev->CreateShaderResourceView(tex, &vd, srv.GetAddressOf()));
+    };
+
     td.Width = codedW;
     td.Height = displayH;
     td.MipLevels = 1;
@@ -51,13 +122,13 @@ bool Nv12Uploader::Ensure(ID3D11Device* dev, UINT codedW, UINT codedH, UINT disp
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     td.Format = DXGI_FORMAT_R8_UNORM;
     if (FAILED(dev->CreateTexture2D(&td, nullptr, &yTex_))) return false;
-    if (FAILED(dev->CreateShaderResourceView(yTex_.Get(), nullptr, &ySrv_))) return false;
+    if (!arrayView(yTex_.Get(), ySrv_)) return false;
 
     td.Width = codedW / 2;
     td.Height = displayH / 2;
     td.Format = DXGI_FORMAT_R8G8_UNORM;
     if (FAILED(dev->CreateTexture2D(&td, nullptr, &uvTex_))) return false;
-    if (FAILED(dev->CreateShaderResourceView(uvTex_.Get(), nullptr, &uvSrv_))) return false;
+    if (!arrayView(uvTex_.Get(), uvSrv_)) return false;
 
     // Zero-filled textures are not neutral: the shader reads Y=0,U=0,V=0 and turns it into
     // R0 G76 B0 - the green that showed up on a card and on a desktop that had not received its first
@@ -79,10 +150,14 @@ bool Nv12Uploader::Ensure(ID3D11Device* dev, UINT codedW, UINT codedH, UINT disp
 
     Info(MOD, "plane textures {}x{} R8 + {}x{} R8G8 (cleared to video black)", codedW, displayH,
          codedW / 2, displayH / 2);
+    cpuY_ = ySrv_;
+    cpuUv_ = uvSrv_;
+    adopted_ = false;
     return true;
 }
 
 bool Nv12Uploader::Upload(ID3D11DeviceContext* ctx, const BYTE* nv12, size_t have, Out& out) {
+    UseCpuViews();      // a software frame after a hardware one must not leave the shader on the pool
     const UINT w = codedW_, dispH = dispH_, codedH = codedH_;
     const size_t need = size_t(w) * codedH * 3 / 2;
     out.haveBytes = (unsigned)have;

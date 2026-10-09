@@ -22,6 +22,7 @@
 // header's C++ comparison operators fail to compile ("cannot overload functions with external C
 // linkage") - the include guard then decides which of the two wins.
 #include <d3d11.h>
+#include <d3dcompiler.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -35,6 +36,7 @@ extern "C" {
 }
 
 #pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "d3dcompiler.lib")
 
 static SRWLOCK gLock = SRWLOCK_INIT;
 static void Lock(void *) { AcquireSRWLockExclusive(&gLock); }
@@ -245,6 +247,126 @@ int main(int argc, char **argv) {
             st->Release();
         }
     }
+    // 6. Settle the plane addressing by SAMPLING, not by copying: a CopySubresourceRegion out of a
+    //    BIND_DECODER texture into a plain R8/R8G8 staging reads back zeros on this machine (tried both
+    //    with and without the frame held), so it cannot answer "which slice is the chroma plane". A pixel
+    //    shader that samples the view we would actually bind answers it directly. The engine's own log
+    //    says this clip's planes hold luma mean 84 and chroma mean 148 (neutral chroma is 128), so the
+    //    sampled average names the plane.
+    {
+        static const char *VERT =
+            "struct V { float4 p : SV_POSITION; float2 uv : TEXCOORD0; };"
+            "V vmain(uint id : SV_VertexID) { V o;"
+            "  o.uv = float2((id << 1) & 2, id & 2);"
+            "  o.p = float4(o.uv * float2(2,-2) + float2(-1,1), 0, 1); return o; }";
+        char code[512];
+        sprintf(code, "Texture2DArray<float4> t : register(t0);"
+                      "SamplerState s0 : register(s0);"
+                      "float4 main(float2 uv : TEXCOORD0) : SV_TARGET {"
+                      "  return float4(t.Sample(s0, float3(uv, 0.0)).r, 0, 0, 1); }");
+        ID3DBlob *vsb = nullptr, *psb = nullptr, *err = nullptr;
+        ID3D11VertexShader *vs = nullptr;
+        ID3D11PixelShader *ps = nullptr;
+        ID3D11RasterizerState *rs = nullptr;
+        ID3D11SamplerState *smp = nullptr;
+        ID3D11RenderTargetView *rtv = nullptr;
+        ID3D11Texture2D *rt = nullptr;
+        ID3D11Texture2D *stage = nullptr;
+        const DXGI_FORMAT viewFmt[2] = { DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM };
+        const char *viewName[2] = { "R8   view", "R8G8 view" };
+        if (FAILED(D3DCompile(VERT, strlen(VERT), nullptr, nullptr, nullptr, "vmain", "vs_5_0", 0, 0, &vsb, &err))) {
+            printf("  vs compile failed: %s\n", err ? (const char *)err->GetBufferPointer() : "?");
+            if (err) err->Release();
+        } else if (FAILED(D3DCompile(code, strlen(code), nullptr, nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &err))) {
+            printf("  ps compile failed: %s\n", err ? (const char *)err->GetBufferPointer() : "?");
+            if (err) err->Release();
+        } else {
+            dev->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &vs);
+            dev->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &ps);
+            D3D11_RASTERIZER_DESC rd{};
+            rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE;
+            dev->CreateRasterizerState(&rd, &rs);
+            D3D11_SAMPLER_DESC sd{};
+            sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+            sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sd.MaxLOD = D3D11_FLOAT32_MAX;
+            dev->CreateSamplerState(&sd, &smp);
+            // A STAGING resource cannot be a render target - the first version asked for one and the
+            // CreateRenderTargetView failure (unchecked) left every sample reading 0.0, which looked like
+            // "the views point at nothing". Render into a DEFAULT target, then copy it out to read.
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = 32; td.Height = 32; td.MipLevels = 1; td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+            const HRESULT crh = dev->CreateTexture2D(&td, nullptr, &rt);
+            if (FAILED(crh)) { printf("  rt create failed %08x%s", (unsigned)crh, "\n"); rt = nullptr; }
+            else {
+                const HRESULT rh = dev->CreateRenderTargetView(rt, nullptr, &rtv);
+                if (FAILED(rh)) { printf("  RTV failed %08x%s", (unsigned)rh, "\n"); rtv = nullptr; }
+                td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                if (FAILED(dev->CreateTexture2D(&td, nullptr, &stage))) stage = nullptr;
+            }
+            psb->Release();
+            D3D11_VIEWPORT vp{}; vp.Width = 32; vp.Height = 32; vp.MaxDepth = 1;
+            float clear4[4] = { 0, 0, 0, 0 };
+            for (int plane = 0; plane < 2; ++plane) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+                vd.Format = viewFmt[plane];
+                vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+                vd.Texture2DArray.MipLevels = 1;
+                vd.Texture2DArray.ArraySize = 1;
+                const UINT trySlices[5] = { 0, 1, 5, (UINT)(slices < 0 ? 0 : slices),
+                                            (UINT)(dd.ArraySize + (slices < 0 ? 0 : slices)) };
+                for (int sl = 0; sl < 5; ++sl) {
+                    const UINT slice = trySlices[sl];
+                    vd.Texture2DArray.FirstArraySlice = slice;
+                    ID3D11ShaderResourceView *srv = nullptr;
+                    if (FAILED(dev->CreateShaderResourceView(tex, &vd, &srv)) || !srv) {
+                        printf("  %-9s slice %-2u -> no SRV\n", viewName[plane], slice);
+                        continue;
+                    }
+                    ctx->RSSetState(rs);
+                    ctx->OMSetRenderTargets(1, &rtv, nullptr);
+                    ctx->ClearRenderTargetView(rtv, clear4);   // before the draw: a sample that renders
+                    ctx->RSSetViewports(1, &vp);               // nothing must read 0, not the last slice
+                    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                    ctx->IASetInputLayout(nullptr);
+                    ctx->VSSetShader(vs, nullptr, 0);
+                    ctx->PSSetShader(ps, nullptr, 0);
+                    ctx->PSSetSamplers(0, 1, &smp);
+                    ctx->PSSetShaderResources(0, 1, &srv);
+                    ctx->Draw(3, 0);
+                    srv->Release();
+                    // The first version cleared here (thinking it flushed the binding) and never copied
+                    // the target at all - so every sample read the zeros the staging was born with, which
+                    // is what "the views point at nothing" looked like. Copy the rendered target out.
+                    ctx->CopyResource(stage, rt);
+                    D3D11_MAPPED_SUBRESOURCE mp{};
+                    if (const HRESULT mr = ctx->Map(stage, 0, D3D11_MAP_READ, 0, &mp); FAILED(mr)) {
+                        printf("  map failed %08x stage=%p\n", (unsigned)mr, (void *)stage);
+                        continue;
+                    }
+                    unsigned long long sum = 0, cnt = 0;
+                    for (UINT y = 0; y < 32; ++y) {
+                        const unsigned char *row = (const unsigned char *)mp.pData + (size_t)y * mp.RowPitch;
+                        for (UINT x = 0; x < 32; ++x) { sum += row[x * 4]; ++cnt; }
+                    }
+                    ctx->Unmap(stage, 0);
+                    printf("  %-9s slice %-2u sampled %6.1f   (expect 84 luma / 148 chroma)\n",
+                           viewName[plane], slice, cnt ? (double)sum / cnt : -1.0);
+                }
+            }
+        }
+        if (rtv) rtv->Release();
+        if (stage) stage->Release();
+        if (rt) rt->Release();
+        if (smp) smp->Release();
+        if (rs) rs->Release();
+        if (ps) ps->Release();
+        if (vs) vs->Release();
+        if (vsb) vsb->Release();
+    }
+
     av_frame_free(&frm);
     av_packet_free(&pkt);
     avcodec_free_context(&c);

@@ -8,8 +8,13 @@
 // The placement block below is deliberately a copy of Image.hlsl's: it is the same fit contract
 // (uPerf.w = the 壁纸铺展 setting) applied to a picture instead of a photo. Keep the two in step if
 // a mode is added there.
-Texture2D gY : register(t0);
-Texture2D gUV : register(t1);
+// The planes are one-slice texture ARRAYS, not plain 2D textures, so that the same shader reads both
+// sources the engine can have: the CPU path (Nv12Uploader's own R8 / R8G8 textures, filled by
+// UpdateSubresource) and a D3D11VA decoder, whose frames are slices of one NV12 array and can only be
+// viewed as TEXTURE2DARRAY with FirstArraySlice = the frame's slice. The view already picks the slice,
+// so the shader always samples slice 0.
+Texture2DArray gY : register(t0);
+Texture2DArray gUV : register(t1);
 SamplerState LinearSampler : register(s0);
 
 cbuffer Params : register(b1) {
@@ -72,7 +77,8 @@ float4 PSMain(VSOut i) : SV_TARGET {
     // picture, so chroma row L/2 sits at v = (L/2 + 0.5) / (H/2) = (L + 1) / H, which is p.y. Halving
     // p.y here read chroma from a quarter of the picture away - inside one flat colour band it looks
     // perfect, and only the luma ramp exposed it (the grey steps came back cyan).
-    float3 c = YuvToRgb(gY.Sample(LinearSampler, p).r, gUV.Sample(LinearSampler, p).rg);
+    float3 c = YuvToRgb(gY.Sample(LinearSampler, float3(p, 0.0)).r,
+                        gUV.Sample(LinearSampler, float3(p, 0.0)).rg);
     c = bare ? float3(0.0, 0.0, 0.0) : c;
     float luma = dot(c, float3(0.2126, 0.7152, 0.0722));
     c = lerp(luma.xxx, c, saturation);

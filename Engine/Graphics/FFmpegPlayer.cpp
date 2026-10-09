@@ -23,10 +23,14 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libavutil/version.h>
 }
+// hwcontext_d3d11va.h pulls in the D3D11 headers, and those define C++ operators - so it must not sit
+// inside extern "C" (the same trap tools/dxvaspike.cpp hit on its first compile).
+#include <libavutil/hwcontext_d3d11va.h>
 
 #include <psapi.h>
 
@@ -85,6 +89,27 @@ AVPixelFormat PickFormat(AVCodecContext*, const AVPixelFormat* fmts) {
     return fmts[0];   // usually YUV420P; Pack() interleaves it
 }
 
+// The D3D11VA request: take the decoder's GPU surfaces when the codec offers them, otherwise behave
+// exactly like PickFormat. Only installed on a context that was opened against our own device.
+AVPixelFormat PickFormatD3D11(AVCodecContext*, const AVPixelFormat* fmts) {
+    for (int i = 0; fmts[i] != AV_PIX_FMT_NONE; ++i) {
+        if (fmts[i] == AV_PIX_FMT_D3D11) return AV_PIX_FMT_D3D11;
+    }
+    return PickFormat(nullptr, fmts);
+}
+
+// The D3D11VA device context locks our immediate context from its own thread. These are the callbacks
+// libavcodec calls around every device use; the engine's device is created multithread-protected as
+// well (D3D11Device.cpp), which is the part that makes sharing the immediate context legal.
+inline std::string errcode(int e) {
+    char b[128] = {};
+    av_strerror(e, b, sizeof(b));
+    return std::string("av error ") + std::to_string(e) + " (" + b + ")";
+}
+
+void DxLock(void* ctx) { AcquireSRWLockExclusive(reinterpret_cast<PSRWLOCK>(ctx)); }
+void DxUnlock(void* ctx) { ReleaseSRWLockExclusive(reinterpret_cast<PSRWLOCK>(ctx)); }
+
 // The NVDEC-backed twins of libavcodec's native decoders. Naming them is all it takes to ask for
 // hardware decode; whether this machine's driver actually gives one is answered by avcodec_open2 and
 // reported through note(), never assumed.
@@ -98,7 +123,17 @@ const char* CuvidName(const char* native) {
 
 class FFmpegPlayer final : public VideoSource {
 public:
-    explicit FFmpegPlayer(bool preferNvdec) : preferNvdec_(preferNvdec) {}
+    // GPU surfaces are the default since 2026-10-09, when the path passed the colour gate against the
+    // CPU copy (identical per-bar deltas, 99.07% of the fixture's static region bit-identical - which is
+    // less than the same clip differs between two of its own frames) and measured 14.38% -> 1.51% of a
+    // core on the 4K60 desktop with the working set down from 348 MB to 142 MB. `SW_D3D11VA=0` next to
+    // the exe drives the CPU path instead: that is how both sides are measured without a rebuild per
+    // side, and it is the escape hatch for a driver elsewhere that paints something we cannot see.
+    explicit FFmpegPlayer(bool preferNvdec) : preferNvdec_(preferNvdec) {
+        char v[8] = {};
+        gpuAllowed_ = GetEnvironmentVariableA("SW_D3D11VA", v, static_cast<DWORD>(sizeof(v))) == 0 ||
+                      v[0] != '0';
+    }
 
     ~FFmpegPlayer() override {
         {
@@ -185,7 +220,17 @@ public:
             h_.store(unsigned(ctx_->height ? ctx_->height : codedH_));
             return true;
         };
-        const char* cu = preferNvdec_ ? CuvidName(dec_->name) : nullptr;
+        // Don't open the NVDEC wrapper for the codecs the GPU-surface path is going to take over, or
+        // for anything else where it is still the fastest way to decode: `h264_cuvid` copies its frame
+        // back to system memory, which is the copy that path exists to remove, while `vp9_cuvid` has no
+        // surface path of its own and is pure gain. The first version opened cuvid and then replaced it,
+        // which put a CUDA device context and a D3D11 device context inside one player's lifetime with a
+        // free in between - and the run died of heap corruption (c0000374) inside avcodec_free_context on
+        // the throwaway instance a thumbnail build uses. Located with cdb (build/tmp/cdb-gpu.bat), not
+        // guessed. The codec test is TryD3D11's own: a stream it will not touch keeps cuvid.
+        const bool surfaces = gpuAllowed_ &&
+                              (!strcmp(dec_->name, "h264") || !strcmp(dec_->name, "hevc"));
+        const char* cu = (preferNvdec_ && !surfaces) ? CuvidName(dec_->name) : nullptr;
         const AVCodec* hw = cu ? avcodec_find_decoder_by_name(cu) : nullptr;
         bool opened = hw && (openWith(hw, false) || openWith(hw, true));
         if (opened) {
@@ -220,6 +265,13 @@ public:
     bool Attach(ID3D11Device* dev, std::string& error) override {
         dev_ = dev;
         const auto t0 = std::chrono::steady_clock::now();
+        // Ask for GPU surfaces before the plane textures are built: when this succeeds the textures are
+        // still created (they are what a mid-stream switch to a software frame falls back to), but no
+        // frame is ever copied through the CPU.
+        const bool gpu = gpuAllowed_ && TryD3D11();
+        if (!gpu && gpuAllowed_)
+            Info(MOD, "{}: D3D11VA not available, decoding to system memory and copying the planes",
+                 ToUtf8(file_));
         // Build the plane textures here, not on the first draw. `WallpaperInstance::MakeArgs` only
         // binds the pair once FrameY() hands one back, so a player whose first frame has not arrived
         // leaves the shader sampling empty slots - and empty slots read as zero, which the YUV->RGB
@@ -253,16 +305,49 @@ public:
             return nullptr;
         }
         std::vector<BYTE> frame;
+        AVFrame* slot = nullptr;
         {
             std::lock_guard lk(mtx_);
-            if (!pending_.empty()) frame.swap(pending_);
-            // The ruler for "did skipping the copy cost the desktop a picture": a present that finds the
-            // slot empty shows the same frame as the one before it. With the decoder at the clip's 30 fps
-            // and the slot at 24 this was always 0 (a newer picture was always there), so after publishing
-            // only into an empty slot it has to stay 0 or the saving bought visible judder. It is only
-            // meaningful with one consumer: when the second pass shares this player, 54 drains against 30
-            // publishes means 24 of them legitimately repeat.
-            else ++st_.tookNothing;
+            if (gpuOut_ && pendingAv_ && pendingAv_->data[0]) {
+                // The reference is taken into the ring INSIDE the lock: the slot we hand to the shader
+                // must survive however many swaps the decode thread does while our draw is in flight.
+                slot = shownRing_[shownNext_];
+                shownNext_ = (shownNext_ + 1) % 4;
+                av_frame_unref(slot);
+                if (av_frame_ref(slot, pendingAv_) < 0) slot = nullptr;
+                av_frame_unref(pendingAv_);
+            } else if (!pending_.empty()) {
+                frame.swap(pending_);
+            } else {
+                // The ruler for "did skipping the copy cost the desktop a picture": a present that finds
+                // nothing new shows the same frame as the one before it. Meaningful with one consumer -
+                // when the second pass shares this player, its extra drains repeat legitimately.
+                ++st_.tookNothing;
+            }
+        }
+        if (slot && slot->data[0]) {
+            const bool bound = up_.AdoptDecoded(
+                reinterpret_cast<ID3D11Texture2D *>(slot->data[0]),
+                static_cast<UINT>(reinterpret_cast<uintptr_t>(slot->data[1])),
+                codedW_, codedH_, h_.load());
+            if (bound) {
+                ++st_.gpuTaken;
+                st_.frameUsSum += whole.us();
+                AddMax(st_.frameUsMax, whole.us());
+                ++st_.taken;
+                return up_.Y();
+            }
+            if (!adoptWarned_) {
+                adoptWarned_ = true;
+                Warn(MOD, "{}: decoder surface would not bind; drawing the CPU planes from here on",
+                     ToUtf8(file_));
+                std::lock_guard lk(mtx_);
+                gpuOut_ = false;
+                // Drop every surface reference we hold, or the pool keeps 24 decoder surfaces alive for
+                // a path that will never read them again.
+                if (pendingAv_) av_frame_unref(pendingAv_);
+                for (auto& f : shownRing_) if (f) av_frame_unref(f);
+            }
         }
         if (!frame.empty()) {
             Nv12Uploader::Out o;
@@ -355,8 +440,13 @@ private:
     void Free() {
         if (frm_) av_frame_free(&frm_);
         if (pkt_) av_packet_free(&pkt_);
+        if (pendingAv_) av_frame_free(&pendingAv_);
+        for (auto& f : shownRing_) if (f) av_frame_free(&f);
         if (ctx_) avcodec_free_context(&ctx_);
         if (fmt_) avformat_close_input(&fmt_);
+        // Order matters: the frames context holds a reference to the device context.
+        if (hwFrames_) av_buffer_unref(&hwFrames_);
+        if (hwDev_) av_buffer_unref(&hwDev_);
     }
 
     // AVFrame planes -> one packed NV12 buffer of codedW*codedH*3/2 bytes, honouring linesize.
@@ -405,6 +495,7 @@ private:
     UINT codedW_ = 0, codedH_ = 0;
     bool loop_ = true;
     bool preferNvdec_ = false;
+    bool gpuAllowed_ = false;            // SW_D3D11VA=1; see the constructor
     Nv12Uploader up_;
 
     std::thread thread_;
@@ -418,6 +509,7 @@ private:
     bool holdNext_ = false;
     bool holdAfterFrame_ = false;
     bool ensureWarned_ = false;
+    bool adoptWarned_ = false;           // the decoder surface failed to bind, once per player
     int noFrameSeconds_ = 0;    // consecutive stats lines with no step and no frame at all
     double holdTarget_ = 0.0;
     double seekTo_ = 0.0;
@@ -463,14 +555,121 @@ private:
         if (pool_.size() < 3) pool_.push_back(std::move(kept));
     }
 
+    // ---- D3D11VA: the decoder writes GPU surfaces and the shader reads them (no 12.4 MB trip) ----
+    //
+    // `pending_` stays the CPU path's slot; `pendingAv_` is the same idea for a surface. The ring below
+    // is the part that is easy to get wrong: returning the AVFrame reference hands the surface back to
+    // the decoder's pool, and the decoder may overwrite it while our draw that bound it is still queued
+    // on the GPU. Holding the reference for a few more takes is a guarantee rather than a heuristic -
+    // a referenced surface is not handed out - and the pool is ~20 surfaces deep, so four is free.
+    bool TryD3D11() {
+        if (!dev_ || !fmt_) return false;
+        // The NATIVE decoder is the one with the D3D11VA hwaccel attached. Asking by the currently open
+        // codec's name was the first attempt and it never engaged, because OpenFile prefers the NVDEC
+        // wrapper - `h264_cuvid` copies the frame to system memory, which is the copy this path exists
+        // to remove. Look the native one up by codec id instead.
+        const AVCodec* native = avcodec_find_decoder(fmt_->streams[vIdx_]->codecpar->codec_id);
+        if (!native) { Info(MOD, "d3d11va: no native decoder for this stream"); return false; }
+        if (strcmp(native->name, "h264") && strcmp(native->name, "hevc")) {
+            Info(MOD, "d3d11va: {} decodes to system memory by nature, staying on the CPU path",
+                 native->name);
+            return false;
+        }
+        static SRWLOCK d3dLock = SRWLOCK_INIT;
+        bool ok = false;
+        std::string why = "?";
+        AVBufferRef* dref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+        AVBufferRef* fref = nullptr;
+        AVCodecContext* c = nullptr;
+        ID3D11DeviceContext* imm = nullptr;
+        do {
+            if (!dref) { why = "device ctx alloc"; break; }
+            AVD3D11VADeviceContext* d3d =
+                (AVD3D11VADeviceContext *)((AVHWDeviceContext *)dref->data)->hwctx;
+            dev_->GetImmediateContext(&imm);
+            if (!imm) { why = "no immediate context"; break; }
+            d3d->device = dev_.Get();
+            d3d->device->AddRef();
+            d3d->device_context = imm;
+            d3d->lock = DxLock;
+            d3d->unlock = DxUnlock;
+            d3d->lock_ctx = &d3dLock;
+            // DEVICE level, not frames level: the hwaccel builds the array itself and reads the flags
+            // from here. Without SHADER_RESOURCE every CreateShaderResourceView fails with
+            // E_INVALIDARG, which is what the first spike run measured (bind 0x200, seven views, zero
+            // successes) and what makes the whole approach work or not.
+            d3d->BindFlags = D3D11_BIND_DECODER | D3D11_BIND_SHADER_RESOURCE;
+            if (const int r = av_hwdevice_ctx_init(dref); r < 0) { why = errcode(r); break; }
+            fref = av_hwframe_ctx_alloc(dref);
+            if (!fref) { why = "frames ctx alloc"; break; }
+            AVHWFramesContext* fc = (AVHWFramesContext *)fref->data;
+            fc->format = AV_PIX_FMT_D3D11;
+            fc->sw_format = AV_PIX_FMT_NV12;
+            fc->width = codedW_;
+            fc->height = codedH_;
+            fc->initial_pool_size = 24;
+            ((AVD3D11VAFramesContext *)fc->hwctx)->BindFlags = d3d->BindFlags;
+            if (const int r = av_hwframe_ctx_init(fref); r < 0) { why = errcode(r); break; }
+            c = avcodec_alloc_context3(native);
+            if (!c || avcodec_parameters_to_context(c, fmt_->streams[vIdx_]->codecpar) < 0) { why = "codec ctx"; break; }
+            c->get_format = PickFormatD3D11;
+            // One decoder thread, because the software frame threads were the crash: with 0 (= auto)
+            // the run died of heap corruption (c0000374) reported from a free of an AVBufferRef - inside
+            // avcodec_free_context while the NVDEC wrapper was also being opened, and inside
+            // avcodec_send_packet once it was not. Same build, this one line different. Application
+            // Verifier's page heap still stopped it at the free rather than at a write, so it is a
+            // dangling reference in the decoder's own bookkeeping; which part of that bookkeeping frame
+            // threading breaks is not established. What costs nothing to lose: the GPU is doing the
+            // decoding here, and the step measured 0.6 ms at 4K60 against 4.3 ms on the CPU path.
+            c->thread_count = 1;
+            c->hw_device_ctx = av_buffer_ref(dref);
+            c->hw_frames_ctx = av_buffer_ref(fref);
+            if (const int r = avcodec_open2(c, native, nullptr); r < 0) { why = errcode(r); break; }
+            avcodec_free_context(&ctx_);
+            ctx_ = c;
+            c = nullptr;
+            hwDev_ = dref;
+            dref = nullptr;
+            hwFrames_ = fref;
+            fref = nullptr;
+            pendingAv_ = av_frame_alloc();
+            for (auto& f : shownRing_) f = av_frame_alloc();
+            if (!pendingAv_ || !shownRing_[0]) break;
+            gpuOut_ = true;
+            dec_ = native;
+            note_ = std::string("d3d11va libavcodec ") + native->name;
+            ok = true;
+        } while (false);
+        if (!ok) Info(MOD, "{}: D3D11VA unavailable ({})", ToUtf8(file_), why);
+        // No imm->Release() here on purpose. GetImmediateContext handed us one reference, and that
+        // reference is what lives in AVD3D11VADeviceContext::device_context now - libavcodec's device
+        // uninit releases both pointers it was given, on the success path and on the failure one.
+        // Releasing it here as well dropped the context to zero refs while the engine was still
+        // drawing with it, which is the crash the first GPU-on run died on (the log stopped at
+        // "aurora prepared", no process left, a dump under %LOCALAPPDATA%\CrashDumps).
+        if (c) avcodec_free_context(&c);
+        if (fref) av_buffer_unref(&fref);
+        if (dref) av_buffer_unref(&dref);
+        return ok;
+    }
+
+    // True when the slot already holds a picture nobody has drawn yet - the backpressure test, which
+    // has to look at a different place depending on which kind of picture this is.
+    bool SlotFull() const { return gpuOut_ ? (pendingAv_ && pendingAv_->data[0]) : !pending_.empty(); }
+
+    AVFrame* pendingAv_ = nullptr;
+    AVFrame* shownRing_[4] = {};
+    unsigned shownNext_ = 0;
+    bool gpuOut_ = false;
+    AVBufferRef* hwDev_ = nullptr;
+    AVBufferRef* hwFrames_ = nullptr;
+
     // The loop seam, timed on the decode thread only: when the clip ran out, and what the last frame
     // shown before the cut was. The queue the decoder holds at that moment is the clip's own tail, so
     // it is played out, and the number that matters is the gap between the last tail frame and the
     // first frame of the next cycle - that is the freeze a viewer would call a hitch.
     bool seamOpen_ = false;
-    std::chrono::steady_clock::time_point seamStart_{};
-    std::chrono::steady_clock::time_point seamTailAt_{};
-    double seamTailPos_ = -1.0;
+    std::chrono::steady_clock::time_point lastShownAt_{};
     double lastShownPos_ = -1.0;
 
     std::atomic<bool> paused_{false};
@@ -487,7 +686,7 @@ private:
         std::atomic<unsigned long long> copyUsSum{0}, copyUsMax{0};   // the two UpdateSubresource calls
         std::atomic<unsigned long long> frameUsSum{0}, frameUsMax{0};
         std::atomic<unsigned> steps{0}, empty{0}, dropped{0}, taken{0}, notPacked{0}, packSteps{0},
-                                    tookNothing{0};
+                                    tookNothing{0}, gpuTaken{0};
         std::atomic<unsigned> lumaMean{0}, chromaMean{0}, haveBytes{0}, needBytes{0};
     } st_;
     std::chrono::steady_clock::time_point lastStats_;
@@ -499,6 +698,7 @@ void FFmpegPlayer::LogStats() {
     const auto taken = st_.taken.exchange(0), dropped = st_.dropped.exchange(0);
     const auto notPacked = st_.notPacked.exchange(0);
     const auto packSteps = st_.packSteps.exchange(0);
+    const auto gpuTaken = st_.gpuTaken.exchange(0);
     const auto tookNothing = st_.tookNothing.exchange(0);
     const auto pSum = st_.packUsSum.exchange(0), pMax = st_.packUsMax.exchange(0);
     const auto dSum = st_.decodeUsSum.exchange(0), dMax = st_.decodeUsMax.exchange(0);
@@ -508,15 +708,24 @@ void FFmpegPlayer::LogStats() {
     Info(MOD, "{}: FFmpeg decode {} steps in 1 s ({} empty), step mean {:.1f} max {:.1f} ms | "
               "render took {} frame(s), FrameY mean {:.2f} max {:.2f} ms (upload {:.2f}/{:.2f}) | "
               "{} produced but never displayed, {} decoded and not copied, packed {} frame(s) mean {:.2f} "
-              "max {:.2f} ms, {} presents took nothing",
+              "max {:.2f} ms, {} presents took nothing, {} drawn straight off the decoder surface",
          ToUtf8(file_), steps, empty, steps ? dSum * k / steps : 0.0, dMax * k, taken,
          taken ? fSum * k / taken : 0.0, fMax * k,
          taken ? cSum * k / taken : 0.0, cMax * k, dropped, notPacked, packSteps,
-         packSteps ? pSum * k / packSteps : 0.0, pMax * k, tookNothing);
-    Info(MOD, "{}: planes hold luma mean {} chroma mean {} (neutral chroma is 128), frame {} B "
-              "against a coded plane of {} B",
-         ToUtf8(file_), st_.lumaMean.load(), st_.chromaMean.load(), st_.haveBytes.load(),
-         st_.needBytes.load());
+         packSteps ? pSum * k / packSteps : 0.0, pMax * k, tookNothing, gpuTaken);
+    if (gpuOut_) {
+        // Not a measurement of the picture. This path never calls Upload(), so the two means would keep
+        // reporting the video-black clear of plane textures nobody writes - a green-looking number with
+        // nothing wrong. The colour of a frame drawn off the decoder surface is measured where it lands:
+        // composited pixels (tools/preview-pixels.py).
+        Info(MOD, "{}: {} decoder surface(s) bound this second, the CPU planes are not written by this "
+                  "path", ToUtf8(file_), gpuTaken);
+    } else {
+        Info(MOD, "{}: planes hold luma mean {} chroma mean {} (neutral chroma is 128), frame {} B "
+                  "against a coded plane of {} B",
+             ToUtf8(file_), st_.lumaMean.load(), st_.chromaMean.load(), st_.haveBytes.load(),
+             st_.needBytes.load());
+    }
     // The state worth shouting about is "the file opened, the thread is working, and not one frame has
     // ever come out" - steps above zero with every step empty. The first version of this checked
     // `steps == 0`, which is the opposite: zero steps just means nobody is asking right now (parked for
@@ -603,10 +812,7 @@ void FFmpegPlayer::Thread() {
             if (rr < 0) {
                 if (rr == AVERROR_EOF) {
                     ended_ = true;
-                    if (loop_) {
-                        seamStart_ = std::chrono::steady_clock::now();
-                        seamOpen_ = true;
-                    }
+                    if (loop_) seamOpen_ = true;
                     {
                         std::lock_guard lk(mtx_);
                         if (loop_) { seekPending_ = true; seekTo_ = 0.0; ended_ = false; }
@@ -641,12 +847,18 @@ void FFmpegPlayer::Thread() {
             bool held = false;
             {
                 std::lock_guard lk(mtx_);
-                held = !pending_.empty() && !holdNext_;
+                held = SlotFull() && !holdNext_;
             }
             if (held) {
                 av_frame_unref(frm_);
                 ++st_.notPacked;
                 skipped = true;
+                break;
+            }
+            if (gpuOut_ && frm_->format == AV_PIX_FMT_D3D11) {
+                // No copy at all: the picture stays where the decoder put it and the publish below takes
+                // a reference. `frm_` is deliberately not unref'd here - the publish block refs it.
+                gotFrame = true;
                 break;
             }
             const Clock packClock;
@@ -676,15 +888,26 @@ void FFmpegPlayer::Thread() {
                 // std::system_error that escapes the thread -> terminate/abort (BEX64 in ucrtbase).
                 // Measured 2026-10-07: the renderer died ~2 s after `local_05 prepared`.
                 std::lock_guard lk(mtx_);
-                if (!pending_.empty()) ++st_.dropped;
-                pending_.swap(frame);
-                position_ = double(outTs) / 1e7;
-                ++delivered_;
+                if (gpuOut_) {
+                    av_frame_unref(pendingAv_);
+                    if (av_frame_ref(pendingAv_, frm_) < 0) {
+                        ++st_.empty;
+                    } else {
+                        position_ = double(outTs) / 1e7;
+                        ++delivered_;
+                    }
+                } else {
+                    if (!pending_.empty()) ++st_.dropped;
+                    pending_.swap(frame);
+                    position_ = double(outTs) / 1e7;
+                    ++delivered_;
+                }
                 if (holdNext_ && (position_ >= holdTarget_ - 0.02 || ended_.load())) {
                     holding_ = true;
                     holdNext_ = false;
                 }
             }
+            if (gpuOut_) av_frame_unref(frm_);   // the reference now lives in pendingAv_
             cv_.notify_all();
             // `frame` now holds whatever that swap displaced - the buffer the previous pending frame
             // lived in - and it goes back to the pool instead of being freed. On the skipped path it is
@@ -692,23 +915,25 @@ void FFmpegPlayer::Thread() {
             // pool loses a slot every time the desktop is behind.
             PutBuffer(std::move(frame));
             const double pos = position_.load();
-            if (gotFrame && seamOpen_) {
-                const auto nowMs = std::chrono::steady_clock::now();
-                if (pos + 0.0005 < lastShownPos_) {
-                    // The cut itself. The two positions say the tail played out (last tail frame near
-                    // the clip's length) and the gap says what a viewer could call a hitch.
-                    Info(MOD, "{}: loop seam: last frame of the cycle {:.3f} s of {:.1f}, first frame of "
-                              "the next {:.3f} s, {:.1f} ms apart on the decode side",
-                         ToUtf8(file_), seamTailPos_, duration_.load(), pos,
-                         std::chrono::duration<double, std::milli>(nowMs - seamTailAt_).count());
-                    seamOpen_ = false;
-                } else {
-                    seamTailAt_ = nowMs;
-                    seamTailPos_ = pos;
-                }
-            }
-            lastShownPos_ = pos;
             const auto nowT = std::chrono::steady_clock::now();
+            if (gotFrame && seamOpen_ && pos + 0.0005 < lastShownPos_) {
+                // The cut. `lastShownPos_/lastShownAt_` is by definition the cycle's last picture - the
+                // one the position just jumped back from - so the gap from it to this frame is the hitch
+                // a viewer could call a freeze. The pair this used to report (seamTailAt_/seamTailPos_)
+                // only filled in when a tail frame happened to still be in the queue when the reader ran
+                // out; on the GPU path the queue drains first, and the line printed `-1.000 s` and a gap
+                // of 3.0e8 ms measured against a default-constructed clock. Measured on the CPU path the
+                // same evening: 4.683 s -> 0.000 s, 7.4-7.7 ms apart.
+                Info(MOD, "{}: loop seam: last frame of the cycle {:.3f} s of {:.1f}, first frame of the "
+                          "next {:.3f} s, {:.1f} ms apart on the decode side",
+                     ToUtf8(file_), lastShownPos_, duration_.load(), pos,
+                     std::chrono::duration<double, std::milli>(nowT - lastShownAt_).count());
+                seamOpen_ = false;
+            }
+            if (gotFrame) {
+                lastShownPos_ = pos;
+                lastShownAt_ = nowT;
+            }
             nextDue += period;
             if (nextDue < nowT) nextDue = nowT;
             // Running toward a park target is not playback: every intermediate picture is thrown away
