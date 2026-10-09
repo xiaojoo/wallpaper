@@ -16,7 +16,11 @@ bool D3D11Device::Init(bool debugLayer) {
         return false;
     }
 
-    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    // VIDEO_SUPPORT is what lets a D3D11VA decoder write into textures this device owns; without it
+    // av_hwdevice_ctx_init(AV_HWDEVICE_TYPE_D3D11VA) on this device fails. It costs nothing on the
+    // paths that do not decode (measured identical frame times on the shader wallpapers), and it comes
+    // with the protected-multithread flag below because this device is now used by two threads.
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
     if (debugLayer) flags |= D3D11_CREATE_DEVICE_DEBUG;
 
     D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1};
@@ -35,6 +39,21 @@ bool D3D11Device::Init(bool debugLayer) {
         return false;
     }
     Info(MOD, "D3D11 device ready, feature level 0x{:X}", (unsigned)got);
+
+    // libavcodec's D3D11VA hwaccel calls into this immediate context from the decode thread - that is
+    // the whole arrangement, and the lock pair we hand it in FFmpegPlayer.cpp is what it takes around
+    // every use. The driver's own cross-thread protection is the other half of that arrangement, so
+    // turn it on here; the same pairing is what tools/dxvaspike.cpp builds to get a decoded surface
+    // sampled at all.
+    {
+        Com<ID3D10Multithread> mt;
+        if (SUCCEEDED(dev->QueryInterface(__uuidof(ID3D10Multithread), &mt))) {
+            mt->SetMultithreadProtected(TRUE);
+            Info(MOD, "device context is multithread-protected (video decode shares it)");
+        } else {
+            Warn(MOD, "no ID3D10Multithread on this device - hardware decode to GPU surfaces is off");
+        }
+    }
 
         // A factory we create ourselves exposes the DXGI 1.2+ interfaces; the device's own parent is
     // only IDXGIFactory1 and QIs to nothing newer on this driver stack.
