@@ -47,6 +47,20 @@ class Bridge final : public QObject {
     // True once the card has been dragged somewhere, which is what makes the position row say
     // 「自定义」 instead of naming a corner.
     Q_PROPERTY(bool hudCustom READ hudCustom NOTIFY stateChanged)
+    // The chart panel. Same shape as the card's, plus the history depth: a line that can only show
+    // four seconds of sixteen is a different picture from one that is full, and the page says so
+    // rather than letting a mostly-empty gauge look broken.
+    Q_PROPERTY(bool chart READ chart NOTIFY stateChanged)
+    Q_PROPERTY(bool chartReady READ chartReady NOTIFY stateChanged)
+    Q_PROPERTY(QStringList chartTypeLevels READ chartTypeLevels CONSTANT)
+    Q_PROPERTY(QString chartType READ chartType NOTIFY stateChanged)
+    Q_PROPERTY(QStringList chartCornerLevels READ chartCornerLevels CONSTANT)
+    Q_PROPERTY(QString chartCorner READ chartCorner NOTIFY stateChanged)
+    Q_PROPERTY(int chartScale READ chartScale NOTIFY stateChanged)
+    Q_PROPERTY(QString chartFrame READ chartFrame NOTIFY stateChanged)
+    Q_PROPERTY(bool chartCustom READ chartCustom NOTIFY stateChanged)
+    Q_PROPERTY(bool chartDrag READ chartDrag NOTIFY stateChanged)
+    Q_PROPERTY(int chartHistory READ chartHistory NOTIFY stateChanged)
     Q_PROPERTY(int maxFps READ maxFps NOTIFY stateChanged)
     Q_PROPERTY(bool paused READ paused NOTIFY stateChanged)
     // Whether the clip in the big preview is frozen. This is the browse page's own transport and is
@@ -111,6 +125,17 @@ public:
     QString hudFrame() const { return hudFrame_; }
     bool hudDrag() const { return hudDrag_; }
     bool hudCustom() const { return hudCustom_; }
+    bool chart() const { return chart_; }
+    bool chartReady() const { return chartReady_; }
+    QStringList chartTypeLevels() const;
+    QString chartType() const { return chartType_; }
+    QStringList chartCornerLevels() const;
+    QString chartCorner() const { return chartCorner_; }
+    int chartScale() const { return chartScale_; }
+    QString chartFrame() const { return chartFrame_; }
+    bool chartCustom() const { return chartCustom_; }
+    bool chartDrag() const { return chartDrag_; }
+    int chartHistory() const { return chartHistory_; }
     int trayAlpha() const { return trayAlpha_; }
     int maxFps() const { return maxFps_; }
     bool paused() const { return paused_; }
@@ -166,6 +191,13 @@ public:
     Q_INVOKABLE void setHudDrag(bool on);
     // Puts the card back on its corner preset.
     Q_INVOKABLE void resetHudPos();
+    Q_INVOKABLE void setChart(bool on);
+    Q_INVOKABLE void setChartType(const QString& t);
+    Q_INVOKABLE void setChartCorner(const QString& corner);
+    Q_INVOKABLE void setChartScale(int pct);
+    Q_INVOKABLE void setChartFrame(const QString& style);
+    Q_INVOKABLE void setChartDrag(bool on);
+    Q_INVOKABLE void resetChartPos();
     Q_INVOKABLE void setTrayAlpha(int pct);
     Q_INVOKABLE void setMaxFps(int fps);
     Q_INVOKABLE void setPowerCap(const QString& key, int value);
@@ -250,6 +282,15 @@ private:
     QString hudFrame_ = QStringLiteral("notch");
     bool hudDrag_ = false;
     bool hudCustom_ = false;
+    bool chart_ = false;
+    bool chartReady_ = false;
+    QString chartType_ = QStringLiteral("bar");
+    QString chartCorner_ = QStringLiteral("bottom-left");
+    int chartScale_ = 100;
+    QString chartFrame_ = QStringLiteral("notch");
+    bool chartCustom_ = false;
+    bool chartDrag_ = false;
+    int chartHistory_ = 0;
     QString transition_ = QStringLiteral("liquid");
     int trayAlpha_ = 0;
     bool qualityIsGlobal_ = false, paused_ = false, autostart_ = false;

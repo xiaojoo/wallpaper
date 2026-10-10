@@ -387,17 +387,29 @@ bool D3D11Renderer::InitHud(ID3D11Device* dev, IWICImagingFactory* wic, const st
         return false;
     }
     hudReady_ = true;
+
+    // The chart panel is compiled here rather than in its own Init because it shares the atlas and
+    // every one of the guards above: a second copy of the reflection check is how the two would
+    // drift apart, and a Params block on either shader breaks both.
+    const std::string chartSrc = ReadFileUtf8(shaders + L"\\HudChart.hlsl", ok);
+    if (!ok) { error = ToUtf8(shaders + L"\\HudChart.hlsl") + " not readable"; return false; }
+    if (!chart_.Compile(chartSrc, L"HudChart.hlsl", { shaders }, e, error)) {
+        error = "chart shader: " + error;
+        return false;
+    }
+    if (!chart_.CreatePipeline(dev, error)) { error = "chart pipeline: " + error; return false; }
+    if (!chart_.ReflectParams(error)) { error = "chart params: " + error; return false; }
+    if (chart_.hasParams()) {
+        error = "HudChart.hlsl declares a Params cbuffer; the overlay must read only b0 and b2";
+        return false;
+    }
+    chartReady_ = true;
     Info(MOD, "status card overlay ready");
     return true;
 }
 
-// b0 and b2 already hold this frame's values, uploaded by the wallpaper pass that precedes this
-// one, so the overlay binds and draws and never touches a constant buffer - which is also why it
-// has no Params of its own: paramCb_ is one shared slot resized by byte count, and a second pass
-// with a different size would reallocate it every frame of every monitor.
-bool D3D11Renderer::DrawHud(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
-                            std::string& error) {
-    if (!hudReady_ || !rtv) { error = "status card overlay not ready"; return false; }
+void D3D11Renderer::BindOverlay(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
+                                const Shader& s) {
     const float factor[4] = { 0, 0, 0, 0 };
     D3D11_VIEWPORT vp{ 0.f, 0.f, (float)w, (float)h, 0.f, 1.f };
     ctx->OMSetRenderTargets(1, &rtv, nullptr);
@@ -409,10 +421,10 @@ bool D3D11Renderer::DrawHud(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rt
     ctx->IASetVertexBuffers(0, 0, nullptr, nullptr, nullptr);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    ctx->VSSetShader(hud_.vs(), nullptr, 0);
+    ctx->VSSetShader(s.vs(), nullptr, 0);
     ctx->VSSetConstantBuffers(0, 1, frameCb_.GetAddressOf());
     ctx->VSSetConstantBuffers(2, 1, statsCb_.GetAddressOf());
-    ctx->PSSetShader(hud_.ps(), nullptr, 0);
+    ctx->PSSetShader(s.ps(), nullptr, 0);
     ctx->PSSetConstantBuffers(0, 1, frameCb_.GetAddressOf());
     ctx->PSSetConstantBuffers(2, 1, statsCb_.GetAddressOf());
     // Slot 0 stays empty so the atlas lands on t1, where Glyphs.hlsl declares it.
@@ -420,10 +432,32 @@ bool D3D11Renderer::DrawHud(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rt
     ctx->PSSetShaderResources(0, 2, srvs);
     ID3D11SamplerState* samplers[2] = { wrap_.Get(), wrap_.Get() };
     ctx->PSSetSamplers(0, 2, samplers);
+}
+
+// b0 and b2 already hold this frame's values, uploaded by the wallpaper pass that precedes this
+// one, so the overlay binds and draws and never touches a constant buffer - which is also why it
+// has no Params of its own: paramCb_ is one shared slot resized by byte count, and a second pass
+// with a different size would reallocate it every frame of every monitor.
+bool D3D11Renderer::DrawHud(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
+                            std::string& error) {
+    if (!hudReady_ || !rtv) { error = "status card overlay not ready"; return false; }
+    BindOverlay(ctx, rtv, w, h, hud_);
     ctx->Draw(3, 0);
 
     // Unbind, so the next wallpaper's pass cannot read the overlay's atlas through a slot it thinks
     // is still its own - Pass() only ever sets the slots it counts.
+    ID3D11ShaderResourceView* none[2] = { nullptr, nullptr };
+    ctx->PSSetShaderResources(0, 2, none);
+    ctx->PSSetShader(nullptr, nullptr, 0);
+    ctx->VSSetShader(nullptr, nullptr, 0);
+    return true;
+}
+
+bool D3D11Renderer::DrawChart(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
+                              std::string& error) {
+    if (!chartReady_ || !rtv) { error = "chart overlay not ready"; return false; }
+    BindOverlay(ctx, rtv, w, h, chart_);
+    ctx->Draw(3, 0);
     ID3D11ShaderResourceView* none[2] = { nullptr, nullptr };
     ctx->PSSetShaderResources(0, 2, none);
     ctx->PSSetShader(nullptr, nullptr, 0);

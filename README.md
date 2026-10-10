@@ -50,6 +50,15 @@ WallpaperRenderer.exe --ctl hudframe notch       卡片边框样式：notch|base
 WallpaperRenderer.exe --ctl huddrag on           卡片上盖一个虚线框，按住就能在桌面上拖；松手即生效并自动关掉
 WallpaperRenderer.exe --ctl hudmove 0.42 0.31    直接把卡片放到那里（单位：屏幕高，从这块屏左上角量）
 WallpaperRenderer.exe --ctl hudhome              取消拖动的位置，回到上面 hudpos 指定的那个角
+WallpaperRenderer.exe --ctl chart on | off         图表面板：第二块叠加层，独立于状态卡
+                                                 四条 = CPU占用 / GPU占用 / 内存占用 / 硬盘温度
+                                                 （温度只有 NVMe 答得上，答不上那一格不画）
+WallpaperRenderer.exe --ctl charttype bar          图表类型：bar 柱状 | donut 环形 | line 折线
+WallpaperRenderer.exe --ctl chartpos bottom-right  面板放哪个角（同 hudpos 的四个名字）
+WallpaperRenderer.exe --ctl chartscale 120         面板大小（60..250）
+WallpaperRenderer.exe --ctl chartframe notch       面板边框样式（同 hudframe 的六种）
+WallpaperRenderer.exe --ctl chartdrag on           虚线框出现，按住可拖；松手即生效并自动关闭
+WallpaperRenderer.exe --ctl chartmove 1.3 0.4      直接把面板放到那里；charthome 取消
 WallpaperRenderer.exe --ctl addimage "D:\pics\a.jpg"   把一张图片变成壁纸包
 ```
 

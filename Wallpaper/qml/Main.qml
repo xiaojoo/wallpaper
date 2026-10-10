@@ -368,6 +368,7 @@ ApplicationWindow {
         { key: "power", icon: "bolt", label: "tab_power" },
         { key: "wallpapers", icon: "layers", label: "wallpapers" },
         { key: "tools", icon: "tools", label: "tab_tools" },
+        { key: "chart", icon: "motion", label: "chart_tab" },
         { key: "renderer", icon: "cpu", label: "renderer" }
     ]
 
@@ -406,6 +407,24 @@ ApplicationWindow {
     // and one translation row, not a new list here.
     // The border styles, named by what distinguishes them. Same shape as fitItems: the value is
     // what goes on the pipe and into config.json, the label is looked up by prefix.
+    readonly property var chartTypeItems: {
+        const out = []
+        for (let i = 0; i < Bridge.chartTypeLevels.length; ++i) {
+            const t = Bridge.chartTypeLevels[i]
+            out.push({ value: t, label: trs("chart_type_" + t) })
+        }
+        return out
+    }
+
+    readonly property var chartCornerItems: {
+        const out = []
+        for (let i = 0; i < Bridge.chartCornerLevels.length; ++i) {
+            const c = Bridge.chartCornerLevels[i]
+            out.push({ value: c, label: trs("hud_corner_" + c.replace("-", "_")) })
+        }
+        return out
+    }
+
     readonly property var hudFrameItems: {
         const _lang = Bridge.lang
         const out = []
@@ -1891,6 +1910,159 @@ ApplicationWindow {
                             }
                         }
 
+                    }
+
+                    // ---------------------------------------------------------- 图表
+                    // A second overlay panel rather than more rows on the status card: a ring wants a
+                    // square and a history wants width, and switching this on must not move anything
+                    // the user positioned on the card. Same drag and position machinery, its own
+                    // settings, because the two panels sit in different corners by design.
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        visible: root.settingsTab === "chart"
+                        spacing: 14
+
+                        Group {
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("chart_panel")
+                                    color: th.text; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Slide {
+                                    checked: Bridge.chart
+                                    enabled: Bridge.connected
+                                    onToggled: function (on) { Bridge.setChart(on) }
+                                }
+                            }
+                            Text {
+                                text: trs("chart_desc")
+                                wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                            }
+                            RowLayout {
+                                visible: Bridge.chart
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("chart_type")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Text {
+                                    // The line is the only type that needs history, and saying so here
+                                    // is cheaper than letting a four-point line look broken.
+                                    visible: Bridge.chartType === "line"
+                                    text: Bridge.chartHistory + " / 16"
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                                }
+                                Choice {
+                                    items: root.chartTypeItems
+                                    value: Bridge.chartType
+                                    enabled: Bridge.connected
+                                    onPicked: function (v) { Bridge.setChartType(v) }
+                                }
+                            }
+                            RowLayout {
+                                visible: Bridge.chart
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("chart_corner")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                RowLayout {
+                                    visible: Bridge.chartCustom
+                                    spacing: 8
+                                    Text {
+                                        text: trs("chart_corner_custom")
+                                        color: th.text; font.family: root.fontFamily
+                                        font.pixelSize: 12
+                                    }
+                                    Btn {
+                                        text: trs("chart_corner_reset")
+                                        compact: true
+                                        raised: true
+                                        enabled: Bridge.connected
+                                        onClicked: Bridge.resetChartPos()
+                                    }
+                                }
+                                Choice {
+                                    visible: !Bridge.chartCustom
+                                    items: root.chartCornerItems
+                                    value: Bridge.chartCorner
+                                    enabled: Bridge.connected
+                                    onPicked: function (v) { Bridge.setChartCorner(v) }
+                                }
+                            }
+                            RowLayout {
+                                visible: Bridge.chart
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("chart_size")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Range {
+                                    label: trs("chart_size")
+                                    from: 60
+                                    to: 250
+                                    value: Bridge.chartScale
+                                    enabled: Bridge.connected
+                                    onCommitted: function (v) { Bridge.setChartScale(v) }
+                                }
+                            }
+                            RowLayout {
+                                visible: Bridge.chart
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("chart_frame")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Choice {
+                                    items: root.hudFrameItems
+                                    value: Bridge.chartFrame
+                                    enabled: Bridge.connected
+                                    onPicked: function (v) { Bridge.setChartFrame(v) }
+                                }
+                            }
+                            RowLayout {
+                                visible: Bridge.chart
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("chart_drag")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Slide {
+                                    checked: Bridge.chartDrag
+                                    enabled: Bridge.connected
+                                    onToggled: function (on) { Bridge.setChartDrag(on) }
+                                }
+                            }
+                            Text {
+                                visible: Bridge.chart
+                                text: trs("chart_drag_desc")
+                                wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                            }
+                            ColumnLayout {
+                                visible: Bridge.chart && !Bridge.chartReady
+                                Layout.fillWidth: true
+                                spacing: 2
+                                Text {
+                                    text: trs("chart_unavailable")
+                                    color: th.warn; font.family: root.fontFamily; font.pixelSize: 11
+                                }
+                            }
+                        }
                     }
 
                     // ---------------------------------------------------------- 显示器

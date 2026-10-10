@@ -145,6 +145,29 @@ const Entry kStrings[] = {
      "drop the card there and the frame goes away by itself."},
     {"hud_corner_custom", "自定义（已拖动）", "Custom (dragged)"},
     {"hud_corner_reset", "回到角落", "Back to corner"},
+    {"chart_tab", "图表", "Charts"},
+    {"chart_panel", "图表面板", "Chart panel"},
+    {"chart_desc", "把三个温度画成图形：显卡、硬盘、主板热区，独立于资源状态卡，位置和大小各调各的。"
+                   "CPU 和内存的温度这台机答不上（要第三方内核驱动），所以不画；主板热区是机箱传感器，"
+                   "不冒充 CPU。硬盘温度只有 NVMe 答得上，SATA 或 USB 盘上那一格空着。",
+     "Draws three temperatures as a graphic - GPU, drive and the motherboard's ACPI thermal zone - "
+     "separate from the status card, with its own position and size. This machine answers neither a "
+     "CPU-die nor a DIMM temperature without a third-party kernel driver, so those are not drawn; the "
+     "thermal zone is a chassis sensor and is not labelled CPU. Only NVMe drives report a temperature."},
+    {"chart_type", "图表类型", "Chart type"},
+    {"chart_type_bar", "柱状", "Bars"},
+    {"chart_type_donut", "环形", "Rings"},
+    {"chart_type_line", "折线", "Line"},
+    {"chart_corner", "面板位置", "Panel position"},
+    {"chart_size", "面板大小", "Panel size"},
+    {"chart_frame", "边框样式", "Border style"},
+    {"chart_drag", "允许拖动", "Allow dragging"},
+    {"chart_drag_desc", "打开后面板外面会出现一个虚线框，按住它拖到想要的位置，松手即生效并自动关闭。",
+     "Turn this on and a dashed frame appears over the panel: drag it wherever you want, release to "
+     "drop it there and the frame goes away by itself."},
+    {"chart_corner_custom", "自定义（已拖动）", "Custom (dragged)"},
+    {"chart_corner_reset", "回到角落", "Back to corner"},
+    {"chart_unavailable", "图表面板不可用", "Chart panel unavailable"},
     {"hud_unavailable", "状态卡不可用", "Status card unavailable"},
     {"hud_off_hint", "引擎没能准备这张卡，原因见下。",
      "The renderer could not prepare it; the reason follows."},
@@ -333,6 +356,12 @@ QStringList Bridge::hudCornerLevels() const { return {"top-right", "top-left", "
 // Same order as HudFrameName() in the renderer. The two lists are the one place this
 // window has to agree with a shader about what a number means, so they are named, not
 // indexed - a picker showing "3" tells nobody what it draws.
+QStringList Bridge::chartTypeLevels() const { return {"bar", "donut", "line"}; }
+
+QStringList Bridge::chartCornerLevels() const {
+    return {"top-right", "top-left", "bottom-right", "bottom-left"};
+}
+
 QStringList Bridge::hudFrameLevels() const {
     return {"notch", "basetab", "ticks", "topbar", "band", "split"};
 }
@@ -471,6 +500,15 @@ void Bridge::ingest(const Json& status, const Json& list) {
     hudScale_ = status.intOr("hud_scale", 100);
     hudFrame_ = QString::fromStdString(status.strOr("hud_frame", "notch"));
     hudDrag_ = status.boolOr("hud_drag");
+    chart_ = status.boolOr("chart");
+    chartReady_ = status.boolOr("chart_ready");
+    chartType_ = QString::fromStdString(status.strOr("chart_type", "bar"));
+    chartCorner_ = QString::fromStdString(status.strOr("chart_corner", "bottom-left"));
+    chartScale_ = status.intOr("chart_scale", 100);
+    chartFrame_ = QString::fromStdString(status.strOr("chart_frame", "notch"));
+    chartDrag_ = status.boolOr("chart_drag");
+    chartHistory_ = status.intOr("chart_history", 0);
+    if (const Json* p = status.find("chart_pos"); p) chartCustom_ = p->isArray();
     // null while the card sits on a corner preset, [x, y] once it has been dragged.
     if (const Json* p = status.find("hud_pos"); p) hudCustom_ = p->isArray();
     if (const Json* p = status.find("process"); p && p->isObject()) {
@@ -755,6 +793,57 @@ void Bridge::resetHudPos() {
     Json out;
     request(R"({"cmd":"hudhome"})", 1500, &out);
     hudCustom_ = false;
+    emit stateChanged();
+    refresh();
+}
+
+// The chart panel's setters mirror the card's: every one goes through the renderer, echoes nothing it
+// cannot read back, and calls refresh() because the pipe only answers "queued".
+void Bridge::setChart(bool on) {
+    Json out;
+    request(std::format(R"({{"cmd":"chart","arg":"{}"}})", on ? "on" : "off").c_str(), 1500, &out);
+    refresh();
+}
+
+void Bridge::setChartType(const QString& t) {
+    Json out;
+    request(std::format(R"({{"cmd":"charttype","arg":"{}"}})", t.toStdString()).c_str(), 1500, &out);
+    refresh();
+}
+
+void Bridge::setChartCorner(const QString& corner) {
+    Json out;
+    request(std::format(R"({{"cmd":"chartpos","arg":"{}"}})", corner.toStdString()).c_str(), 1500, &out);
+    refresh();
+}
+
+void Bridge::setChartScale(int pct) {
+    Json out;
+    request(std::format(R"({{"cmd":"chartscale","arg":"{}"}})", pct).c_str(), 1500, &out);
+    refresh();
+}
+
+void Bridge::setChartFrame(const QString& style) {
+    Json out;
+    request(std::format(R"({{"cmd":"chartframe","arg":"{}"}})", style.toStdString()).c_str(),
+            1500, &out);
+    refresh();
+}
+
+void Bridge::setChartDrag(bool on) {
+    Json out;
+    request(std::format(R"({{"cmd":"chartdrag","arg":"{}"}})", on ? "on" : "off").c_str(), 1500, &out);
+    // Echoed locally because the pipe's answer is only "queued"; the snapshot reads the truth back,
+    // which is what snaps the switch off when the panel is dropped.
+    chartDrag_ = on;
+    emit stateChanged();
+    refresh();
+}
+
+void Bridge::resetChartPos() {
+    Json out;
+    request(R"({"cmd":"charthome"})", 1500, &out);
+    chartCustom_ = false;
     emit stateChanged();
     refresh();
 }

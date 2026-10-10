@@ -35,6 +35,10 @@ private:
     std::vector<LUID> adapterLuid_;
 };
 
+// How far back the chart panel's history reaches, in one-second samples. A multiple of four so the
+// series is a whole number of float4 rows in the constant buffer.
+constexpr int kChartSamples = 16;
+
 // The per-frame constants every wallpaper shader sees (cbuffer "Frame", register b0).
 struct FrameCB {
     float time = 0.f, delta = 0.f, frame = 0.f, targetFps = 0.f;
@@ -58,6 +62,11 @@ struct FrameCB {
     float hudX = 0.f, hudY = 0.f, hudW = 0.f, hudH = 0.f;
     // uHud2: x = which of Shaders/HudFrames.hlsl's measured borders draws the frame.
     float hudFrame = 0.f, hudPad0 = 0.f, hudPad1 = 0.f, hudPad2 = 0.f;
+    // uChart / uChart2: the chart panel, which is the same arrangement one step over - its own
+    // rectangle resolved by the engine for the same reasons, and its own border style. `chartType`
+    // is 1 bar, 2 donut, 3 line; 0 means the panel is off and nothing is drawn.
+    float chartX = 0.f, chartY = 0.f, chartW = 0.f, chartH = 0.f;
+    float chartType = 0.f, chartFrame = 0.f, chartPad1 = 0.f, chartPad2 = 0.f;
 };
 static_assert(sizeof(FrameCB) % 16 == 0, "FrameCB must be 16-byte aligned");
 
@@ -90,6 +99,17 @@ struct StatsCB {
     float net[4];      // recv B/s, send B/s, unused, unused
     float meta[4];     // validity bitmask, age of this sample s, logical core count, unused
     float core[32];    // per logical core %, -1 at and past meta.z
+    // The last kChartSamples seconds of the four readouts the panels show, oldest first, and -1 in
+    // the slots that have not been sampled yet - which is how a chart knows to leave them undrawn
+    // instead of plotting a run of zeros for a minute it never measured. It rides here rather than in a
+    // buffer of its own because the overlay pass already binds b2, and a second constant buffer for the
+    // overlay would be a second upload slot every frame.
+    // Layout: [sample * 4 + metric], metrics in card order: cpu, memory, disk, gpu. One row of four
+    // per sample because the shader reads them as float4 - a scalar array would cost each element its
+    // own 16-byte register on that side and the two would silently disagree. See uCore4 there.
+    float series[4 * kChartSamples];
+    float disk3[4];    // temp C, warning C, critical C, sensor count - all -1 when the drive says no
+    float temp[4];     // the chart panel's marks: gpu C, drive C, motherboard thermal zone C, unused
 
     StatsCB() {
         // Same reason MachineStats does this: a zero-initialised constant buffer reads as an idle

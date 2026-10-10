@@ -104,7 +104,19 @@ public:
 
     bool hudReady() const { return hudReady_; }
 
+    // The chart panel: the same overlay machinery, a second shader, and its own rectangle in the same
+    // constant buffer. Compiled by InitHud alongside the card, so one missing file fails both and
+    // says which.
+    bool chartReady() const { return chartReady_; }
+    bool DrawChart(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
+                   std::string& error);
+
 private:
+    // The state both overlay passes need and neither changes: the same blend, viewport and b0/b2
+    // bindings, so the second pass is a shader and a draw rather than a second copy of that block.
+    void BindOverlay(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
+                     const Shader& s);
+    // The overlay's own compiled pair, and the glyph atlas they read.
     // The fullscreen triangle the wallpaper's PS runs over.
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, const DrawArgs& args,
               std::string& error);
@@ -131,8 +143,10 @@ private:
     Com<ID3D11DepthStencilState> noDepth_;
     Com<ID3D11SamplerState> wrap_, clamp_;
     Shader hud_;
+    Shader chart_;
     Com<ID3D11ShaderResourceView> glyphs_;
     bool hudReady_ = false;
+    bool chartReady_ = false;
 };
 
 } // namespace sw

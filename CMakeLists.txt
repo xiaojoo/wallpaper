@@ -35,6 +35,7 @@ add_executable(WallpaperRenderer WIN32
   Engine/App/Application.cpp
   Engine/App/GpuMonitor.cpp
   Engine/System/MachineMetrics.cpp
+  Engine/System/DiskTemp.cpp
   Engine/App/Tray.cpp
   Engine/App/IPCServer.cpp
   Engine/App/IPCClient.cpp

@@ -15,6 +15,8 @@ cbuffer Frame : register(b0) {
                     // top-left: x, y, width, height. The engine resolves it, not the card: only the
                     // engine knows this monitor, its taskbar strip, and where the user dragged to.
     float4 uHud2;   // x: which of the measured borders draws the frame
+    float4 uChart;  // the chart panel's rectangle, same units as uHud
+    float4 uChart2;  // x: 1 bar, 2 donut, 3 line, 0 off. y: which border draws its frame
 // uHud and uHud2 belong to the engine's own overlay pass, not to packages. A wallpaper that reads them
 // gets nothing useful: they are where the HUD is going to be drawn over it, in screen heights.
 // The card's margins are not here either - they are part of the card's own design, measured off the
@@ -51,8 +53,38 @@ cbuffer Stats : register(b2) {
     float4 uDisk2;   // x: free GB, y: total GB, z: process count, w: uptime s
     float4 uNet;     // x: recv B/s, y: send B/s, zw: unused
     float4 uMeta;    // x: kStat bitmask, y: age of this sample in s, z: logical core count, w: unused
-    float  uCore[32];// per logical core %, -1 at and past uMeta.z
+    // Per logical core %, -1 at and past uMeta.z, four cores to a register.
+    //
+    // It has to be declared as float4 rows rather than `float uCore[32]`: fxc gives every element of a
+    // scalar array its own 16-byte register (a probe with `float a[32]` reflects Size 500, not 128),
+    // while the C++ StatsCB packs them four to a register. Declared as a scalar array, `uCore[9]` read
+    // byte 272 of a buffer whose ninth core sits at byte 164 - the wallpaper's per-core bars were
+    // showing cores 0,4,8,... and running off the end of the array.
+    float4 uCore4[8];
+    // The last 16 seconds of the chart panel's four marks, one sample per row: x cpu %, y gpu %,
+    // z drive temperature C, w gpu %. -1 means "never sampled yet" or "this drive does not answer",
+    // so four seconds after the engine starts a panel has four points and twelve absences rather than a
+    // flat zero claiming an idle machine.
+    //
+    // This order is the chart's, not the card's (cpu / memory / disk / gpu): the card shows disk space
+    // and the chart shows drive temperature, so sharing one order across both would make one of the two
+    // wrong somewhere. The chart's own labels are what identify its marks.
+    float4 uSeries[16];
+    float4 uDisk3;   // x: drive temp C, y: its warning C, z: its critical C, w: sensor count; -1 = no answer
+    float4 uTemp;    // the chart panel's three marks: x gpu C, y drive C, z motherboard zone C, w unused
 };
+
+// One logical core's %, by index 0..31. See uCore4 for why this is a function.
+float StatCore(int i) {
+    float4 r = uCore4[i >> 2];
+    return (i & 3) == 0 ? r.x : (i & 3) == 1 ? r.y : (i & 3) == 2 ? r.z : r.w;
+}
+
+// One metric's history sample, metrics in card order: 0 cpu, 1 memory, 2 disk, 3 gpu.
+float StatSeries(int m, int i) {
+    float4 r = uSeries[i];
+    return m == 0 ? r.x : m == 1 ? r.y : m == 2 ? r.z : r.w;
+}
 
 // Bits of uFlags.x, matching MachineStats::Valid.
 #define kStatCpu      (1u << 0u)
