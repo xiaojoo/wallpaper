@@ -191,9 +191,10 @@ bool WallpaperInstance::Prepare(const std::wstring& rootDir, const WallpaperPack
     return true;
 }
 
-DrawArgs WallpaperInstance::MakeArgs(const FrameCB& frame, ID3D11DeviceContext* ctx) {
+DrawArgs WallpaperInstance::MakeArgs(const FrameCB& frame, ID3D11DeviceContext* ctx, const StatsCB& stats) {
     DrawArgs a;
     a.frame = frame;
+    a.stats = stats;
     a.vs = shader_.vs();
     a.ps = shader_.ps();
     if (video_ && ctx) {
@@ -209,7 +210,7 @@ DrawArgs WallpaperInstance::MakeArgs(const FrameCB& frame, ID3D11DeviceContext* 
     for (UINT i = 0; i < srvCount_; ++i) a.srvs[i] = srvs_[i];
     a.params = paramStore_.data();
     a.paramBytes = shader_.paramBytes();
-    a.additive = pkg_.additiveBlend();
+    a.blend = pkg_.additiveBlend() ? DrawArgs::Blend::Additive : DrawArgs::Blend::Opaque;
     if (pkg_.hasParticles()) {
         a.cs = shader_.cs();
         a.uav = particles_.uav();

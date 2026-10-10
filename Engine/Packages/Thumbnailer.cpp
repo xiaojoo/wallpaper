@@ -55,6 +55,7 @@ bool Thumbnailer::Grab(D3D11Device& dev, D3D11Renderer& rend, WallpaperInstance&
     }
 
     FrameCB f{};
+    FillWallClock(f);   // the strip shows the same hour the desktop would, not a frozen one
     f.time = (float)seconds;
     // A stateful shader (snowfall integrates p.pos += vel * dt in its compute pass) advances by
     // this per grab, not by f.time, so the strip has to be stepped with its own spacing or the

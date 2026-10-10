@@ -367,6 +367,7 @@ ApplicationWindow {
         { key: "monitors", icon: "monitor", label: "monitors" },
         { key: "power", icon: "bolt", label: "tab_power" },
         { key: "wallpapers", icon: "layers", label: "wallpapers" },
+        { key: "tools", icon: "tools", label: "tab_tools" },
         { key: "renderer", icon: "cpu", label: "renderer" }
     ]
 
@@ -400,7 +401,36 @@ ApplicationWindow {
         }
         return out
     }
+    // The corners the engine's status card can sit in. Same shape as fitItems: the value is what
+    // goes on the pipe, the label is looked up by prefix so adding a corner is one Bridge string
+    // and one translation row, not a new list here.
+    // The border styles, named by what distinguishes them. Same shape as fitItems: the value is
+    // what goes on the pipe and into config.json, the label is looked up by prefix.
+    readonly property var hudFrameItems: {
+        const _lang = Bridge.lang
+        const out = []
+        for (let i = 0; i < Bridge.hudFrameLevels.length; ++i) {
+            const f = Bridge.hudFrameLevels[i]
+            out.push({ value: f, label: trs("hud_frame_" + f) })
+        }
+        return out
+    }
+
+    readonly property var hudCornerItems: {
+
+        const _lang = Bridge.lang
+        const out = []
+        for (let i = 0; i < Bridge.hudCornerLevels.length; ++i) {
+            const c = Bridge.hudCornerLevels[i]
+            // The value carries a hyphen ("top-right") because that is what goes on the pipe
+            // and into config.json; the translation table keys everything with underscores.
+            out.push({ value: c, label: trs("hud_corner_" + c.replace("-", "_")) })
+        }
+        return out
+    }
+
     readonly property var transitionItems: {
+
         const _lang = Bridge.lang
         const out = []
         for (let i = 0; i < Bridge.transitionLevels.length; ++i) {
@@ -1718,6 +1748,151 @@ ApplicationWindow {
 
                     }
 
+                    // ---------------------------------------------------------- 工具
+                    // Things the renderer can put on the desktop that are not a wallpaper. The
+                    // status card is the first; anything else that overlays the desktop belongs
+                    // here rather than in 通用, which is about how the wallpapers themselves run.
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        visible: root.settingsTab === "tools"
+                        spacing: 14
+
+                        // The status card. It is the engine drawing it over the desktop, not this
+                        // window drawing it here, so every row is gated on the pipe and every value
+                        // is read back out of the snapshot rather than remembered locally.
+                        Group {
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("hud_card")
+                                    color: th.text; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Slide {
+                                    checked: Bridge.hud
+                                    enabled: Bridge.connected
+                                    onToggled: function (on) { Bridge.setHud(on) }
+                                }
+                            }
+                            Text {
+                                text: trs("hud_desc")
+                                wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                            }
+                            RowLayout {
+                                visible: Bridge.hud
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("hud_corner")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                // Once the card has been dragged no corner names it any more, and
+                                // showing four presets as if one were still in force would be a
+                                // read-out that lies. The way back is this button, not a fifth
+                                // option that would have nothing to do when picked.
+                                RowLayout {
+                                    visible: Bridge.hudCustom
+                                    spacing: 8
+                                    Text {
+                                        text: trs("hud_corner_custom")
+                                        color: th.text; font.family: root.fontFamily
+                                        font.pixelSize: 12
+                                    }
+                                    Btn {
+                                        text: trs("hud_corner_reset")
+                                        compact: true
+                                        raised: true
+                                        enabled: Bridge.connected
+                                        onClicked: Bridge.resetHudPos()
+                                    }
+                                }
+                                Choice {
+                                    visible: !Bridge.hudCustom
+                                    items: root.hudCornerItems
+                                    value: Bridge.hudCorner
+                                    enabled: Bridge.connected
+                                    onPicked: function (v) { Bridge.setHudCorner(v) }
+                                }
+                            }
+                            RowLayout {
+                                visible: Bridge.hud
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("hud_size")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Range {
+                                    label: trs("hud_size")
+                                    from: 60
+                                    to: 250
+                                    value: Bridge.hudScale
+                                    enabled: Bridge.connected
+                                    onCommitted: function (v) { Bridge.setHudScale(v) }
+                                }
+                            }
+                            RowLayout {
+                                visible: Bridge.hud
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("hud_frame")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Choice {
+                                    items: root.hudFrameItems
+                                    value: Bridge.hudFrame
+                                    enabled: Bridge.connected
+                                    onPicked: function (v) { Bridge.setHudFrame(v) }
+                                }
+                            }
+                            RowLayout {
+                                visible: Bridge.hud
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("hud_drag")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Slide {
+                                    checked: Bridge.hudDrag
+                                    enabled: Bridge.connected
+                                    onToggled: function (on) { Bridge.setHudDrag(on) }
+                                }
+                            }
+                            Text {
+                                visible: Bridge.hud
+                                text: trs("hud_drag_desc")
+                                wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                            }
+
+                            // Only reachable when the card is on and the engine could not prepare
+                            // it - which is exactly the state a switch alone cannot report.
+                            ColumnLayout {
+                                visible: Bridge.hud && !Bridge.hudReady
+                                Layout.fillWidth: true
+                                spacing: 2
+                                Text {
+                                    text: trs("hud_unavailable")
+                                    color: th.warn; font.family: root.fontFamily; font.pixelSize: 11
+                                }
+                                Text {
+                                    text: Bridge.hudError
+                                    wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                                }
+                            }
+                        }
+
+                    }
+
                     // ---------------------------------------------------------- 显示器
                     ColumnLayout {
                         Layout.fillWidth: true
@@ -2453,7 +2628,21 @@ ApplicationWindow {
                 }
                 c.stroke()
                 break
+            case "tools":
+                // A wrench. 通用 already owns the gear, and two gears in one rail would be one
+                // shape meaning two different things.
+                c.beginPath()
+                c.moveTo(13.4, 10.6); c.lineTo(18.6, 5.4)
+                c.arc(19.7, 4.3, 1.7, 0.785, 4.0); c.stroke()
+                c.beginPath()
+                c.moveTo(12.2, 9.4); c.lineTo(15.8, 13.0); c.stroke()
+                c.beginPath()
+                c.moveTo(12.6, 11.4); c.lineTo(6.2, 17.8)
+                c.arc(5.1, 18.9, 1.6, -0.785, 2.36); c.stroke()
+                break
+
             case "close":
+
                 c.beginPath(); c.moveTo(5.4, 5.4); c.lineTo(18.6, 18.6)
                 c.moveTo(18.6, 5.4); c.lineTo(5.4, 18.6); c.stroke()
                 break
@@ -2768,6 +2957,10 @@ ApplicationWindow {
         id: rng
         property int from: 0
         property int to: 100
+        // What this slider is, for a screen reader. The component used to say
+        // "taskbar transparency" unconditionally, which was true only while it had
+        // one user; a second Range would have announced itself as the first one's.
+        property string label: trs("tray_alpha")
         property int value: 0            // what the renderer holds
         property int held: -1            // what the pointer is on, only read while it is down
         readonly property int shown: trackHover.pressed ? (held >= 0 ? held : value) : value
@@ -2842,7 +3035,7 @@ ApplicationWindow {
             }
         }
         Accessible.role: Accessible.Slider
-        Accessible.name: trs("tray_alpha")
+        Accessible.name: rng.label
     }
 
     // Anything with more than two options is one field with a list under it, not a row of chips.

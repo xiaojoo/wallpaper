@@ -105,6 +105,7 @@ const Entry kStrings[] = {
     {"wallpapers", "壁纸", "Wallpapers"},
     {"tab_general", "通用", "General"},
     {"tab_power", "省电", "Power saving"},
+    {"tab_tools", "工具", "Tools"},
     {"current", "正在显示", "showing"},
     {"resolution", "分辨率", "Resolution"},
     {"refresh", "刷新率", "Refresh"},
@@ -122,7 +123,33 @@ const Entry kStrings[] = {
     {"fit_stretch", "拉伸", "Stretch"},
     {"fit_center", "居中", "Center"},
     {"fit_tile", "平铺", "Tile"},
+    {"hud_card", "资源状态卡", "Status card"},
+    {"hud_desc", "把这台机器的 CPU / 内存 / 磁盘 / GPU 实时读数画在壁纸上，任何壁纸都适用。",
+     "Draws this machine's live CPU / memory / disk / GPU readout over the wallpaper, whatever it is."},
+    {"hud_corner", "卡片位置", "Card position"},
+    {"hud_corner_top_right", "右上", "Top right"},
+    {"hud_corner_top_left", "左上", "Top left"},
+    {"hud_corner_bottom_right", "右下", "Bottom right"},
+    {"hud_corner_bottom_left", "左下", "Bottom left"},
+    {"hud_size", "卡片大小", "Card size"},
+    {"hud_frame", "边框样式", "Border style"},
+    {"hud_frame_notch", "凹口重边", "Notch and heavy edge"},
+    {"hud_frame_basetab", "底托上条", "Base tab"},
+    {"hud_frame_ticks", "两端刻度", "Ticks at both ends"},
+    {"hud_frame_topbar", "顶栏厚边", "Top bar"},
+    {"hud_frame_band", "右上厚带", "Upper-right band"},
+    {"hud_frame_split", "双层标题栏", "Split header"},
+    {"hud_drag", "允许拖动", "Allow dragging"},
+    {"hud_drag_desc", "打开后卡片外面会出现一个虚线框，按住它拖到想要的位置，松手即生效并自动关闭。",
+     "Turn this on and a dashed frame appears over the card: drag it wherever you want, release to "
+     "drop the card there and the frame goes away by itself."},
+    {"hud_corner_custom", "自定义（已拖动）", "Custom (dragged)"},
+    {"hud_corner_reset", "回到角落", "Back to corner"},
+    {"hud_unavailable", "状态卡不可用", "Status card unavailable"},
+    {"hud_off_hint", "引擎没能准备这张卡，原因见下。",
+     "The renderer could not prepare it; the reason follows."},
     {"tray_alpha", "任务栏透明度", "Taskbar transparency"},
+
     {"state", "状态", "State"},
     {"measured", "实测帧率", "Measured"},
     {"effective", "允许帧率", "Allowed"},
@@ -302,6 +329,13 @@ QStringList Bridge::qualityLevels() const {
 // The order is the number the shaders branch on (Contract.hlsl, uPerf.w); adding one here means
 // adding a case in Image.hlsl and an Engine/Packages/WallpaperManager.hpp enum member, in order.
 QStringList Bridge::fitLevels() const { return {"fill", "fit", "stretch", "center", "tile"}; }
+QStringList Bridge::hudCornerLevels() const { return {"top-right", "top-left", "bottom-right", "bottom-left"}; }
+// Same order as HudFrameName() in the renderer. The two lists are the one place this
+// window has to agree with a shader about what a number means, so they are named, not
+// indexed - a picker showing "3" tells nobody what it draws.
+QStringList Bridge::hudFrameLevels() const {
+    return {"notch", "basetab", "ticks", "topbar", "band", "split"};
+}
 
 // The three ways the big preview can change when a different wallpaper is picked. "none" skips
 // the frame capture as well, which is the only setting that makes a switch cost nothing.
@@ -430,6 +464,15 @@ void Bridge::ingest(const Json& status, const Json& list) {
                                 : QStringLiteral("package");
     imageFit_ = QString::fromStdString(status.strOr("image_fit", "fill"));
     trayAlpha_ = status.intOr("tray_alpha", 0);
+    hud_ = status.boolOr("hud");
+    hudReady_ = status.boolOr("hud_ready");
+    hudError_ = QString::fromStdString(status.strOr("hud_error", ""));
+    hudCorner_ = QString::fromStdString(status.strOr("hud_corner", "top-right"));
+    hudScale_ = status.intOr("hud_scale", 100);
+    hudFrame_ = QString::fromStdString(status.strOr("hud_frame", "notch"));
+    hudDrag_ = status.boolOr("hud_drag");
+    // null while the card sits on a corner preset, [x, y] once it has been dragged.
+    if (const Json* p = status.find("hud_pos"); p) hudCustom_ = p->isArray();
     if (const Json* p = status.find("process"); p && p->isObject()) {
         cpu_ = p->numOr("cpu_percent");
         cpuWin_ = p->numOr("cpu_window_s");
@@ -666,7 +709,58 @@ void Bridge::setFit(const QString& mode) {
     refresh();
 }
 
+// All three go through the renderer rather than an ini of this window's own: the card is drawn on
+// the desktop, so the only place its true state lives is the engine. Each one calls refresh() after
+// sending, because the pipe answers "queued" and there is nothing to read out of that reply.
+void Bridge::setHud(bool on) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"hud","arg":"{}"}})", on ? "on" : "off");
+    request(body.c_str(), 1500, &out);
+    refresh();
+}
+
+void Bridge::setHudCorner(const QString& corner) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"hudpos","arg":"{}"}})", corner.toStdString());
+    request(body.c_str(), 1500, &out);
+    refresh();
+}
+
+void Bridge::setHudFrame(const QString& style) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"hudframe","arg":"{}"}})", style.toStdString());
+    request(body.c_str(), 1500, &out);
+    refresh();
+}
+
+void Bridge::setHudScale(int pct) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"hudscale","arg":"{}"}})", pct);
+    request(body.c_str(), 1500, &out);
+    refresh();
+}
+
+void Bridge::setHudDrag(bool on) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"huddrag","arg":"{}"}})", on ? "on" : "off");
+    request(body.c_str(), 1500, &out);
+    // Echoed locally because the pipe's answer is only "queued": waiting for the next snapshot would
+    // leave the switch showing the opposite of the desktop for up to a second after every click.
+    hudDrag_ = on;
+    emit stateChanged();
+    refresh();
+}
+
+void Bridge::resetHudPos() {
+    Json out;
+    request(R"({"cmd":"hudhome"})", 1500, &out);
+    hudCustom_ = false;
+    emit stateChanged();
+    refresh();
+}
+
 void Bridge::setTrayAlpha(int pct) {
+
     Json out;
     const int clamped = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
     request(std::format(R"({{"cmd":"taskbar","arg":"{}"}})", clamped).c_str(), 1500, &out);

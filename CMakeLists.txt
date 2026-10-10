@@ -29,10 +29,12 @@ add_executable(WallpaperRenderer WIN32
   Engine/Desktop/WorkerW.cpp
   Engine/Desktop/TrayTransparency.cpp
   Engine/Desktop/DesktopWindow.cpp
+  Engine/Desktop/HudDragWindow.cpp
   Engine/Performance/FPSController.cpp
   Engine/Performance/PowerManager.cpp
   Engine/App/Application.cpp
   Engine/App/GpuMonitor.cpp
+  Engine/System/MachineMetrics.cpp
   Engine/App/Tray.cpp
   Engine/App/IPCServer.cpp
   Engine/App/IPCClient.cpp

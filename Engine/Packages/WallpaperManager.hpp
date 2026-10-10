@@ -35,9 +35,32 @@ struct Settings {
     ImageFit imageFit = ImageFit::Fill; // how image wallpapers cover the screen
     // 0 = the taskbar keeps Windows' own material; 1..100 = how far past it to fade the bar.
     int trayAlpha = 0;
+    // The engine's own status card, composited over whichever wallpaper is on this monitor. It is a
+    // renderer setting rather than a package one because that is the whole point of it: the readout
+    // describes the machine, and the machine is the same behind a video, a shader or a photograph.
+    bool hud = false;
+    int hudCorner = 0;            // index into HudCornerName(): 0 top-right, 1 top-left,
+                                  // 2 bottom-right, 3 bottom-left
+    // Where the user dragged the card instead. Both are in the same units the card is laid out in -
+    // screen heights from the monitor's top-left, the card's own top-left corner - and both are
+    // negative until a drag happens, because "no free position" has to survive a config that only
+    // ever names a corner.
+    float hudX = -1.f, hudY = -1.f;
+    int hudScalePct = 100;        // the card's height, as a percentage of its reference size
+    int hudFrame = 0;           // which of Shaders/HudFrames.hlsl's shapes draws its border
     std::vector<Assignment> assignments;
     Json power = Json::Object();
 };
+
+// The four corners a card can sit in. Kept as strings in config.json and on the pipe so a hand-edited
+// config reads as "top-left" rather than as a number nobody can guess the meaning of.
+const char* HudCornerName(int index);
+int ParseHudCorner(std::string_view s, int def = 0);
+// The border styles, named by what distinguishes them: a picker that offered "3" would
+// make nobody guess what it draws.
+const char* HudFrameName(int index);
+int ParseHudFrame(std::string_view s, int def = 0);
+int HudFrameCount();
 
 class WallpaperManager {
 public:
@@ -66,6 +89,18 @@ public:
     void SetGlobalQuality(const std::string& q);
     void SetImageFit(const std::string& f);
     void SetTrayAlpha(int pct);
+    void SetHud(bool on);
+    // Returns the corner now in force, so an unrecognised name echoes what the desktop is doing
+    // rather than what was asked for. Choosing a corner also drops a dragged position: the last thing
+    // the user did wins, and a card that is in a corner cannot also be somewhere else.
+    int SetHudCorner(const std::string& name);
+    // Where the user dropped the card, in screen heights from the monitor's top-left. Clamped by the
+    // caller, which is the only place that knows the card's size and this monitor's taskbar strip.
+    void SetHudPos(float x, float y);
+    void ClearHudPos();
+    void SetHudScale(int pct);
+    // Returns the style now in force, so an unrecognised name echoes what is on the screen.
+    int SetHudFrame(const std::string& name);
     void SetGlobalMaxFps(int fps);
     void SetRotate(const Json& r);
 

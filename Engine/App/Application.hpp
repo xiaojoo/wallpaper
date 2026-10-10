@@ -3,7 +3,9 @@
 #include "Engine/App/PreviewStream.hpp"
 #include "Engine/App/GpuMonitor.hpp"
 #include "Engine/App/Tray.hpp"
+#include "Engine/System/MachineMetrics.hpp"
 #include "Engine/Desktop/DesktopWindow.hpp"
+#include "Engine/Desktop/HudDragWindow.hpp"
 #include "Engine/Desktop/MonitorManager.hpp"
 #include "Engine/Desktop/TrayTransparency.hpp"
 #include "Engine/Desktop/WorkerW.hpp"
@@ -190,6 +192,15 @@ private:
     void StopPreview(const char* why);
     void DrawPreview(double nowSeconds);
     void TickRotation(ULONGLONG nowMs);
+    // Where the status card sits on one monitor, in its own units: screen heights from the monitor's
+    // top-left, as x, y, width, height. One function decides it for both the shader and the drag
+    // window, so the outline the user grabs cannot drift off the card it is standing in for.
+    void HudRectFor(const MonitorInfo& m, float& x, float& y, float& w, float& h) const;
+    // The same rectangle in desktop pixels, for placing the drag window.
+    RECT HudScreenRect(const MonitorInfo& m) const;
+    // Turns the draggable layer on and off. Turning it on with the card hidden would leave a click
+    // target over a desktop with nothing in it, so this refuses unless the overlay is showing.
+    bool ArmHudDrag(bool on, std::string& error);
     // Moves the rotation pointer by delta and shows the result. Returns the id that got on screen.
     std::string RotateStep(int delta);
     static bool IsAutostartEnabled(std::string& error);
@@ -213,6 +224,18 @@ private:
     // The status line's GPU number. A member rather than a per-call load because NVML's init is what
     // enumerates the device; sampling afterwards costs under 0.05 ms.
     GpuMonitor gpu_;
+    // Whole-machine readings, and the last result of each. Sampled on the loop's own one-second tick
+    // rather than from the status builder: PDH's rate counters answer nothing until a window has
+    // passed between two collects, and a builder that is called on demand - which the settings window
+    // is, at whatever rate it feels like - would sometimes read a window that has not elapsed. The
+    // cached copy is also what a wallpaper's per-frame upload reads, so no frame pays for a query.
+    MachineMetrics machine_;
+    MachineStats machineLast_;
+    // The wallpaper-facing copy, rebuilt on the same tick. The draw path reads this rather than
+    // MachineStats so a frame never touches PDH, NVML or iphlpapi.
+    StatsCB statsCB_;
+    GpuUse gpuLast_;
+    ULONGLONG machineAtMs_ = 0;
     std::map<std::string, ThumbSet> thumbs_;
     std::wstring thumbDir_;
 
@@ -248,6 +271,13 @@ private:
     unsigned loopIters_ = 0, sawDrawStage_ = 0, drewTotal_ = 0;
     ULONGLONG spinWindowStart_ = 0;
     std::string lastError_;
+    std::string hudError_;   // why the status card could not be prepared, empty when it can
+    // The monitor whose card is being dragged, or -1. The layer exists only while this is >= 0, which
+    // is why the desktop's own clicks are unaffected the rest of the time.
+    int hudDragMonitor_ = -1;
+    HudDragWindow hudDrag_;
+    RECT hudDragRect_{};   // the rectangle the layer is actually sitting in, so it is only moved
+                           // when the card's own rect changed rather than every frame
 };
 
 } // namespace sw

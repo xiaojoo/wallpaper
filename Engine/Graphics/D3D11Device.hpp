@@ -44,7 +44,64 @@ struct FrameCB {
     // uPerf.w was padding. The image fit mode (ImageFit in WallpaperManager.hpp) travels here so a
     // settings change takes effect on the next frame instead of a slot reload.
     float fpsMeasured = 0.f, renderScale = 1.f, sizeScale = 1.f, fit = 0.f;
+    // uClock: the wall clock. `time` only counts from this wallpaper's start, so a package that
+    // shows the hour had nothing to read - and a burnt-in time can never become the current one.
+    float clockH = 0.f, clockM = 0.f, clockS = 0.f, clockSub = 0.f;
+    // uHud: the status card's own rectangle on this monitor, in screen heights from its top-left
+    // corner. The engine resolves it - not the shader - because it is the only thing that knows this
+    // monitor's size, its taskbar strip and where the user dropped the card, and because the drag
+    // window has to land on the same rectangle the card is drawn into. Like `fit` it travels in b0 so
+    // flipping it in the settings window shows on the next frame rather than needing a slot reload.
+    // A wallpaper never reads any of these: they exist only so the HUD pass can share b0 with the
+    // wallpaper pass instead of owning a second b1, which would fight the package's own parameter
+    // buffer over one shared upload slot.
+    float hudX = 0.f, hudY = 0.f, hudW = 0.f, hudH = 0.f;
+    // uHud2: x = which of Shaders/HudFrames.hlsl's measured borders draws the frame.
+    float hudFrame = 0.f, hudPad0 = 0.f, hudPad1 = 0.f, hudPad2 = 0.f;
 };
 static_assert(sizeof(FrameCB) % 16 == 0, "FrameCB must be 16-byte aligned");
+
+// Once per frame, from every path that draws (desktop slots, live preview, thumbnails). GetLocalTime
+// is served from the shared user-data page rather than a syscall, and it picks up a timezone change
+// or a manual re-set without anyone having to invalidate anything.
+inline void FillWallClock(FrameCB& f) {
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    f.clockH = float(st.wHour);
+    f.clockM = float(st.wMinute);
+    f.clockS = float(st.wSecond);
+    f.clockSub = float(st.wMilliseconds) * 0.001f;
+}
+
+// What this computer is doing, as one constant buffer at register b2. The mirror of the "Stats" block
+// in Shaders/Contract.hlsl: the two layouts have to stay in step field for field, and the order is
+// float4-aligned so the HLSL and the C++ agree without packing attributes.
+//
+// -1 means "no answer", inherited from the rule in GpuMonitor.hpp: on a gauge, zero and unknown look
+// identical, and a wallpaper that draws an unmeasured field as 0 is claiming the machine is idle.
+// uFlags.x carries the validity bitmask as well, so a package can test a whole group at once.
+struct StatsCB {
+    float cpu[4];      // total %, total % from the second instrument, user %, privileged %
+    float memory[4];   // used %, used MB, total MB, commit MB
+    float gpu[4];      // busy %, vram busy %, vram used MB, vram total MB
+    float gpu2[4];     // temp C, power W, SM clock MHz, unused
+    float disk[4];     // read B/s, write B/s, active %, run queue length
+    float disk2[4];    // free GB, total GB, process count, uptime s
+    float net[4];      // recv B/s, send B/s, unused, unused
+    float meta[4];     // validity bitmask, age of this sample s, logical core count, unused
+    float core[32];    // per logical core %, -1 at and past meta.z
+
+    StatsCB() {
+        // Same reason MachineStats does this: a zero-initialised constant buffer reads as an idle
+        // machine, which is the one thing an unmeasured field must never look like.
+        float* p = cpu;
+        for (size_t i = 0; i < sizeof(StatsCB) / sizeof(float); ++i) p[i] = -1.f;
+        // One exception, and it is a trap worth naming: the validity bitmask is carried as a float,
+        // and uint(-1.0) is 0xFFFFFFFF - every group reported valid. An unmeasured buffer must claim
+        // nothing, so the mask starts at zero rather than at -1.
+        meta[0] = 0.f;
+    }
+};
+static_assert(sizeof(StatsCB) % 16 == 0, "StatsCB must be 16-byte aligned");
 
 } // namespace sw

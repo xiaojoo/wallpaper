@@ -10,6 +10,18 @@ cbuffer Frame : register(b0) {
     float4 uMouse;  // xy: cursor in this monitor's pixels, zw: same normalised 0..1
     float4 uScene;  // x: quality 0..4 (battery..ultra), y: DPI scale, z: monitor index, w: monitor count
     float4 uPerf;   // x: measured fps, y: render scale, z: size scale (see below), w: image fit mode
+    float4 uClock;  // x: hour 0..23, y: minute, z: second, w: fraction of the running second
+    float4 uHud;    // the status card's rectangle on this monitor, in screen heights from its
+                    // top-left: x, y, width, height. The engine resolves it, not the card: only the
+                    // engine knows this monitor, its taskbar strip, and where the user dragged to.
+    float4 uHud2;   // x: which of the measured borders draws the frame
+// uHud and uHud2 belong to the engine's own overlay pass, not to packages. A wallpaper that reads them
+// gets nothing useful: they are where the HUD is going to be drawn over it, in screen heights.
+// The card's margins are not here either - they are part of the card's own design, measured off the
+// reference, and only the monitor-specific facts travel from the engine.
+// uClock is the wall clock, not uTime. A wallpaper that shows the time has to read it from here:
+// uTime restarts whenever the slot reloads, so it can only ever show "how long this has been up".
+// w exists so the digit that just changed can flash for a moment instead of swapping silently.
 // uPerf.w is the user's 壁纸铺展 setting, only meaningful to a wallpaper that draws a picture:
 // 0 fill (scale to cover, crop the overflow) 1 fit (whole picture, black bars) 2 stretch (distort to
 // fill) 3 center (native pixels, black around) 4 tile (native pixels, repeated). See Image.hlsl.
@@ -19,6 +31,37 @@ cbuffer Frame : register(b0) {
 // for the picture. The engine puts the surface's fraction of the monitor height here, so pixel
 // extents can scale while parameters keep meaning "pixels on the desktop".
 };
+
+// What this computer is doing, at register b2. The mirror of StatsCB in
+// Engine/Graphics/D3D11Device.hpp - the two have to stay in step field for field.
+//
+// Declared here so every wallpaper can see it, and harmless to the ones that do not: fxc strips an
+// unused cbuffer, so a package that never reads uStats has no b2 slot at all and the engine binding
+// one costs it nothing.
+//
+// Every field is -1 when its source did not answer, never 0. A gauge drawn from an unmeasured field
+// as zero claims the machine is idle, which is a different and much worse lie than a blank panel.
+// Test uFlags.x against the kStat bits below before drawing a group.
+cbuffer Stats : register(b2) {
+    float4 uCpu;     // x: total %, y: total % from the second instrument, z: user %, w: privileged %
+    float4 uMemory;  // x: used %, y: used MB, z: total MB, w: commit MB
+    float4 uGpu;     // x: busy %, y: vram busy %, z: vram used MB, w: vram total MB
+    float4 uGpu2;    // x: temp C, y: power W, z: SM clock MHz, w: unused
+    float4 uDisk;    // x: read B/s, y: write B/s, z: active %, w: run queue length
+    float4 uDisk2;   // x: free GB, y: total GB, z: process count, w: uptime s
+    float4 uNet;     // x: recv B/s, y: send B/s, zw: unused
+    float4 uMeta;    // x: kStat bitmask, y: age of this sample in s, z: logical core count, w: unused
+    float  uCore[32];// per logical core %, -1 at and past uMeta.z
+};
+
+// Bits of uFlags.x, matching MachineStats::Valid.
+#define kStatCpu      (1u << 0u)
+#define kStatCores    (1u << 1u)
+#define kStatMemory   (1u << 2u)
+#define kStatGpu      (1u << 3u)
+#define kStatDisk     (1u << 4u)
+#define kStatNetwork  (1u << 5u)
+#define kStatSystem   (1u << 6u)
 
 float Hash11(float p) {
     p = frac(p * 0.1031);
