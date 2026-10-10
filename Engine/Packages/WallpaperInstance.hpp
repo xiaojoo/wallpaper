@@ -33,7 +33,10 @@ public:
     // Fills the per-frame constants and returns what D3D11Renderer::Draw needs. A video wallpaper
     // pulls its newest decoded frame here, which is immediate-context work, so the context has to
     // come in: this is the one place every drawing path passes through.
-    DrawArgs MakeArgs(const FrameCB& frame, ID3D11DeviceContext* ctx);
+    // `stats` is what the machine is doing, for a package that reads uStats. It defaults to all -1 so a
+    // caller that has no live reading (the thumbnailer) hands a wallpaper an unmeasured machine rather
+    // than an idle one.
+    DrawArgs MakeArgs(const FrameCB& frame, ID3D11DeviceContext* ctx, const StatsCB& stats = {});
 
     UINT paramBytes() const { return shader_.paramBytes(); }
 

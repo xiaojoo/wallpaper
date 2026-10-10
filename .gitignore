@@ -13,3 +13,8 @@ config.json
 .vs/
 *.user
 *.suo
+
+# Probe scratch: captures, offline renders and throwaway measurement scripts. 125 MB of
+# intermediates that no build reads.
+tools/tmp/
+tools/__pycache__/

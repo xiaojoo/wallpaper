@@ -43,6 +43,13 @@ WallpaperRenderer.exe --ctl fps 30 M0            只给这一块屏设上限
 WallpaperRenderer.exe --ctl rotate on | off | interval 30
 WallpaperRenderer.exe --ctl rotate next | prev   手动走一张（走的是 rotate.pool，池空时用全部壁纸）
 WallpaperRenderer.exe --ctl autostart on | off   登录自启（HKCU Run 单值）
+WallpaperRenderer.exe --ctl hud on | off         资源状态卡：引擎画在壁纸之上的那一层
+WallpaperRenderer.exe --ctl hudpos top-right     卡片放哪个角：top-right|top-left|bottom-right|bottom-left
+WallpaperRenderer.exe --ctl hudscale 120         卡片大小（60..250，100 = 参考图的尺寸）
+WallpaperRenderer.exe --ctl hudframe notch       卡片边框样式：notch|basetab|ticks|topbar|band|split
+WallpaperRenderer.exe --ctl huddrag on           卡片上盖一个虚线框，按住就能在桌面上拖；松手即生效并自动关掉
+WallpaperRenderer.exe --ctl hudmove 0.42 0.31    直接把卡片放到那里（单位：屏幕高，从这块屏左上角量）
+WallpaperRenderer.exe --ctl hudhome              取消拖动的位置，回到上面 hudpos 指定的那个角
 WallpaperRenderer.exe --ctl addimage "D:\pics\a.jpg"   把一张图片变成壁纸包
 ```
 

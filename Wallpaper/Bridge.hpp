@@ -29,6 +29,24 @@ class Bridge final : public QObject {
     Q_PROPERTY(QStringList transitionLevels READ transitionLevels CONSTANT)
     Q_PROPERTY(QString transition READ transition WRITE setTransition NOTIFY transitionChanged)
     Q_PROPERTY(int trayAlpha READ trayAlpha NOTIFY stateChanged)
+    // The engine's own status card. `hudReady` is reported apart from `hud` because a card the user
+    // switched on that the renderer could not prepare would otherwise read as working, with nothing
+    // on the screen and no reason why.
+    Q_PROPERTY(bool hud READ hud NOTIFY stateChanged)
+    Q_PROPERTY(bool hudReady READ hudReady NOTIFY stateChanged)
+    Q_PROPERTY(QString hudError READ hudError NOTIFY stateChanged)
+    Q_PROPERTY(QStringList hudCornerLevels READ hudCornerLevels CONSTANT)
+    Q_PROPERTY(QString hudCorner READ hudCorner NOTIFY stateChanged)
+    Q_PROPERTY(int hudScale READ hudScale NOTIFY stateChanged)
+    Q_PROPERTY(QStringList hudFrameLevels READ hudFrameLevels CONSTANT)
+    Q_PROPERTY(QString hudFrame READ hudFrame NOTIFY stateChanged)
+    // Whether the desktop's drag layer is standing over the card. Optimistic on the way in, because
+    // the pipe only answers "queued"; the snapshot reads the truth back, which is what snaps the
+    // switch off again when the card is dropped.
+    Q_PROPERTY(bool hudDrag READ hudDrag NOTIFY stateChanged)
+    // True once the card has been dragged somewhere, which is what makes the position row say
+    // 「自定义」 instead of naming a corner.
+    Q_PROPERTY(bool hudCustom READ hudCustom NOTIFY stateChanged)
     Q_PROPERTY(int maxFps READ maxFps NOTIFY stateChanged)
     Q_PROPERTY(bool paused READ paused NOTIFY stateChanged)
     // Whether the clip in the big preview is frozen. This is the browse page's own transport and is
@@ -83,6 +101,16 @@ public:
     QString transition() const { return transition_; }
     Q_INVOKABLE void setTransition(const QString& mode);
     QString imageFit() const { return imageFit_; }
+    bool hud() const { return hud_; }
+    bool hudReady() const { return hudReady_; }
+    QString hudError() const { return hudError_; }
+    QStringList hudCornerLevels() const;
+    QString hudCorner() const { return hudCorner_; }
+    int hudScale() const { return hudScale_; }
+    QStringList hudFrameLevels() const;
+    QString hudFrame() const { return hudFrame_; }
+    bool hudDrag() const { return hudDrag_; }
+    bool hudCustom() const { return hudCustom_; }
     int trayAlpha() const { return trayAlpha_; }
     int maxFps() const { return maxFps_; }
     bool paused() const { return paused_; }
@@ -129,6 +157,15 @@ public:
     Q_INVOKABLE void setPreviewVideoPaused(bool paused);
     Q_INVOKABLE void setQuality(const QString& level);
     Q_INVOKABLE void setFit(const QString& mode);
+    Q_INVOKABLE void setHud(bool on);
+    Q_INVOKABLE void setHudCorner(const QString& corner);
+    Q_INVOKABLE void setHudScale(int pct);
+    Q_INVOKABLE void setHudFrame(const QString& style);
+    // Arms and disarms the desktop's drag layer. Turning it on is refused while the card is hidden,
+    // so this can also just do nothing - the snapshot then reads the switch back off.
+    Q_INVOKABLE void setHudDrag(bool on);
+    // Puts the card back on its corner preset.
+    Q_INVOKABLE void resetHudPos();
     Q_INVOKABLE void setTrayAlpha(int pct);
     Q_INVOKABLE void setMaxFps(int fps);
     Q_INVOKABLE void setPowerCap(const QString& key, int value);
@@ -205,6 +242,14 @@ private:
     QVariantList monitors_, catalog_, caps_;
     QString quality_, host_, root_, logPath_;
     QString imageFit_ = QStringLiteral("fill");
+    bool hud_ = false;
+    bool hudReady_ = false;
+    QString hudError_;
+    QString hudCorner_ = QStringLiteral("top-right");
+    int hudScale_ = 100;
+    QString hudFrame_ = QStringLiteral("notch");
+    bool hudDrag_ = false;
+    bool hudCustom_ = false;
     QString transition_ = QStringLiteral("liquid");
     int trayAlpha_ = 0;
     bool qualityIsGlobal_ = false, paused_ = false, autostart_ = false;

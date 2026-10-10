@@ -1,0 +1,30 @@
+{
+  "id": "matrixclock",
+  "category": "粒子光斑",
+  "name": "Matrix Clock",
+  "renderer": "d3d11",
+  "fps": 60,
+  "quality": "medium",
+  "shader": "main.hlsl",
+  "textures": [],
+  "params": {
+    "rows": 48,
+    "fall_speed": 7,
+    "trail": 11,
+    "trail_shape": 1.0,
+    "density": 1.0,
+    "mutate": 2.2,
+    "head_gain": 0.6,
+    "rain_gain": 0.5,
+    "bloom": 0.3,
+    "haze": 0.22,
+    "chroma": 1.0,
+    "clock_size": 0.086,
+    "clock_y": 0.5,
+    "clock_ink": 0.95,
+    "clock_fade": 0.35,
+    "tick_flash": 0.35,
+    "brightness": 1.0,
+    "vignette": 0.45
+  }
+}

@@ -1,5 +1,6 @@
 #include "Engine/Graphics/D3D11Renderer.hpp"
 #include "Engine/Core/Log.hpp"
+#include "Engine/Core/Json.hpp" // ReadFileUtf8
 #include <algorithm>
 
 namespace sw {
@@ -97,7 +98,8 @@ bool RenderSurface::Begin(std::string& error) {
     return true;
 }
 
-bool RenderSurface::SampleCorner(ID3D11DeviceContext* ctx, unsigned long long& checksum, UINT side) {
+bool RenderSurface::SampleCorner(ID3D11DeviceContext* ctx, unsigned long long& checksum, UINT side,
+                                UINT corner) {
     checksum = 0;
     if (!drawn_ || !dev_) return false;
     D3D11_TEXTURE2D_DESC gd{};
@@ -117,12 +119,14 @@ bool RenderSurface::SampleCorner(ID3D11DeviceContext* ctx, unsigned long long& c
         if (FAILED(dev_->CreateTexture2D(&sd, nullptr, &readback_))) return false;
     }
     D3D11_BOX box{};
-    box.left = 0;
-    box.top = 0;
+    const UINT right = (corner & 1) ? gd.Width - side : side;
+    const UINT bottom = (corner & 2) ? gd.Height - side : side;
+    box.left = (corner & 1) ? gd.Width - side : 0;
+    box.top = (corner & 2) ? gd.Height - side : 0;
     box.front = 0;
     box.back = 1;
-    box.right = side;
-    box.bottom = side;
+    box.right = right;
+    box.bottom = bottom;
     ctx->CopySubresourceRegion(readback_.Get(), 0, 0, 0, 0, drawn_.Get(), 0, &box);
     ctx->Flush();
     D3D11_MAPPED_SUBRESOURCE mp{};
@@ -156,6 +160,16 @@ bool D3D11Renderer::Init(ID3D11Device* dev, std::string& error) {
     HRESULT hr = dev->CreateBuffer(&bd, nullptr, &frameCb_);
     if (FAILED(hr)) { error = "frame cbuffer: " + HResultToString(hr); return false; }
 
+    // b2 is fixed-size, so it is made here once rather than resized per package like paramCb_ is. It
+    // is uploaded and bound for every wallpaper, including the ones that never read it - an unused
+    // cbuffer is stripped by fxc and has no slot, so those draws bind a buffer nothing samples.
+    D3D11_BUFFER_DESC sbd{};
+    sbd.ByteWidth = sizeof(StatsCB);
+    sbd.Usage = D3D11_USAGE_DEFAULT;
+    sbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    hr = dev->CreateBuffer(&sbd, nullptr, &statsCb_);
+    if (FAILED(hr)) { error = "stats cbuffer: " + HResultToString(hr); return false; }
+
     D3D11_RASTERIZER_DESC rd{};
     rd.FillMode = D3D11_FILL_SOLID;
     rd.CullMode = D3D11_CULL_NONE;
@@ -184,6 +198,17 @@ bool D3D11Renderer::Init(ID3D11Device* dev, std::string& error) {
     hr = dev->CreateBlendState(&bld, &additive_);
     if (FAILED(hr)) { error = "blend additive: " + HResultToString(hr); return false; }
 
+    // Premultiplied over. Neither existing state can draw an opaque panel: additive_ is ONE/ONE,
+    // so the card's dark fill would only ever lighten whatever it sat on and its ink would glow.
+    bld.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    bld.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    bld.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bld.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    bld.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    bld.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    hr = dev->CreateBlendState(&bld, &over_);
+    if (FAILED(hr)) { error = "blend over: " + HResultToString(hr); return false; }
+
     D3D11_SAMPLER_DESC sd{};
     sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     sd.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
@@ -204,6 +229,7 @@ bool D3D11Renderer::Init(ID3D11Device* dev, std::string& error) {
 bool D3D11Renderer::UploadConstants(ID3D11DeviceContext* ctx, const DrawArgs& args, ID3D11Buffer** paramView,
                                      std::string& error) {
     ctx->UpdateSubresource(frameCb_.Get(), 0, nullptr, &args.frame, 0, 0);
+    ctx->UpdateSubresource(statsCb_.Get(), 0, nullptr, &args.stats, 0, 0);
     *paramView = nullptr;
     if (!args.paramBytes) return true;
     if (args.paramBytes != paramCbBytes_) {
@@ -236,16 +262,20 @@ bool D3D11Renderer::Pass(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, 
     ctx->RSSetState(raster_.Get());
     ctx->RSSetViewports(1, &vp);
     ctx->OMSetDepthStencilState(noDepth_.Get(), 0);
-    ctx->OMSetBlendState(args.additive ? additive_.Get() : opaque_.Get(), blend, 0xFFFFFFFF);
+    Com<ID3D11BlendState> bs = args.blend == DrawArgs::Blend::Over ? over_
+                                 : args.blend == DrawArgs::Blend::Additive ? additive_ : opaque_;
+    ctx->OMSetBlendState(bs.Get(), blend, 0xFFFFFFFF);
     ctx->IASetInputLayout(nullptr);
     ctx->IASetVertexBuffers(0, 0, nullptr, nullptr, nullptr);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->VSSetShader(vs, nullptr, 0);
     ctx->VSSetConstantBuffers(0, 1, frameCb_.GetAddressOf());
     if (params) ctx->VSSetConstantBuffers(1, 1, &params);
+    ctx->VSSetConstantBuffers(2, 1, statsCb_.GetAddressOf());
     ctx->PSSetShader(ps, nullptr, 0);
     ctx->PSSetConstantBuffers(0, 1, frameCb_.GetAddressOf());
     if (params) ctx->PSSetConstantBuffers(1, 1, &params);
+    ctx->PSSetConstantBuffers(2, 1, statsCb_.GetAddressOf());
     if (srvCount) {
         ctx->VSSetShaderResources(0, srvCount, srvs);
         ctx->PSSetShaderResources(0, srvCount, srvs);
@@ -276,6 +306,7 @@ bool D3D11Renderer::Dispatch(ID3D11DeviceContext* ctx, const DrawArgs& args, std
     ctx->CSSetShader(args.cs, nullptr, 0);
     ctx->CSSetConstantBuffers(0, 1, frameCb_.GetAddressOf());
     if (params) ctx->CSSetConstantBuffers(1, 1, &params);
+    ctx->CSSetConstantBuffers(2, 1, statsCb_.GetAddressOf());
     ID3D11UnorderedAccessView* uav = args.uav;
     const UINT append = (UINT)-1;
     ctx->CSSetUnorderedAccessViews(0, 1, &uav, &append);
@@ -298,7 +329,7 @@ bool D3D11Renderer::DrawParticles(ID3D11DeviceContext* ctx, ID3D11RenderTargetVi
     for (UINT i = 0; i < args.srvCount && n < 8; ++i) tab[n++] = args.srvs[i];
 
     DrawArgs over = args;
-    over.additive = true; // flakes composite over the background, whatever the manifest asked for
+    over.blend = DrawArgs::Blend::Additive; // flakes composite over the background, whatever the manifest asked for
     return Pass(ctx, rtv, w, h, over, args.particleVs, args.ps, tab, n,
                 args.particleCount * args.verticesPerParticle, error);
 }
@@ -310,11 +341,94 @@ bool D3D11Renderer::Render(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv
     if (args.backgroundPs) {
         DrawArgs bg = args;
         bg.particleCount = 0;
-        bg.additive = false; // the sky is what the flakes are composited onto
+        bg.blend = DrawArgs::Blend::Opaque; // the sky is what the flakes are composited onto
         bg.ps = args.backgroundPs;
         if (!Draw(ctx, rtv, w, h, bg, error)) return false;
     }
     return DrawParticles(ctx, rtv, w, h, args, error);
+}
+
+
+// ---------------------------------------------------------------- the overlay
+
+// Compiled once for the process, not per slot: the card has to survive every apply, reload and
+// monitor change, and it is the same source and the same atlas whoever is underneath it.
+bool D3D11Renderer::InitHud(ID3D11Device* dev, IWICImagingFactory* wic, const std::wstring& root,
+                            std::string& error) {
+    hudReady_ = false;
+    const std::wstring shaders = root + L"\\Shaders";
+    const std::wstring srcPath = shaders + L"\\HudCard.hlsl";
+    bool ok = false;
+    const std::string src = ReadFileUtf8(srcPath, ok);
+    // The path in the message, not just "not readable": this is the one place the engine reaches
+    // outside its own directory for a shader, and a staged tree that is missing a file is a
+    // different diagnosis from a path built wrong here.
+    if (!ok) { error = ToUtf8(srcPath) + " not readable"; return false; }
+
+    Texture atlas;
+    if (!atlas.Load(dev, wic, shaders + L"\\glyphs.png", error)) {
+        error = "hud glyph atlas: " + error;
+        return false;
+    }
+    glyphs_ = atlas.srv();
+
+    Shader::Entries e{};   // vs_5_0 + ps_5_0 only; the overlay has no compute and no particles
+    if (!hud_.Compile(src, L"HudCard.hlsl", { shaders }, e, error)) {
+        error = "hud shader: " + error;
+        return false;
+    }
+    if (!hud_.CreatePipeline(dev, error)) { error = "hud pipeline: " + error; return false; }
+    // Reflected and then refused, rather than never reflected: b1 is one shared upload slot sized by
+    // whichever pass last asked, so an overlay that grew a Params block would fight the wallpaper
+    // for it every frame. Reflecting is what makes the guard below able to say anything at all.
+    if (!hud_.ReflectParams(error)) { error = "hud params: " + error; return false; }
+    if (hud_.hasParams()) {
+        error = "HudCard.hlsl declares a Params cbuffer; the overlay must read only b0 and b2";
+        return false;
+    }
+    hudReady_ = true;
+    Info(MOD, "status card overlay ready");
+    return true;
+}
+
+// b0 and b2 already hold this frame's values, uploaded by the wallpaper pass that precedes this
+// one, so the overlay binds and draws and never touches a constant buffer - which is also why it
+// has no Params of its own: paramCb_ is one shared slot resized by byte count, and a second pass
+// with a different size would reallocate it every frame of every monitor.
+bool D3D11Renderer::DrawHud(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
+                            std::string& error) {
+    if (!hudReady_ || !rtv) { error = "status card overlay not ready"; return false; }
+    const float factor[4] = { 0, 0, 0, 0 };
+    D3D11_VIEWPORT vp{ 0.f, 0.f, (float)w, (float)h, 0.f, 1.f };
+    ctx->OMSetRenderTargets(1, &rtv, nullptr);
+    ctx->RSSetState(raster_.Get());
+    ctx->RSSetViewports(1, &vp);
+    ctx->OMSetDepthStencilState(noDepth_.Get(), 0);
+    ctx->OMSetBlendState(over_.Get(), factor, 0xFFFFFFFF);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetVertexBuffers(0, 0, nullptr, nullptr, nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    ctx->VSSetShader(hud_.vs(), nullptr, 0);
+    ctx->VSSetConstantBuffers(0, 1, frameCb_.GetAddressOf());
+    ctx->VSSetConstantBuffers(2, 1, statsCb_.GetAddressOf());
+    ctx->PSSetShader(hud_.ps(), nullptr, 0);
+    ctx->PSSetConstantBuffers(0, 1, frameCb_.GetAddressOf());
+    ctx->PSSetConstantBuffers(2, 1, statsCb_.GetAddressOf());
+    // Slot 0 stays empty so the atlas lands on t1, where Glyphs.hlsl declares it.
+    ID3D11ShaderResourceView* srvs[2] = { nullptr, glyphs_.Get() };
+    ctx->PSSetShaderResources(0, 2, srvs);
+    ID3D11SamplerState* samplers[2] = { wrap_.Get(), wrap_.Get() };
+    ctx->PSSetSamplers(0, 2, samplers);
+    ctx->Draw(3, 0);
+
+    // Unbind, so the next wallpaper's pass cannot read the overlay's atlas through a slot it thinks
+    // is still its own - Pass() only ever sets the slots it counts.
+    ID3D11ShaderResourceView* none[2] = { nullptr, nullptr };
+    ctx->PSSetShaderResources(0, 2, none);
+    ctx->PSSetShader(nullptr, nullptr, 0);
+    ctx->VSSetShader(nullptr, nullptr, 0);
+    return true;
 }
 
 } // namespace sw

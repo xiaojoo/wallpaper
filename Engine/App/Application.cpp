@@ -2,6 +2,7 @@
 #include "Engine/App/IPCServer.hpp"
 #include "Engine/Core/Log.hpp"
 #include "Engine/Graphics/FFmpegPlayer.hpp"
+#include "Engine/Packages/HudFramesMeta.hpp"
 
 #include <psapi.h>
 #include <shellapi.h>
@@ -139,6 +140,14 @@ bool Application::Start(const CommandLine& cl, std::string& error) {
     if (!renderer_.Init(dev_.dev.Get(), error)) {
         Error(MOD, "renderer: {}", error);
         return false;
+    }
+
+    // Not fatal. The card is an extra, and a desktop that cannot read its own shader or atlas should
+    // still show the wallpaper; the reason stays in the log and in hud_error for the settings window.
+    if (!renderer_.InitHud(dev_.dev.Get(), dev_.wic.Get(), wpm_.settings().root, error)) {
+        hudError_ = error;
+        Warn(MOD, "status card unavailable: {}", error);
+        error.clear();
     }
     monitors_.Refresh(&dev_);
     if (monitors_.count() == 0) {
@@ -601,6 +610,95 @@ Quality Application::EffectiveQuality(const Slot& s) const {
     return Quality::High;
 }
 
+// How far the card sits in from the edge of its screen: 5 physical pixels on all four sides. Pixels
+// rather than a fraction of the screen height because that is the number he asked for, and it has to
+// read the same on a 1080p laptop and on this 4K panel. It used to be 0.0126 in from the side and
+// 0.050 down from the top, which on this screen is 27 px and 108 px - the top one is what put the card
+// on top of the wallpaper's own header.
+constexpr float kHudEdgePx = 5.f;
+
+void Application::HudRectFor(const MonitorInfo& m, float& x, float& y, float& w, float& h) const {
+    const auto& s = wpm_.settings();
+    if (m.px.h <= 0) { x = y = 0.f; w = h = 1.f; return; }
+    const float H = float(m.px.h);
+    const float aspect = float(m.px.w) / H;
+    const int style = s.hudFrame >= 0 && s.hudFrame < kHudFrameCount ? s.hudFrame : 0;
+    h = 0.150f * std::max(float(s.hudScalePct) / 100.0f, 0.2f);
+    w = h * kHudFrameAspect[style];
+    // A card parked under the taskbar is a card nobody sees, so the bottom of the screen stops where
+    // the working area does. Measured off this monitor rather than assumed.
+    const float inset = kHudEdgePx / H;
+    const float reserve = m.work.valid()
+        ? float(m.px.y + m.px.h - m.work.y - m.work.h) / H : 0.0f;
+    const float loX = inset, hiX = std::max(inset, aspect - inset - w);
+    const float loY = inset, hiY = std::max(inset, 1.0f - reserve - inset - h);
+    const auto clamp = [](float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); };
+    if (s.hudX >= 0.f && s.hudY >= 0.f) {          // dragged somewhere: that wins, inside the screen
+        x = clamp(s.hudX, loX, hiX);
+        y = clamp(s.hudY, loY, hiY);
+        return;
+    }
+    x = (s.hudCorner == 1 || s.hudCorner == 3) ? loX : hiX;
+    y = s.hudCorner >= 2 ? hiY : loY;
+}
+
+RECT Application::HudScreenRect(const MonitorInfo& m) const {
+    float x, y, w, h;
+    HudRectFor(m, x, y, w, h);
+    const float H = float(m.px.h);
+    return RECT{ LONG(m.px.x + x * H), LONG(m.px.y + y * H),
+                 LONG(m.px.x + (x + w) * H), LONG(m.px.y + (y + h) * H) };
+}
+
+bool Application::ArmHudDrag(bool on, std::string& error) {
+    if (!on) {
+        hudDrag_.Destroy();
+        hudDragMonitor_ = -1;
+        return true;
+    }
+    if (hudDragMonitor_ >= 0) return true;
+    if (!wpm_.settings().hud || !renderer_.hudReady()) {
+        error = "the status card is not on the desktop, so there is nothing to drag";
+        return false;
+    }
+    // The layer goes on the monitor the pointer is over, since that is the card the user is reaching
+    // for. The position itself is one global setting, like the size and the corner, so it moves the
+    // card on every screen at once.
+    POINT cp{};
+    GetCursorPos(&cp);
+    const MonitorInfo* pick = monitors_.byIndex(0);
+    for (auto& mm : monitors_.list())
+        if (cp.x >= mm.px.x && cp.x < mm.px.x + mm.px.w &&
+            cp.y >= mm.px.y && cp.y < mm.px.y + mm.px.h) pick = &mm;
+    if (!pick) { error = "no monitor to drag on"; return false; }
+    const MonitorInfo m = *pick;
+    const RECT work{ m.px.x, m.px.y, m.px.x + m.px.w, m.px.y + m.px.h };
+    if (!hudDrag_.Create(GetModuleHandleW(nullptr), HudScreenRect(m), work,
+                         [this, idx = m.index](float x, float y, bool commit) -> RECT {
+        const MonitorInfo* mm = monitors_.byIndex(size_t(idx));
+        if (!mm) return RECT{};
+        // The layer is told where the card may actually go, so the outline stops at a corner with the
+        // card instead of sliding past it under the pointer.
+        wpm_.SetHudPos(x, y);
+        const RECT r = HudScreenRect(*mm);
+        if (commit) {
+            std::string e;
+            wpm_.Save(e);                  // a dropped card that comes back somewhere else next boot
+            ArmHudDrag(false, e);          // is not a dropped card at all
+        }
+        return r;
+                         }, error)) {
+        Warn(MOD, "status card drag layer: {}", error);
+        return false;
+    }
+    hudDragMonitor_ = m.index;
+    hudDragRect_ = HudScreenRect(m);
+    Info(MOD, "status card drag layer armed on {} at {}x{}+{},{}", m.tag,
+         hudDragRect_.right - hudDragRect_.left, hudDragRect_.bottom - hudDragRect_.top,
+         hudDragRect_.left, hudDragRect_.top);
+    return true;
+}
+
 void Application::DrawSlot(Slot& s, double nowSeconds) {
     std::string err;
     if (!s.window.EnsureSize(dev_.dev.Get(), dev_.comp.Get(), err)) {
@@ -618,6 +716,7 @@ void Application::DrawSlot(Slot& s, double nowSeconds) {
 
     const MonitorInfo& m = s.window.monitor();
     FrameCB f{};
+    FillWallClock(f);
     f.time = float(nowSeconds);
     // The simulation step is the time that actually passed between two draws of this slot, not
     // 1/what the frame budget says. With the budget-derived version a wallpaper's speed followed the
@@ -648,20 +747,54 @@ void Application::DrawSlot(Slot& s, double nowSeconds) {
     f.fpsMeasured = float(s.clock.measuredFps);
     f.renderScale = QualityScale(q);
     f.fit = float(int(wpm_.settings().imageFit));
+    // What the card cannot know about this monitor: where it goes, and which border draws it. The
+    // rectangle is resolved here rather than in the shader because the drag layer has to cover exactly
+    // the same pixels, and only this side knows the monitor, its taskbar strip and where the user
+    // dropped the card.
+    float hx = 0.f, hy = 0.f, hw = 0.f, hh = 0.f;
+    HudRectFor(m, hx, hy, hw, hh);
+    f.hudX = hx; f.hudY = hy; f.hudW = hw; f.hudH = hh;
+    f.hudFrame = float(wpm_.settings().hudFrame);
+    // Keep the grab layer welded to the card. Only when the rectangle actually moved: SetWindowPos
+    // every frame would queue a message per frame for the whole time the desktop is being drawn.
+    // And not while the user is holding it: that window is being moved by the pointer in the message
+    // that decided where it goes, and a second mover working off last frame's rectangle is the jitter.
+    if (hudDragMonitor_ == m.index && hudDrag_.active()) {
+        const RECT want = HudScreenRect(m);
+        if (hudDrag_.dragging()) {
+            hudDragRect_ = want;      // keep the comparison honest for the frame after the drop
+        } else if (want.left != hudDragRect_.left || want.top != hudDragRect_.top ||
+                   want.right != hudDragRect_.right || want.bottom != hudDragRect_.bottom) {
+            hudDragRect_ = want;
+            hudDrag_.Move(want);
+        }
+    }
 
-    DrawArgs args = s.instance.MakeArgs(f, dev_.ctx.Get());
+    DrawArgs args = s.instance.MakeArgs(f, dev_.ctx.Get(), statsCB_);
     if (!renderer_.Render(dev_.ctx.Get(), surf.rtv(), surf.width(), surf.height(), args, err)) {
         s.error = err;
         surf.End(dev_.ctx.Get());
         Warn(MOD, "{}: draw failed: {}", m.tag, err);
         return;
     }
+    // The card composites over the wallpaper inside this same surface, before EndDraw unlocks it -
+    // one surface, one visual, one commit. The wallpaper's pass has already covered every pixel,
+    // so there is nothing for the overlay to leave half-drawn.
+    if (wpm_.settings().hud && renderer_.hudReady()) {
+        if (!renderer_.DrawHud(dev_.ctx.Get(), surf.rtv(), surf.width(), surf.height(), err))
+            Warn(MOD, "{}: status card: {}", m.tag, err);
+    }
+
     // One corner sample a second is enough to tell "animating" from "frozen", and it is the
     // only proof available when another window covers the desktop.
     if (nowSeconds - s.lastSampleT >= 1.0) {
         s.lastSampleT = nowSeconds;
         unsigned long long sum = 0;
-        if (surf.SampleCorner(dev_.ctx.Get(), sum)) {
+        // The corner diagonally opposite the card when it sits in this one, so turning the overlay
+        // on cannot make a live wallpaper look frozen: the sample would be reading a panel that
+        // changes once a second at most, and usually not even that.
+        const UINT hudCornerSample = (wpm_.settings().hud && wpm_.settings().hudCorner == 1) ? 3u : 0u;
+        if (surf.SampleCorner(dev_.ctx.Get(), sum, 16, hudCornerSample)) {
             if (s.lastSample && sum != s.lastSample) ++s.changedSamples_;
             else if (s.lastSample) ++s.staticSamples_;
             s.lastSample = sum;
@@ -714,6 +847,27 @@ void Application::UpdateSnapshot() {
     r.set("quality_is_global", Json::Of(wpm_.settings().useGlobalQuality));
     r.set("image_fit", Json::Of(std::string(ImageFitName(wpm_.settings().imageFit))));
     r.set("tray_alpha", Json::Of(wpm_.settings().trayAlpha));
+    r.set("hud", Json::Of(wpm_.settings().hud));
+    r.set("hud_corner", Json::Of(std::string(HudCornerName(wpm_.settings().hudCorner))));
+    r.set("hud_scale", Json::Of(wpm_.settings().hudScalePct));
+    r.set("hud_frame", Json::Of(std::string(HudFrameName(wpm_.settings().hudFrame))));
+    // The dragged position, if there is one. null means the card is on a corner preset, which is what
+    // lets the settings window show 「自定义」 only after the user has actually moved it.
+    {
+        Json pos = Json::Array();
+        if (wpm_.settings().hudX >= 0.f && wpm_.settings().hudY >= 0.f) {
+            pos.push(Json::Of(double(wpm_.settings().hudX)));
+            pos.push(Json::Of(double(wpm_.settings().hudY)));
+            r.set("hud_pos", std::move(pos));
+        } else {
+            r.set("hud_pos", Json::Null());
+        }
+    }
+    r.set("hud_drag", Json::Of(hudDragMonitor_ >= 0));
+    // Ready is reported apart from enabled: a card the user switched on that the renderer could
+    // not prepare would otherwise read as working, with nothing on the screen and no reason why.
+    r.set("hud_ready", Json::Of(renderer_.hudReady()));
+    if (!hudError_.empty()) r.set("hud_error", Json::Of(hudError_));
     r.set("power", Json::Of(power_.StatusLine()));
     {
         Json rot = Json::Object();
@@ -827,9 +981,11 @@ void Application::UpdateSnapshot() {
     // Named next to the number on purpose: a percent without its window is not a measurement.
     memj.set("cpu_window_s", Json::Of(mem.cpuWindowS));
     // The card's busy percent (whole machine) and this process's own share of it. Two numbers, two
-    // denominators - see Engine/App/GpuMonitor.hpp. Absent when there is nothing to ask.
+    // denominators - see Engine/App/GpuMonitor.hpp. Read from the loop's one-second sample rather than
+    // sampled here: GpuMonitor keeps state between calls about which readings had a window behind
+    // them, and a builder invoked at the settings window's whim would disturb it.
     {
-        const GpuUse g = gpu_.Sample();
+        const GpuUse g = gpuLast_;
         if (g.device >= 0.0) memj.set("gpu_percent", Json::Of(g.device));
         if (g.self >= 0.0) {
             memj.set("gpu_self_percent", Json::Of(g.self));
@@ -838,6 +994,47 @@ void Application::UpdateSnapshot() {
         }
     }
     r.set("process", std::move(memj));
+
+    // The whole machine, same -1-means-no-answer rule: a field is left out rather than written as 0,
+    // so `--ctl status` can be diffed against nvidia-smi and Get-Counter without a zero passing for a
+    // measurement. cpu_pct and cpu_pct_pdh are one quantity from two instruments; if they ever part
+    // company, one of the two paths is wrong and this is where you would see it.
+    {
+        const MachineStats& x = machineLast_;
+        Json m = Json::Object();
+        auto put = [&](const char* k, double v) { if (v >= 0.0) m.set(k, Json::Of(v)); };
+        put("cpu_pct", x.cpuPct);
+        put("cpu_pct_pdh", x.cpuPctPdh);
+        put("cpu_user_pct", x.cpuUserPct);
+        put("cpu_priv_pct", x.cpuPrivPct);
+        put("cpu_queue", x.cpuQueue);
+        put("mem_pct", x.memPct);
+        put("mem_used_mb", x.memUsedMb);
+        put("mem_total_mb", x.memTotalMb);
+        put("commit_mb", x.commitMb);
+        put("disk_read_bps", x.diskReadBs);
+        put("disk_write_bps", x.diskWriteBs);
+        put("disk_active_pct", x.diskActivePct);
+        put("disk_free_gb", x.diskFreeGb);
+        put("disk_total_gb", x.diskTotalGb);
+        put("net_recv_bps", x.netRecvBs);
+        put("net_send_bps", x.netSendBs);
+        put("uptime_s", x.uptimeS);
+        put("process_count", x.processCount);
+        put("gpu_util_pct", x.gpu.device);
+        put("gpu_mem_util_pct", x.gpu.memUtilPct);
+        put("gpu_mem_used_mb", x.gpu.memUsedMb);
+        put("gpu_mem_reserved_mb", x.gpu.memReservedMb);
+        put("gpu_mem_total_mb", x.gpu.memTotalMb);
+        put("gpu_temp_c", x.gpu.tempC);
+        put("gpu_power_w", x.gpu.powerW);
+        put("gpu_clock_mhz", x.gpu.clockMHz);
+        Json cores = Json::Array();
+        for (unsigned i = 0; i < x.coreCount; ++i) cores.push(Json::Of(double(x.core[i])));
+        m.set("cores", std::move(cores));
+        m.set("valid", Json::Of((long long)x.valid));
+        r.set("machine", std::move(m));
+    }
 
     Json mons = Json::Array();
     for (auto& s : slots_) {
@@ -1174,6 +1371,7 @@ void Application::DrawPreview(double nowSeconds) {
     if (p.held) return;
 
     FrameCB f{};
+    FillWallClock(f);
     // Same clock as the desktop slots, so the preview is the wallpaper at the same moment rather
     // than a second copy running at its own phase.
     f.time = float(nowSeconds);
@@ -1195,7 +1393,7 @@ void Application::DrawPreview(double nowSeconds) {
     if (const MonitorInfo* m = monitors_.byIndex(0); m && m->px.w > 0 && m->px.h > 0)
         f.sizeScale = std::min(float(p.w) / float(m->px.w), float(p.h) / float(m->px.h));
 
-    DrawArgs args = p.inst->MakeArgs(f, dev_.ctx.Get());
+    DrawArgs args = p.inst->MakeArgs(f, dev_.ctx.Get(), statsCB_);
     // Until the decoder's first picture lands, a video instance's planes hold the video-black fill that
     // Nv12Uploader::Ensure gave them, so the draw comes out all black. On the desktop that is the lesser
     // evil. The preview is a *switch*, and the window is holding the frame he was looking at, so
@@ -1317,6 +1515,12 @@ int Application::Run() {
         ULONGLONG nowMs = GetTickCount64();
         power_.Poll(nowMs);
         TickRotation(nowMs);
+        if (nowMs - machineAtMs_ >= 1000) {
+            machineAtMs_ = nowMs;
+            gpuLast_ = gpu_.Sample();
+            machineLast_ = machine_.Sample(gpuLast_);
+            FillStatsCB(machineLast_, statsCB_);
+        }
         if (preview_.on && nowMs - preview_.lastBeatMs > kPreviewBeatTimeoutMs)
             StopPreview("settings window stopped beating");
 
@@ -1519,6 +1723,66 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         trayFx_.Apply(wpm_.settings().trayAlpha);
         result = std::format(R"({{"ok":true,"tray_alpha":{},"window_alpha":{}}})",
                              wpm_.settings().trayAlpha, TrayTransparency::ToAlpha(wpm_.settings().trayAlpha));
+    } else if (action == "hud") {
+        // On/off only. `arg` is read the way the tray reads it - "on", "true", "1" - because a
+        // command line user types one of those and a config editor writes the other.
+        const bool on = arg == "on" || arg == "true" || arg == "1";
+        wpm_.SetHud(on);
+        std::string e;
+        wpm_.Save(e);
+        // Switching the card off while its drag layer is up would leave a click target standing over
+        // a desktop with nothing in it - the same thing arming refuses to do, just from the other end.
+        if (!on) ArmHudDrag(false, e);
+        result = std::format(R"({{"ok":true,"hud":{}}})", wpm_.settings().hud ? "true" : "false");
+    } else if (action == "hudpos") {
+        // An unrecognised corner keeps the one in force, so the reply says what the desktop is doing
+        // rather than what was asked for.
+        const int corner = wpm_.SetHudCorner(arg);
+        std::string e;
+        wpm_.Save(e);
+        result = std::format(R"({{"ok":true,"hud_corner":"{}"}})", HudCornerName(corner));
+    } else if (action == "hudscale") {
+        wpm_.SetHudScale(std::atoi(arg.c_str()));
+        std::string e;
+        wpm_.Save(e);
+        result = std::format(R"({{"ok":true,"hud_scale":{}}})", wpm_.settings().hudScalePct);
+    } else if (action == "hudframe") {
+        // An unrecognised name keeps the style in force, so the reply says what is on the screen.
+        const int style = wpm_.SetHudFrame(arg);
+        std::string e;
+        wpm_.Save(e);
+        result = std::format(R"({{"ok":true,"hud_frame":"{}"}})", HudFrameName(style));
+    } else if (action == "huddrag") {
+        // The drag switch is deliberately not saved: an armed layer that never got dropped is a
+        // topmost window over someone's desktop, and it should not come back next boot.
+        const bool on = arg == "on" || arg == "true" || arg == "1";
+        std::string e;
+        if (!ArmHudDrag(on, e)) {
+            result = std::format(R"({{"ok":false,"error":"{}"}})", e);
+        } else {
+            result = std::format(R"({{"ok":true,"hud_drag":{}}})",
+                                 hudDragMonitor_ >= 0 ? "true" : "false");
+        }
+    } else if (action == "hudmove") {
+        // The same units the card is laid out in: screen heights from the monitor's top-left. The
+        // engine clamps it, so a client that asks for the middle of the next monitor gets the edge.
+        float x = std::strtof(arg.c_str(), nullptr), y = std::strtof(arg2.c_str(), nullptr);
+        if (x < 0.f || y < 0.f) {
+            result = R"({"ok":false,"error":"hudmove needs x y, both >= 0"})";
+        } else {
+            wpm_.SetHudPos(x, y);
+            std::string e;
+            wpm_.Save(e);
+            result = std::format(R"({{"ok":true,"hud_pos":[{},{}]}})",
+                                 wpm_.settings().hudX, wpm_.settings().hudY);
+        }
+    } else if (action == "hudhome") {
+        wpm_.ClearHudPos();
+        std::string e;
+        wpm_.Save(e);
+        ArmHudDrag(false, e);
+        result = std::format(R"({{"ok":true,"hud_corner":"{}"}})",
+                             HudCornerName(wpm_.settings().hudCorner));
     } else if (action == "powercap") {
         const int value = std::atoi(arg2.c_str());
         if (!power_.SetCap(arg, value)) {

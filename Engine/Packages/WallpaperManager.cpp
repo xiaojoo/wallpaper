@@ -77,6 +77,18 @@ bool WallpaperManager::Load(const std::wstring& exeDir, std::string& error) {
     s_.globalQuality = ParseQuality(r.strOr("quality", "high"), Quality::High);
     s_.imageFit = ParseImageFit(r.strOr("image_fit", "fill"));
     s_.trayAlpha = r.find("tray_alpha") ? r.find("tray_alpha")->asInt(0) : 0;
+    s_.hud = r.find("hud") ? r.find("hud")->asBool(false) : false;
+    s_.hudCorner = r.find("hud_corner") ? ParseHudCorner(r.find("hud_corner")->asString(), 0) : 0;
+    // A dragged position, if there is one. Anything malformed leaves both negative, which is what
+    // "no dragged position" means and puts the card back on its corner.
+    if (const Json* p = r.find("hud_pos"); p && p->isArray() && p->items().size() == 2) {
+        const double x = p->items()[0].asNumber(-1.0), y = p->items()[1].asNumber(-1.0);
+        if (x >= 0.0 && y >= 0.0) { s_.hudX = float(x); s_.hudY = float(y); }
+    }
+    s_.hudScalePct = r.find("hud_scale") ? r.find("hud_scale")->asInt(100) : 100;
+    if (s_.hudScalePct < 60) s_.hudScalePct = 60;
+    if (s_.hudScalePct > 250) s_.hudScalePct = 250;
+    s_.hudFrame = r.find("hud_frame") ? ParseHudFrame(r.find("hud_frame")->asString(), 0) : 0;
     if (s_.trayAlpha < 0) s_.trayAlpha = 0;
     if (s_.trayAlpha > 100) s_.trayAlpha = 100;
     if (const Json* p = r.find("power"); p && p->isObject()) s_.power = *p;
@@ -107,6 +119,16 @@ std::string WallpaperManager::ConfigText() const {
     r.set("quality", Json::Of(s_.useGlobalQuality ? QualityName(s_.globalQuality) : std::string("package")));
     r.set("image_fit", Json::Of(std::string(ImageFitName(s_.imageFit))));
     r.set("tray_alpha", Json::Of(s_.trayAlpha));
+    r.set("hud", Json::Of(s_.hud));
+    r.set("hud_corner", Json::Of(std::string(HudCornerName(s_.hudCorner))));
+    if (s_.hudX >= 0.f && s_.hudY >= 0.f) {
+        Json pos = Json::Array();
+        pos.push(Json::Of(double(s_.hudX)));
+        pos.push(Json::Of(double(s_.hudY)));
+        r.set("hud_pos", std::move(pos));
+    }
+    r.set("hud_scale", Json::Of(s_.hudScalePct));
+    r.set("hud_frame", Json::Of(std::string(HudFrameName(s_.hudFrame))));
     r.set("power", s_.power.isObject() ? s_.power : Json::Object());
     Json mons = Json::Array();
     for (auto& a : s_.assignments) {
@@ -125,7 +147,10 @@ std::string WallpaperManager::ConfigText() const {
     r.set("_comment",
           Json::Of("quality: package|ultra|high|medium|low|battery. image_fit (image wallpapers only): "
                    "fill|fit|stretch|center|tile. monitors[] may repeat per M0/M1 or use all. "
-                   "rotate: {on,interval_min,monitor,pool[]}"));
+                   "rotate: {on,interval_min,monitor,pool[]}. hud: true|false, hud_corner: "
+                   "top-right|top-left|bottom-right|bottom-left, hud_pos: [x,y] in screen heights from "
+                   "the monitor's top-left - where the card was dragged to, and it wins over "
+                   "hud_corner until a corner is picked again."));
     return r.dump(2) + "\n";
 }
 
@@ -223,6 +248,64 @@ void WallpaperManager::SetImageFit(const std::string& f) { s_.imageFit = ParseIm
 
 void WallpaperManager::SetTrayAlpha(int pct) {
     s_.trayAlpha = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+}
+
+void WallpaperManager::SetHud(bool on) { s_.hud = on; }
+
+int WallpaperManager::SetHudCorner(const std::string& name) {
+    s_.hudCorner = ParseHudCorner(name, s_.hudCorner);
+    s_.hudX = s_.hudY = -1.f;      // a corner and a dragged position cannot both be the answer
+    return s_.hudCorner;
+}
+
+void WallpaperManager::SetHudPos(float x, float y) { s_.hudX = x, s_.hudY = y; }
+
+void WallpaperManager::ClearHudPos() { s_.hudX = s_.hudY = -1.f; }
+
+void WallpaperManager::SetHudScale(int pct) {
+    s_.hudScalePct = pct < 60 ? 60 : (pct > 250 ? 250 : pct);
+}
+
+const char* HudCornerName(int index) {
+    static const char* const kNames[] = {"top-right", "top-left", "bottom-right", "bottom-left"};
+    return kNames[index >= 0 && index <= 3 ? index : 0];
+}
+
+// By name, not by index, in config.json and on the pipe: a hand-edited "1" would silently mean
+// top-left to nobody who had not read this file first.
+int ParseHudCorner(std::string_view s, int def) {
+    for (int i = 0; i <= 3; ++i)
+        if (s == HudCornerName(i)) return i;
+    return def;
+}
+
+int WallpaperManager::SetHudFrame(const std::string& name) {
+    s_.hudFrame = ParseHudFrame(name, s_.hudFrame);
+    return s_.hudFrame;
+}
+
+const char* HudFrameName(int index) {
+    // Each name describes one measured frame: tools/extract-frames.py reads them off the reference
+    // sheets, and index 0 is the status card's own reference. They replaced an earlier set that all
+    // drew the same silhouette, which is why the labels changed with them - and why a stored name
+    // this list does not recognise falls back to 0 rather than to whatever index it lands on.
+    static const char* const kNames[] = {
+        "notch",     // the card's reference: a left notch, a hollow bar on top, a heavy right edge
+        "basetab",   // a wide tab sunk into the bottom line, ticks and a bar along the top right
+        "ticks",     // ticks at both ends of the top line, a tab on the left, a block bottom right
+        "topbar",    // a heavy band across the top left, tabs on both short edges
+        "band",      // a band across the top right, a block below it on the right
+        "split",     // a header strip drawn as its own part above the body
+    };
+    return kNames[index >= 0 && index < HudFrameCount() ? index : 0];
+}
+
+int HudFrameCount() { return 6; }
+
+int ParseHudFrame(std::string_view s, int def) {
+    for (int i = 0; i < HudFrameCount(); ++i)
+        if (s == HudFrameName(i)) return i;
+    return def;
 }
 
 Json WallpaperManager::StatusJson() const {

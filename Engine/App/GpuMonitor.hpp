@@ -20,7 +20,9 @@
 // (measured: 58379 items against 664 bytes, then an access violation).
 //
 // Absence is reported as -1, never as zero: on a machine without NVML a 0 would claim an idle card, and
-// a process with no GPU engines has no percentage to add.
+// a process with no GPU engines has no percentage to add. The same rule carries to the device readings
+// below them - a card that will not answer for its temperature reports -1, not 0 C, because 0 C would
+// read as "this machine is cold" to anything drawing a gauge from it.
 #include <string>
 #include <vector>
 #include <windows.h>
@@ -32,11 +34,28 @@ struct GpuUse {
     double self = -1.0;
     double self3d = -1.0;
     double selfDecode = -1.0;
+    // The rest of what the card says about itself, for a wallpaper that shows the machine rather than
+    // this process. All of it comes from the same nvmlDeviceHandle the two numbers above already use.
+    double memUsedMb = -1.0, memTotalMb = -1.0, memReservedMb = -1.0;
+    double memUtilPct = -1.0;
+    double tempC = -1.0;
+    double powerW = -1.0;
+    double clockMHz = -1.0;
+    std::string name;
 };
 
 class GpuMonitor {
 public:
     struct Util { unsigned gpu; unsigned memory; };   // nvmlUtilization_t
+    struct Memory { unsigned long long total, free_, used; };   // nvmlMemory_t
+    // nvmlMemory_v2_t: version-prefixed, and the only one with a field for driver-reserved
+    // framebuffer. Asked for first, because v1's `used` answers 2586 MB on this 4080 SUPER while
+    // nvidia-smi answers 2256 MB at the same instant - a 330 MB difference, stable across samples,
+    // and nvidia-smi's own used+free comes to 16046 against a 16376 total, so the missing 330 is
+    // reserved rather than noise. NOTE: on this driver the v2 call does not currently succeed, so the
+    // reading in use is still v1's and the HUD's VRAM gauge sits 330 MB above nvidia-smi. Quantified
+    // and left open in BACKLOG.md rather than quietly corrected by subtracting a constant.
+    struct Memory2 { unsigned version; unsigned long long total, reserved, free_, used; };
     // One "GPU Engine" instance of this process: its name and the counter handle built from it.
     struct Engine { std::wstring name; void* counter = nullptr; };
 
@@ -56,6 +75,12 @@ private:
     HMODULE lib_ = nullptr;
     void* device_ = nullptr;
     int (*getRates_)(void*, Util*) = nullptr;
+    int (*getMem_)(void*, Memory*) = nullptr;
+    int (*getMem2_)(void*, Memory2*) = nullptr;
+    int (*getTemp_)(void*, unsigned, unsigned*) = nullptr;
+    int (*getPower_)(void*, unsigned*) = nullptr;
+    int (*getClock_)(void*, unsigned, unsigned*) = nullptr;
+    int (*getName_)(void*, char*, unsigned) = nullptr;
 
     void* query_ = nullptr;
     std::vector<Engine> engines_;
@@ -63,6 +88,7 @@ private:
     // rebuilt because our engine set changed answers 0.0 for every engine on its first read).
     GpuUse last_;
     bool stale_ = false;
+    std::string name_;
 };
 
 } // namespace sw
