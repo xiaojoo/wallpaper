@@ -6,6 +6,7 @@
 #include "Engine/System/MachineMetrics.hpp"
 #include "Engine/Desktop/DesktopWindow.hpp"
 #include "Engine/Desktop/HudDragWindow.hpp"
+#include "Engine/System/DiskTemp.hpp"
 #include "Engine/Desktop/MonitorManager.hpp"
 #include "Engine/Desktop/TrayTransparency.hpp"
 #include "Engine/Desktop/WorkerW.hpp"
@@ -23,6 +24,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <array>
 #include <vector>
 
 namespace sw {
@@ -192,15 +194,18 @@ private:
     void StopPreview(const char* why);
     void DrawPreview(double nowSeconds);
     void TickRotation(ULONGLONG nowMs);
-    // Where the status card sits on one monitor, in its own units: screen heights from the monitor's
-    // top-left, as x, y, width, height. One function decides it for both the shader and the drag
-    // window, so the outline the user grabs cannot drift off the card it is standing in for.
-    void HudRectFor(const MonitorInfo& m, float& x, float& y, float& w, float& h) const;
+    // Where one of the engine's overlay panels sits on a monitor, in its own units: screen heights
+    // from the monitor's top-left, as x, y, width, height. One function decides it for both the shader
+    // and the drag window, so the outline the user grabs cannot drift off the panel it stands in for -
+    // and `panel` is kPanelCard or kPanelChart, because the two differ only in which settings they
+    // read and would otherwise be the same forty lines twice.
+    enum Panel { kPanelCard = 0, kPanelChart = 1, kPanelCount = 2 };
+    void PanelRectFor(const MonitorInfo& m, int panel, float& x, float& y, float& w, float& h) const;
     // The same rectangle in desktop pixels, for placing the drag window.
-    RECT HudScreenRect(const MonitorInfo& m) const;
-    // Turns the draggable layer on and off. Turning it on with the card hidden would leave a click
-    // target over a desktop with nothing in it, so this refuses unless the overlay is showing.
-    bool ArmHudDrag(bool on, std::string& error);
+    RECT PanelScreenRect(const MonitorInfo& m, int panel) const;
+    // Turns a panel's draggable layer on and off. Turning it on with the panel hidden would leave a
+    // click target over a desktop with nothing in it, so this refuses unless that panel is showing.
+    bool ArmDrag(int panel, bool on, std::string& error);
     // Moves the rotation pointer by delta and shows the result. Returns the id that got on screen.
     std::string RotateStep(int delta);
     static bool IsAutostartEnabled(std::string& error);
@@ -272,12 +277,26 @@ private:
     ULONGLONG spinWindowStart_ = 0;
     std::string lastError_;
     std::string hudError_;   // why the status card could not be prepared, empty when it can
-    // The monitor whose card is being dragged, or -1. The layer exists only while this is >= 0, which
+    // The monitor whose panel is being dragged, or -1. The layer exists only while this is >= 0, which
     // is why the desktop's own clicks are unaffected the rest of the time.
-    int hudDragMonitor_ = -1;
-    HudDragWindow hudDrag_;
-    RECT hudDragRect_{};   // the rectangle the layer is actually sitting in, so it is only moved
-                           // when the card's own rect changed rather than every frame
+    struct PanelDrag {
+        HudDragWindow win;
+        int monitor = -1;
+        RECT rect{};      // the rectangle the layer actually sits in, so it is only moved when the
+                          // panel's own rect changed rather than every frame
+    };
+    PanelDrag drag_[kPanelCount];
+    // The chart panel's history, one row of four per sampled second. Every slot starts at -1 rather
+    // than at zero, because a zero on a gauge is a claim ("this metric read 0%") and an absence is not.
+    // `= { -1.f }` would only have set the first one, which is the whole reason this is a fill.
+    DiskTemp diskTemp_;
+    ULONGLONG diskTempAtMs_ = 0;
+    std::string diskTempWhy_;
+    std::array<float, 4 * kChartSamples> chartRing_ = [] {
+        std::array<float, 4 * kChartSamples> r;
+        r.fill(-1.f);
+        return r;
+    }();
 };
 
 } // namespace sw

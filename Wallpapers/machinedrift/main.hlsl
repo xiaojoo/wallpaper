@@ -99,7 +99,7 @@ float4 PSMain(VSOut i) : SV_TARGET {
         float ribH = 0.20 / 32.0;
         int ri = int(floor((fu.y - 0.28) / ribH));
         if (ri >= 0 && ri < 32 && ri < int(max(uMeta.z, 1.0))) {
-            float cl = saturate(uCore[ri] / 100.0);
+            float cl = saturate(StatCore(ri) / 100.0);
             float band = 1.0 - smoothstep(0.28, 0.46, abs(frac((fu.y - 0.28) / ribH) - 0.5));
             float across = step(0.28, fu.x) * step(fu.x, 0.72);
             c += lerp(dim, hot, cl) * band * across * body * (0.08 + 1.05 * cl) * ring_ink;
@@ -123,7 +123,7 @@ float4 PSMain(VSOut i) : SV_TARGET {
             float rad = 0.030;
             float ring = smoothstep(rad * 0.40, rad * 0.75, r) * (1.0 - smoothstep(rad * 0.72, rad, r));
             float ang = atan2(d.y, d.x);
-            float spin = saturate(uCore[(j * 3) % 32] / 100.0);
+            float spin = saturate(StatCore((j * 3) % 32) / 100.0);
             float dots = step(0.5, frac(ang * 1.5915 + t0 * (0.25 + 1.6 * spin)));
             c += lerp(ink, hot, spin) * ring * dots * (0.25 + 0.85 * spin) * ring_ink;
         }
@@ -193,7 +193,7 @@ float4 PSMain(VSOut i) : SV_TARGET {
     int ci = int(floor(fieldX / colW));
     float base = bars_y;
     if (ci >= 0 && ci < int(coreN) && ci < 32) {
-        float load = uCore[ci];
+        float load = StatCore(ci);
         float h = max(max(load, 0.0) / 100.0 * bars_height, 0.0018);
         float rel = frac(fieldX / colW);
         float inX = step(abs(rel - 0.5), 0.39);

@@ -24,6 +24,9 @@
 #include <winsock2.h>
 #include <ws2ipdef.h>
 #include <pdh.h>
+// PDH's status codes live in their own header, which pdh.h does not pull in: without it
+// PDH_MORE_DATA is undeclared and the array read below cannot ask for its buffer size.
+#include <pdhmsg.h>
 #include <iphlpapi.h>
 
 namespace sw {
@@ -63,6 +66,14 @@ struct MachineStats {
     float memPct = -1.f, memUsedMb = -1.f, memTotalMb = -1.f, commitMb = -1.f;
     float diskReadBs = -1.f, diskWriteBs = -1.f, diskActivePct = -1.f;
     float diskFreeGb = -1.f, diskTotalGb = -1.f;
+    // The drive's own temperature, read from the NVMe itself (Engine/System/DiskTemp). -1 on a SATA
+    // or USB disk, which is normal and is why the chart leaves the mark undrawn rather than showing 0.
+    float diskTempC = -1.f, diskWarnC = -1.f, diskCritC = -1.f;
+    // The ACPI thermal zone the firmware exposes, in Celsius. It is NOT the CPU die: on a desktop
+    // there is one zone and it tracks the board's own sensor near the socket, which is why the panel
+    // labels it MB. -1 when the machine exposes no zone at all.
+    float mbTempC = -1.f;
+    int diskSensors = 0;
     float netRecvBs = -1.f, netSendBs = -1.f;
     float uptimeS = -1.f, processCount = -1.f;
 
@@ -88,10 +99,14 @@ public:
 private:
     bool BuildQuery();
     float Read(PDH_HCOUNTER c, bool* ok = nullptr) const;
+    // The same, for a counter added with a wildcard instance, which PDH answers as an array rather
+    // than a single value. Returns the first instance that reported.
+    float ReadFirst(PDH_HCOUNTER c, bool* ok = nullptr) const;
 
     PDH_HQUERY query_ = nullptr;
     PDH_HCOUNTER cpuTotal_ = nullptr, queue_ = nullptr, procs_ = nullptr;
     PDH_HCOUNTER diskRead_ = nullptr, diskWrite_ = nullptr, diskIdle_ = nullptr;
+    PDH_HCOUNTER thermalZone_ = nullptr;
     std::vector<PDH_HCOUNTER> coreIdle_;
     bool primed_ = false;
 
@@ -114,5 +129,11 @@ private:
 // adding a metric here without adding it there (or the other way round) shifts nothing - it shows up
 // as a gap on screen rather than as every later field reading the wrong number.
 void FillStatsCB(const MachineStats& x, StatsCB& out);
+
+// Advance a chart history ring by one sample: `ring` is 4 floats per sample, oldest row first, and
+// the -1 in the rows that have not been sampled yet is what tells a panel to leave them undrawn.
+// It lives outside StatsCB on purpose - FillStatsCB rebuilds that buffer from scratch every second,
+// and a history written into it is a history erased every second.
+void PushChartSeries(float* ring, const MachineStats& x);
 
 } // namespace sw

@@ -48,6 +48,17 @@ struct Settings {
     float hudX = -1.f, hudY = -1.f;
     int hudScalePct = 100;        // the card's height, as a percentage of its reference size
     int hudFrame = 0;           // which of Shaders/HudFrames.hlsl's shapes draws its border
+    // The chart panel, which is a second overlay rather than another row on the card: it needs a
+    // different shape to be readable (a ring wants a square, a history wants width), and switching it
+    // on must not move anything the user positioned on the card.
+    bool chart = false;
+    int chartType = 0;            // 0 bars, 1 donut rings, 2 line - see ChartTypeName()
+    // Same four corners and the same indices as hudCorner, but it defaults to the opposite one:
+    // both panels starting in the top-right means switching the chart on hides the card.
+    int chartCorner = 3;
+    float chartX = -1.f, chartY = -1.f;
+    int chartScalePct = 100;
+    int chartFrame = 0;
     std::vector<Assignment> assignments;
     Json power = Json::Object();
 };
@@ -61,6 +72,11 @@ int ParseHudCorner(std::string_view s, int def = 0);
 const char* HudFrameName(int index);
 int ParseHudFrame(std::string_view s, int def = 0);
 int HudFrameCount();
+
+// The three chart shapes, named the way the references he sent are usually named.
+const char* ChartTypeName(int index);
+int ParseChartType(std::string_view s, int def = 0);
+int ChartTypeCount();
 
 class WallpaperManager {
 public:
@@ -101,6 +117,15 @@ public:
     void SetHudScale(int pct);
     // Returns the style now in force, so an unrecognised name echoes what is on the screen.
     int SetHudFrame(const std::string& name);
+    // The chart panel's six, mirroring the card's: the same corner/dragged-position rule, the same
+    // "echo what is on the screen" contract on the name-taking ones.
+    void SetChart(bool on);
+    int SetChartType(const std::string& name);
+    int SetChartCorner(const std::string& name);
+    void SetChartPos(float x, float y);
+    void ClearChartPos();
+    void SetChartScale(int pct);
+    int SetChartFrame(const std::string& name);
     void SetGlobalMaxFps(int fps);
     void SetRotate(const Json& r);
 

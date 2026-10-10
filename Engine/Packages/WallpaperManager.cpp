@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <mutex>
+#include <algorithm>
 
 namespace sw {
 static constexpr const char* MOD = "wpmgr";
@@ -89,6 +90,16 @@ bool WallpaperManager::Load(const std::wstring& exeDir, std::string& error) {
     if (s_.hudScalePct < 60) s_.hudScalePct = 60;
     if (s_.hudScalePct > 250) s_.hudScalePct = 250;
     s_.hudFrame = r.find("hud_frame") ? ParseHudFrame(r.find("hud_frame")->asString(), 0) : 0;
+    s_.chart = r.find("chart") ? r.find("chart")->asBool(false) : false;
+    s_.chartType = r.find("chart_type") ? ParseChartType(r.find("chart_type")->asString(), 0) : 0;
+    s_.chartCorner = r.find("chart_corner") ? ParseHudCorner(r.find("chart_corner")->asString(), 3) : 3;
+    if (const Json* p = r.find("chart_pos"); p && p->isArray() && p->items().size() == 2) {
+        const double x = p->items()[0].asNumber(-1.0), y = p->items()[1].asNumber(-1.0);
+        if (x >= 0.0 && y >= 0.0) { s_.chartX = float(x); s_.chartY = float(y); }
+    }
+    s_.chartScalePct = r.find("chart_scale") ? r.find("chart_scale")->asInt(100) : 100;
+    s_.chartScalePct = std::clamp(s_.chartScalePct, 60, 250);
+    s_.chartFrame = r.find("chart_frame") ? ParseHudFrame(r.find("chart_frame")->asString(), 0) : 0;
     if (s_.trayAlpha < 0) s_.trayAlpha = 0;
     if (s_.trayAlpha > 100) s_.trayAlpha = 100;
     if (const Json* p = r.find("power"); p && p->isObject()) s_.power = *p;
@@ -129,6 +140,17 @@ std::string WallpaperManager::ConfigText() const {
     }
     r.set("hud_scale", Json::Of(s_.hudScalePct));
     r.set("hud_frame", Json::Of(std::string(HudFrameName(s_.hudFrame))));
+    r.set("chart", Json::Of(s_.chart));
+    r.set("chart_type", Json::Of(std::string(ChartTypeName(s_.chartType))));
+    r.set("chart_corner", Json::Of(std::string(HudCornerName(s_.chartCorner))));
+    if (s_.chartX >= 0.f && s_.chartY >= 0.f) {
+        Json pos = Json::Array();
+        pos.push(Json::Of(double(s_.chartX)));
+        pos.push(Json::Of(double(s_.chartY)));
+        r.set("chart_pos", std::move(pos));
+    }
+    r.set("chart_scale", Json::Of(s_.chartScalePct));
+    r.set("chart_frame", Json::Of(std::string(HudFrameName(s_.chartFrame))));
     r.set("power", s_.power.isObject() ? s_.power : Json::Object());
     Json mons = Json::Array();
     for (auto& a : s_.assignments) {
@@ -305,6 +327,49 @@ int HudFrameCount() { return 6; }
 int ParseHudFrame(std::string_view s, int def) {
     for (int i = 0; i < HudFrameCount(); ++i)
         if (s == HudFrameName(i)) return i;
+    return def;
+}
+
+void WallpaperManager::SetChart(bool on) { s_.chart = on; }
+
+int WallpaperManager::SetChartType(const std::string& name) {
+    s_.chartType = ParseChartType(name, s_.chartType);
+    return s_.chartType;
+}
+
+int WallpaperManager::SetChartCorner(const std::string& name) {
+    s_.chartCorner = ParseHudCorner(name, s_.chartCorner);
+    s_.chartX = s_.chartY = -1.f;
+    return s_.chartCorner;
+}
+
+void WallpaperManager::SetChartPos(float x, float y) { s_.chartX = x, s_.chartY = y; }
+
+void WallpaperManager::ClearChartPos() { s_.chartX = s_.chartY = -1.f; }
+
+void WallpaperManager::SetChartScale(int pct) {
+    s_.chartScalePct = pct < 60 ? 60 : (pct > 250 ? 250 : pct);
+}
+
+int WallpaperManager::SetChartFrame(const std::string& name) {
+    s_.chartFrame = ParseHudFrame(name, s_.chartFrame);
+    return s_.chartFrame;
+}
+
+const char* ChartTypeName(int index) {
+    // The three shapes he sent references for. "donut" is four concentric rings rather than one ring
+    // split into slices: a slice would mean "this metric's share of the sum of four percentages",
+    // which is a number nobody can check, while a ring sweeping its own value is the same reading the
+    // card prints.
+    static const char* const kNames[] = { "bar", "donut", "line" };
+    return kNames[index >= 0 && index < ChartTypeCount() ? index : 0];
+}
+
+int ChartTypeCount() { return 3; }
+
+int ParseChartType(std::string_view s, int def) {
+    for (int i = 0; i < ChartTypeCount(); ++i)
+        if (s == ChartTypeName(i)) return i;
     return def;
 }
 

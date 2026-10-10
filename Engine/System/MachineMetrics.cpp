@@ -1,5 +1,6 @@
 #include "Engine/System/MachineMetrics.hpp"
 #include <cmath>
+#include <vector>
 
 #pragma comment(lib, "pdh.lib")
 #pragma comment(lib, "iphlpapi.lib")
@@ -43,6 +44,9 @@ bool MachineMetrics::BuildQuery() {
     AddEnglish(query_, L"\\Processor(_Total)\\% Processor Time", &cpuTotal_);
     AddEnglish(query_, L"\\System\\Processor Queue Length", &queue_);
     AddEnglish(query_, L"\\System\\Processes", &procs_);
+    // The thermal zone's instance name is firmware-given (this machine's is `\\_TZ.TZ00`),
+    // so the instance is a wildcard and is read back through the array API rather than guessed at.
+    AddEnglish(query_, L"\\Thermal Zone Information(*)\\Temperature", &thermalZone_);
     AddEnglish(query_, L"\\PhysicalDisk(_Total)\\Disk Read Bytes/sec", &diskRead_);
     AddEnglish(query_, L"\\PhysicalDisk(_Total)\\Disk Write Bytes/sec", &diskWrite_);
     AddEnglish(query_, L"\\PhysicalDisk(_Total)\\% Idle Time", &diskIdle_);
@@ -58,6 +62,32 @@ bool MachineMetrics::BuildQuery() {
     primed_ = false;
     return true;
 }
+
+// The same read for a counter added with a wildcard instance, which PDH answers as an array of
+// instances rather than one value. Returns the first instance that actually reported.
+float MachineMetrics::ReadFirst(PDH_HCOUNTER c, bool* ok) const {
+    if (!c) { if (ok) *ok = false; return -1.f; }
+    ULONG items = 0, bytes = 0;
+    if (PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &bytes, &items, nullptr) != PDH_MORE_DATA) {
+        if (ok) *ok = false;
+        return -1.f;
+    }
+    std::vector<unsigned char> buf(bytes);
+    auto* arr = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
+    if (FAILED(PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &bytes, &items, arr))) {
+        if (ok) *ok = false;
+        return -1.f;
+    }
+    for (ULONG i = 0; i < items; ++i) {
+        if (arr[i].FmtValue.CStatus == 0) {
+            if (ok) *ok = true;
+            return float(arr[i].FmtValue.doubleValue);
+        }
+    }
+    if (ok) *ok = false;
+    return -1.f;
+}
+
 
 float MachineMetrics::Read(PDH_HCOUNTER c, bool* ok) const {
     if (!c) { if (ok) *ok = false; return -1.f; }
@@ -164,6 +194,10 @@ MachineStats MachineMetrics::Sample(const GpuUse& gpu) {
         }
         if (float q = Read(queue_, &ok); ok) s.cpuQueue = q;
         if (float p = Read(procs_, &ok); ok) s.processCount = p;
+        // The counter reports Kelvin (301 on this machine at idle), and a zone that has never
+        // reported answers 0 - which would be 0 K, not "no answer", so the sanity floor below is
+        // what keeps an uninitialised zone from drawing as -273 C.
+        if (float k = ReadFirst(thermalZone_, &ok); ok && k > 200.f) s.mbTempC = k - 273.15f;
         if (float r = Read(diskRead_, &ok); ok) {
             s.diskReadBs = r;
             bool w2 = false;
@@ -201,8 +235,26 @@ void FillStatsCB(const MachineStats& x, StatsCB& out) {
     out.disk2[0] = x.diskFreeGb; out.disk2[1] = x.diskTotalGb;
     out.disk2[2] = x.processCount; out.disk2[3] = x.uptimeS;
     out.net[0] = x.netRecvBs; out.net[1] = x.netSendBs;
+    out.temp[0] = x.gpu.device; out.temp[1] = x.diskTempC; out.temp[2] = x.mbTempC;
+    out.disk3[0] = x.diskTempC; out.disk3[1] = x.diskWarnC;
+    out.disk3[2] = x.diskCritC; out.disk3[3] = float(x.diskSensors);
     out.meta[0] = float(x.valid); out.meta[1] = x.ageS; out.meta[2] = float(x.coreCount);
     for (int i = 0; i < kMaxCores; ++i) out.core[i] = x.core[i];
+}
+
+void PushChartSeries(float* ring, const MachineStats& x) {
+    // The same four the status card shows, in the same order, so a bar, a ring and a line for "CPU"
+    // are never three different quantities. One row per sample because the shader reads them as
+    // float4 - see uCore4 in Shaders/Contract.hlsl for what a scalar array costs.
+    // The chart panel's three temperature marks, in the order kMark* declares in
+    // Shaders/HudChart.hlsl: x gpu, y drive, z motherboard thermal zone. The fourth column is unused
+    // and stays -1 because the constant buffer's row is a float4 either way. The only thing keeping
+    // the two orders in step is this comment.
+    const float v[4] = { x.gpu.device, x.diskTempC, x.mbTempC, -1.f };
+    for (int i = 0; i + 1 < kChartSamples; ++i)
+        for (int m = 0; m < 4; ++m) ring[i * 4 + m] = ring[(i + 1) * 4 + m];
+    for (int m = 0; m < 4; ++m)
+        ring[(kChartSamples - 1) * 4 + m] = v[m];
 }
 
 } // namespace sw
