@@ -62,10 +62,10 @@ float SegDist(float2 p, float2 a, float2 b) {
 // "CPU 12%" / "SSD 53C" as one call: three letters, a space, a fixed-point number, and a unit.
 // Returns coverage, not colour, so the caller decides how bright the label is. `px` is one device
 // pixel in auv, needed because the degree mark is drawn rather than looked up - see below.
-float MetricLabel(float2 auv, float2 o, float2 cell, uint n0, uint n1, uint n2,
+float MetricLabel(float2 auv, float2 o, float2 cell, uint n0, uint n1, uint n2, int nameLen,
                   float value, int fracDigits, uint unit, bool degree, float px) {
-    float a = Lbl(auv, o, cell, 3, n0, n1, n2);
-    float x = o.x + 3.45 * cell.x;                      // three letters and a narrow gap
+    float a = Lbl(auv, o, cell, nameLen, n0, n1, n2);
+    float x = o.x + (float(nameLen) + 0.45) * cell.x;   // the letters and a narrow gap
     float b = HudNumber(auv, float2(x, o.y), cell, value, 2, fracDigits, cSP);
     x += (2 + (fracDigits > 0 ? 1 : 0) + (float)fracDigits) * cell.x;
     float d = 0.0;
@@ -86,8 +86,8 @@ float MetricLabel(float2 auv, float2 o, float2 cell, uint n0, uint n1, uint n2,
 }
 
 // How wide MetricLabel's result is, so the caller can centre it.
-float MetricLabelWidth(float2 cell, bool degree) {
-    return cell.x * (6.45 + (degree ? 0.64 : 0.0));
+float MetricLabelWidth(float2 cell, int nameLen, bool degree) {
+    return cell.x * (float(nameLen) + 2.45 + (degree ? 0.64 : 0.0));
 }
 
 float4 PSMain(VSOut i) : SV_TARGET {
@@ -125,7 +125,8 @@ float4 PSMain(VSOut i) : SV_TARGET {
     val[kMarkMb] = uTemp.z;
     uint name0[kMarks] = { cG, cS, cM };
     uint name1[kMarks] = { cP, cS, cB };
-    uint name2[kMarks] = { cU, cD, cB };
+    uint name2[kMarks] = { cU, cD, cSP };               // MB is two letters; the third slot is blank
+    int nameLen[kMarks] = { 3, 3, 2 };
     uint unit[kMarks] = { cC, cC, cC };        // every mark carries the degree ring, then this C
     int fracD[kMarks] = { 0, 0, 0 };
     float3 tint[kMarks];
@@ -162,20 +163,26 @@ float4 PSMain(VSOut i) : SV_TARGET {
                 // switched off, so the bar stays square where it meets the baseline, as the reference's
                 // do. Clamping the corner centre's x collapses the two circles into one across the flat
                 // middle of the cap.
-                float2 cc = float2(clamp(p.x, r, bw - r), r);
-                float corner = length(p - cc) - r;
                 float sdBox = max(max(-p.x, p.x - bw), max(-p.y, p.y - h));
-                float d = max(sdBox, step(p.y, r) * corner);
+                float d = sdBox;
+                if (p.y < r) {
+                    // Clamping the corner centre's x collapses the two circles into one across the
+                    // flat middle of the cap. The branch is not cosmetic: folding the corner in as
+                    // `max(sdBox, step(...) * corner)` clamps the body's *negative* distance to zero
+                    // instead, and every pixel below the cap band then resolves to half coverage -
+                    // measured as the bar's G dropping 139 -> 67 across one row at 38% of its height.
+                    float2 cc = float2(clamp(p.x, r, bw - r), r);
+                    d = max(sdBox, length(p - cc) - r);
+                }
                 float m = 1.0 - smoothstep(-px, px, d);
                 float3 dark = float3(0.024, 0.180, 0.310);
                 col += lerp(tint[k], dark, pow(saturate(p.y / h), 0.8)) * m;
                 ink = max(ink, m);
                 // The name centred under the bar, the value centred above it.
-                bool deg = true;
-                float lw = MetricLabelWidth(cell, deg);
+                float lw = MetricLabelWidth(cell, nameLen[k], true);
                 float lb = MetricLabel(auv, float2(b0.x + (bw - lw) * 0.5, base + cellH * 0.55),
-                                       cell, name0[k], name1[k], name2[k], val[k], fracD[k],
-                                       unit[k], deg, px);
+                                       cell, name0[k], name1[k], name2[k], nameLen[k], val[k],
+                                       fracD[k], unit[k], true, px);
                 col += lab * lb;
                 ink = max(ink, lb);
             }
@@ -193,7 +200,7 @@ float4 PSMain(VSOut i) : SV_TARGET {
                 if (val[k] < 0.0) continue;
                 float2 o = float2(wc.x + ws.x * (0.03 + 0.32 * k), wc.y + ws.y - cellH * 1.3);
                 legend = max(legend, MetricLabel(auv, o, cell, name0[k], name1[k], name2[k],
-                                                 val[k], fracD[k], unit[k], true, px));
+                                                 nameLen[k], val[k], fracD[k], unit[k], true, px));
             }
             col += lab * legend;
             ink = max(ink, legend);
