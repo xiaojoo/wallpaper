@@ -45,10 +45,14 @@ private:
     QAction* prev_ = nullptr;
     QAction* autoPlay_ = nullptr;
     QAction* stopPlay_ = nullptr;
+    // Holds the desktop's own motion. Sits under the two rotation rows because it is the same kind of
+    // thing - a switch about what plays - and greyed on a still, where there is nothing to hold.
+    QAction* pauseWallpaper_ = nullptr;
     // The two desktop overlays that are worth turning on without opening the window: the ring, and
     // the shell's icon layer it stands in for. Both are checkable because both are states, and the
     // check is the only place they can be read from here.
     QAction* orbit_ = nullptr;
+    QAction* pauseRing_ = nullptr;   // stops the ring turning without touching 转一圈
     QAction* hideIcons_ = nullptr;
     bool hinted_ = false;   // the "it is still running" toast is a once-per-session thing
 };

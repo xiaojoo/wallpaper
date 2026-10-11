@@ -59,8 +59,10 @@ void TrayMenu::attach(QWindow* window) {
     menu_->addSeparator();
     autoPlay_ = menu_->addAction(QString());
     stopPlay_ = menu_->addAction(QString());
+    pauseWallpaper_ = menu_->addAction(QString());
     menu_->addSeparator();
     orbit_ = menu_->addAction(QString());
+    pauseRing_ = menu_->addAction(QString());
     hideIcons_ = menu_->addAction(QString());
     menu_->addSeparator();
     quit_ = menu_->addAction(QString());
@@ -68,7 +70,9 @@ void TrayMenu::attach(QWindow* window) {
     // and syncStates() re-marks both from what the renderer says.
     autoPlay_->setCheckable(true);
     stopPlay_->setCheckable(true);
+    pauseWallpaper_->setCheckable(true);
     orbit_->setCheckable(true);
+    pauseRing_->setCheckable(true);
     hideIcons_->setCheckable(true);
 
     connect(quit_, &QAction::triggered, this, [] { QApplication::quit(); });
@@ -76,7 +80,11 @@ void TrayMenu::attach(QWindow* window) {
     connect(prev_, &QAction::triggered, this, [this] { bridge_.stepWallpaper(-1); });
     connect(autoPlay_, &QAction::triggered, this, [this] { bridge_.setRotate(true); });
     connect(stopPlay_, &QAction::triggered, this, [this] { bridge_.setRotate(false); });
+    connect(pauseWallpaper_, &QAction::triggered, this,
+            [this] { bridge_.setPaused(!bridge_.paused()); });
     connect(orbit_, &QAction::triggered, this, [this] { bridge_.setOrbit(!bridge_.orbit()); });
+    connect(pauseRing_, &QAction::triggered, this,
+            [this] { bridge_.setOrbitHeld(!bridge_.orbitHeld()); });
     connect(hideIcons_, &QAction::triggered, this,
             [this] { bridge_.setIconsHidden(!bridge_.iconsHidden()); });
 
@@ -114,6 +122,8 @@ void TrayMenu::retranslate() {
     autoPlay_->setText(bridge_.t(QStringLiteral("tray_auto_play")));
     stopPlay_->setText(bridge_.t(QStringLiteral("tray_stop_play")));
     orbit_->setText(bridge_.t(QStringLiteral("orbit_ring")));
+    pauseRing_->setText(bridge_.t(QStringLiteral("tray_pause_ring")));
+    pauseWallpaper_->setText(bridge_.t(QStringLiteral("tray_pause_wallpaper")));
     hideIcons_->setText(bridge_.t(QStringLiteral("hide_icons")));
 }
 
@@ -126,8 +136,15 @@ void TrayMenu::syncStates() {
     // and compiled the pass. Grey it out when it cannot, rather than letting the tick move and the
     // desktop stay as it was.
     orbit_->setEnabled(up && bridge_.orbitIcons() && bridge_.orbitReady());
+    // A still on the desktop has nothing playing, so the hold has no effect to show - grey it rather
+    // than let the tick move and the wallpaper stay exactly as it was.
+    pauseWallpaper_->setEnabled(up && bridge_.showingDynamic());
+    // Nothing is turning when the ring is off, so there is nothing to hold either.
+    pauseRing_->setEnabled(up && bridge_.orbit());
     hideIcons_->setEnabled(up);
     orbit_->setChecked(up && bridge_.orbit());
+    pauseRing_->setChecked(up && bridge_.orbitHeld());
+    pauseWallpaper_->setChecked(up && bridge_.paused());
     hideIcons_->setChecked(up && bridge_.iconsHidden());
     // The check mark is the state, so both rows go blank rather than claim "stopped" on a renderer
     // this window cannot read.

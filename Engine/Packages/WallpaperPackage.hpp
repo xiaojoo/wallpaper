@@ -42,6 +42,10 @@ public:
     int srcHeight() const { return srcH_; }
     // A video wallpaper names one file in its own directory instead of a texture at t0.
     bool isVideo() const { return !videoFile_.empty(); }
+    // A still: a picture with no clip behind it. Generated shaders have no source size at all, and a
+    // video carries one too, so "has a source picture and is not a clip" is what separates the two.
+    // The tray's 暂停壁纸 row is grey for exactly these - there is nothing playing to stop.
+    bool isImage() const { return srcW_ > 0 && !isVideo(); }
     const std::wstring& videoFile() const { return videoFile_; }
     bool videoLoop() const { return videoLoop_; }
     // Length the importer measured, so a card can say how long the clip is before anything opens it.

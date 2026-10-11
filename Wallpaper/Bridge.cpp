@@ -277,6 +277,10 @@ const Entry kStrings[] = {
     {"tray_quit", "退出", "Quit"},
     {"tray_auto_play", "自动播放", "Auto play"},
     {"tray_stop_play", "停止播放", "Stop playing"},
+    // Two holds, each on the thing the row above it governs: the wallpaper's own motion, and the
+    // ring's turning. Named 暂停 rather than 停止 because neither stops anything for good.
+    {"tray_pause_wallpaper", "暂停壁纸", "Pause the wallpaper"},
+    {"tray_pause_ring", "暂停图标", "Pause the icons"},
     {"tray_hint", "已退到托盘，壁纸继续在放；点托盘图标就能再打开", "Hidden to the tray - the wallpaper keeps playing. Click the tray icon to open this window again."},
 };
 
@@ -547,6 +551,7 @@ void Bridge::ingest(const Json& status, const Json& list) {
     orbitReady_ = status.boolOr("orbit_ready");
     orbitClickable_ = status.boolOr("orbit_clickable");
     orbitPeriod_ = status.intOr("orbit_period_s", 45);
+    orbitHeld_ = status.boolOr("orbit_held");
     orbitPerRing_ = status.intOr("orbit_per_ring", 12);
     orbitRings_ = status.intOr("orbit_rings", 1);
     orbitShown_ = status.intOr("orbit_shown", 0);
@@ -782,6 +787,28 @@ void Bridge::setPaused(bool p) {
     request(p ? R"({"cmd":"pause"})" : R"({"cmd":"resume"})", 1500, &out);
     paused_ = p;
     emit stateChanged();
+}
+
+void Bridge::setOrbitHeld(bool held) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"orbithold","arg":"{}"}})", held ? "on" : "off");
+    request(body.c_str(), 1500, &out);
+    orbitHeld_ = held;      // the reply is queued, so this is the same optimistic tick the switch uses
+    emit stateChanged();
+    refresh();
+}
+
+// The tray's 暂停壁纸 row. A still image on the desktop has nothing playing, so pausing it would move
+// a tick and change nothing - that is a dead control, so it goes grey instead. An id this window has
+// no catalog row for (mid-switch, or a renderer older than the `type` field) counts as dynamic: the
+// row being live is the older, better-tested behaviour, and grey on a guess would be worse.
+bool Bridge::showingDynamic() const {
+    for (const QVariant& v : catalog_) {
+        const QVariantMap row = v.toMap();
+        if (row.value("id").toString() != showingId_) continue;
+        return row.value("type").toString() != QStringLiteral("image");
+    }
+    return true;
 }
 
 void Bridge::setPreviewVideoPaused(bool p) {

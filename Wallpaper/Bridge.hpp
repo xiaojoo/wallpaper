@@ -52,6 +52,8 @@ class Bridge final : public QObject {
     Q_PROPERTY(bool orbitReady READ orbitReady NOTIFY stateChanged)
     Q_PROPERTY(bool orbitClickable READ orbitClickable NOTIFY stateChanged)
     Q_PROPERTY(int orbitPeriod READ orbitPeriod NOTIFY stateChanged)
+    // Held still by the tray rather than by 转一圈=0: the period survives it.
+    Q_PROPERTY(bool orbitHeld READ orbitHeld NOTIFY stateChanged)
     Q_PROPERTY(int orbitPerRing READ orbitPerRing NOTIFY stateChanged)
     Q_PROPERTY(int orbitRings READ orbitRings NOTIFY stateChanged)
     Q_PROPERTY(int orbitShown READ orbitShown NOTIFY stateChanged)
@@ -87,6 +89,9 @@ class Bridge final : public QObject {
     Q_PROPERTY(int chartHistory READ chartHistory NOTIFY stateChanged)
     Q_PROPERTY(int maxFps READ maxFps NOTIFY stateChanged)
     Q_PROPERTY(bool paused READ paused NOTIFY stateChanged)
+    // Whether the wallpaper on the desktop is a still. The tray's 暂停壁纸 row is grey for those:
+    // there is nothing playing there to stop, and a tick that changes nothing is a dead control.
+    Q_PROPERTY(bool showingDynamic READ showingDynamic NOTIFY stateChanged)
     // Whether the clip in the big preview is frozen. This is the browse page's own transport and is
     // scoped to the preview player, so it is deliberately not 暂停渲染 (which stops the drawing).
     Q_PROPERTY(bool previewVideoPaused READ previewVideoPaused WRITE setPreviewVideoPaused
@@ -186,6 +191,8 @@ public:
     int trayAlpha() const { return trayAlpha_; }
     int maxFps() const { return maxFps_; }
     bool paused() const { return paused_; }
+    bool orbitHeld() const { return orbitHeld_; }
+    bool showingDynamic() const;
     bool previewVideoPaused() const { return previewPaused_; }
     QString hostMethod() const { return host_; }
     QString rootDir() const { return root_; }
@@ -226,6 +233,7 @@ public:
     Q_INVOKABLE void refresh();
     Q_INVOKABLE bool apply(const QString& wallpaperId);
     Q_INVOKABLE void setPaused(bool paused);
+    Q_INVOKABLE void setOrbitHeld(bool held);
     Q_INVOKABLE void setPreviewVideoPaused(bool paused);
     Q_INVOKABLE void setQuality(const QString& level);
     Q_INVOKABLE void setFit(const QString& mode);
@@ -372,6 +380,7 @@ private:
     QString transition_ = QStringLiteral("liquid");
     int trayAlpha_ = 0;
     bool qualityIsGlobal_ = false, paused_ = false, autostart_ = false;
+    bool orbitHeld_ = false;
     bool rotateOn_ = false;
     int rotateMin_ = 60, rotateNext_ = 0;
     QString showingId_, showingName_;

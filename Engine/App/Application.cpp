@@ -1046,7 +1046,9 @@ void Application::AdvanceOrbit(ULONGLONG nowMs) {
     if (dtMs > 250) return;
     // Also held while the ring is being dragged: a handle that slides out from under the pointer
     // because the ring itself is moving is the jitter the card's drag layer already had to be fixed for.
-    if (orbitPeriodS_ <= 0.0 || orbitHover_ >= 0 || orbitDrag_.monitor >= 0) return;
+    // And while the tray is holding it - which is not the same as 转一圈=0, because the period he set
+    // survives the hold and the ring picks up from the angle it stopped on.
+    if (orbitPeriodS_ <= 0.0 || orbitHover_ >= 0 || orbitDrag_.monitor >= 0 || orbitHeld_) return;
     orbitPhase_ += float(double(dtMs) * 0.001 * 6.28318530718 / orbitPeriodS_);
     if (orbitPhase_ > 6.28318530718f) orbitPhase_ = std::fmod(orbitPhase_, 6.28318530718f);
 }
@@ -1417,6 +1419,7 @@ void Application::UpdateSnapshot() {
     r.set("orbit_ready", Json::Of(renderer_.orbitReady()));
     r.set("orbit_clickable", Json::Of(iconHit_.active()));
     r.set("orbit_period_s", Json::Of(int(orbitPeriodS_)));
+    r.set("orbit_held", Json::Of(orbitHeld_));
     // Per ring and in total, because they are different numbers as soon as there is more than one
     // ring: `orbit_per_ring` is what the slider holds, `orbit_shown` is how many the desktop actually
     // filled after the selection and the constant buffer's 64 rows had their say.
@@ -1538,9 +1541,11 @@ void Application::UpdateSnapshot() {
             m.set("params", Json::Of((long long)p.params().members().size()));
             m.set("textures", Json::Of((long long)p.textures().size()));
             m.set("particles", Json::Of((long long)p.particleCount()));
-            // What kind of package this is, so the window can label a clip without opening it.
+            // What kind of package this is, so the window can label a clip without opening it - and so
+            // the tray knows a still has nothing to pause.
             m.set("type", Json::Of(std::string(p.isVideo() ? "video"
-                                              : p.hasParticles() ? "particles" : "shader")));
+                                              : p.hasParticles() ? "particles"
+                                              : p.isImage() ? "image" : "shader")));
             if (p.isVideo()) {
                 m.set("duration_s", Json::Of(p.srcDuration()));
                 m.set("loop", Json::Of(p.videoLoop()));
@@ -2577,6 +2582,13 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         const double p = std::atof(arg.c_str());
         orbitPeriodS_ = (p <= 0.0) ? 0.0 : std::max(3.0, p);
         result = std::format(R"({{"ok":true,"orbit_period_s":{}}})", orbitPeriodS_);
+    } else if (action == "orbithold") {
+        // Not persisted, on the same grounds as the ring itself: a ring the desktop is not showing
+        // after a restart should not come back frozen. The period is left exactly as it was, so this
+        // row only ever stops and starts the turning.
+        orbitHeld_ = arg == "on" || arg == "true" || arg == "1";
+        result = std::format(R"({{"ok":true,"orbit_held":{},"orbit_period_s":{}}})",
+                             orbitHeld_ ? "true" : "false", orbitPeriodS_);
     } else if (action == "orbitcount") {
         // Clamped rather than refused: the ring's cost is the per-pixel loop over this many icons, so
         // the ceiling is a performance decision and belongs here, not with the caller. It is also

@@ -325,6 +325,10 @@ private:
     void LogOrbitSlots();
     // Seconds for one full revolution. 0 stops the ring.
     double orbitPeriodS_ = 45.0;
+    // Held still because the tray asked, which is a different thing from 转一圈 being 0: the period
+    // stays what he set it to, and letting go of the hold resumes from where it stopped instead of
+    // jumping back to a wall-clock angle.
+    bool orbitHeld_ = false;
     // The ring's angle, accumulated in Run() rather than read off a clock. Deriving it from absolute
     // time was fine while nothing could be pointed at: once the pointer can hold the ring still to
     // aim, an absolute phase would make it jump back to where wall-clock time says it should be the
