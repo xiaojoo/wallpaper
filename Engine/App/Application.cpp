@@ -1,6 +1,9 @@
 #include "Engine/App/Application.hpp"
+
+#include <cmath>
 #include "Engine/App/IPCServer.hpp"
 #include "Engine/Core/Log.hpp"
+#include "Engine/Desktop/IconLayer.hpp"
 #include "Engine/Graphics/FFmpegPlayer.hpp"
 #include "Engine/System/DiskTemp.hpp"
 #include "Engine/Packages/HudFramesMeta.hpp"
@@ -8,6 +11,7 @@
 #include <psapi.h>
 #include <shellapi.h>
 #include <filesystem>
+#include <fstream>
 #include <algorithm>
 #include <atomic>
 #include <thread>
@@ -150,6 +154,32 @@ bool Application::Start(const CommandLine& cl, std::string& error) {
         Warn(MOD, "status card unavailable: {}", error);
         error.clear();
     }
+    // The shortcut ring, also not fatal and also off until asked for. Built here rather than lazily
+    // on the first `orbit` verb because the expensive part - asking the shell for 43 icons - should
+    // not happen inside a frame, and because a desktop whose icons could not be read should say so
+    // once at startup instead of drawing an empty ring every time it is switched on.
+    {
+        std::string ierr;
+        if (!renderer_.InitOrbit(dev_.dev.Get(), wpm_.settings().root, ierr)) {
+            orbitError_ = ierr;
+            Warn(MOD, "icon orbit unavailable: {}", ierr);
+        } else {
+            std::string berr;
+            if (icons_.Build(berr)) {
+                iconsBuilt_ = true;
+                std::string uerr;
+                if (!renderer_.SetIconAtlas(dev_.dev.Get(), icons_.pixels().data(),
+                                            icons_.atlasWidth(), icons_.atlasHeight(), uerr)) {
+                    orbitError_ = uerr;
+                    iconsBuilt_ = false;
+                    Warn(MOD, "icon atlas not uploaded: {}", uerr);
+                }
+            } else {
+                orbitError_ = berr;
+                Warn(MOD, "no desktop shortcuts for the orbit: {}", berr);
+            }
+        }
+    }
     monitors_.Refresh(&dev_);
     if (monitors_.count() == 0) {
         error = "no monitors";
@@ -170,6 +200,11 @@ bool Application::Start(const CommandLine& cl, std::string& error) {
         Error(MOD, "desktop attach failed: {}", error);
         return false;
     }
+    // A run that was killed rather than closed left its note behind, and the desktop is still missing
+    // the icons it had. Done before any frame is drawn so the user never sees a restored-then-hidden
+    // flicker, and skipped in --window mode where we have not touched the desktop at all.
+    iconMarkPath_ = wpm_.settings().root + L"\\iconlayer.state";
+    if (!cl_.noDesktop) HealIconLayer();
 
     if (!power_.Init(error)) {
         Error(MOD, "power manager: {}", error);
@@ -686,6 +721,8 @@ bool Application::ArmDrag(int panel, bool on, std::string& error) {
     const MonitorInfo m = *pick;
     const RECT work{ m.px.x, m.px.y, m.px.x + m.px.w, m.px.y + m.px.h };
     if (!d.win.Create(GetModuleHandleW(nullptr), PanelScreenRect(m, panel), work,
+                      panel == kPanelCard ? L"SmartWallpaper status card - drag to move"
+                                          : L"SmartWallpaper chart panel - drag to move",
                       [this, panel, idx = m.index](float x, float y, bool commit) -> RECT {
         const MonitorInfo* mm = monitors_.byIndex(size_t(idx));
         if (!mm) return RECT{};
@@ -708,6 +745,211 @@ bool Application::ArmDrag(int panel, bool on, std::string& error) {
     Info(MOD, "{} drag layer armed on {} at {}x{}+{},{}", panel == kPanelCard ? "card" : "chart",
          m.tag, d.rect.right - d.rect.left, d.rect.bottom - d.rect.top, d.rect.left, d.rect.top);
     return true;
+}
+
+Application::RingShape Application::RingFor(const MonitorInfo& m) const {
+    const float wh = m.work.h > 0 ? float(m.work.h) : 1.f;
+    const float H = m.px.h > 0 ? float(m.px.h) : 1.f;
+    RingShape s;
+    // Radii and sizes are fractions of the work-area height, which is the unit the ring was laid out
+    // in from the start: it keeps the ellipse the same shape on a 1080p laptop and on this 4K panel.
+    s.rx = 0.30f * wh;
+    s.ry = 0.16f * wh;      // flat, but not flatter: at 0.11 the icons at each extreme merged into one blob
+    s.iconPx = 0.085f * wh;
+    // The middle object's half-height has to clear ry or nothing is ever hidden behind it - the bug
+    // stage 1 measured (a 184 px disc against a 238 px ring gave the back icon back fully intact).
+    s.occX = 0.10f * wh;
+    s.occY = 0.26f * wh;
+    // Unset means the middle of the work area, which is where the reference's figure stands. Set means
+    // wherever the user dragged it, in monitor heights from this monitor's top-left - the same units
+    // and the same "negative means nobody said" convention as the two panels.
+    const float autoX = float(m.work.x - m.px.x) + float(m.work.w) * 0.5f;
+    const float autoY = float(m.work.y - m.px.y) + float(m.work.h) * 0.5f;
+    const auto clamp = [](float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); };
+    s.cx = wpm_.settings().orbitX >= 0.f ? clamp(wpm_.settings().orbitX * H, 0.f, float(m.px.w)) : autoX;
+    s.cy = wpm_.settings().orbitY >= 0.f ? clamp(wpm_.settings().orbitY * H, 0.f, float(m.px.h)) : autoY;
+    return s;
+}
+
+RECT Application::OrbitScreenRect(const MonitorInfo& m) const {
+    const RingShape s = RingFor(m);
+    const float pad = s.iconPx * 0.5f;   // the front icons stick out past the ellipse itself
+    return RECT{ LONG(m.px.x + s.cx - s.rx - pad), LONG(m.px.y + s.cy - s.ry - pad),
+                 LONG(m.px.x + s.cx + s.rx + pad), LONG(m.px.y + s.cy + s.ry + pad) };
+}
+
+bool Application::ArmOrbitDrag(bool on, std::string& error) {
+    PanelDrag& d = orbitDrag_;
+    if (!on) {
+        d.win.Destroy();
+        d.monitor = -1;
+        return true;
+    }
+    if (d.monitor >= 0) return true;
+    if (!orbitOn_ || !iconsBuilt_ || !renderer_.orbitReady()) {
+        error = "the shortcut ring is not on the desktop, so there is nothing to drag";
+        return false;
+    }
+    POINT cp{};
+    GetCursorPos(&cp);
+    const MonitorInfo* pick = monitors_.byIndex(0);
+    for (auto& mm : monitors_.list())
+        if (cp.x >= mm.px.x && cp.x < mm.px.x + mm.px.w &&
+            cp.y >= mm.px.y && cp.y < mm.px.y + mm.px.h) pick = &mm;
+    if (!pick) { error = "no monitor to drag on"; return false; }
+    const MonitorInfo m = *pick;
+    const RECT work{ m.px.x, m.px.y, m.px.x + m.px.w, m.px.y + m.px.h };
+    const float H = float(m.px.h);
+    // The layer is the ring's bounding box, so the dashed outline is the ring's own footprint rather
+    // than a rectangle invented for the handle.
+    const RingShape s0 = RingFor(m);
+    const float bw = (s0.rx + s0.iconPx * 0.5f) * 2.f / H, bh = (s0.ry + s0.iconPx * 0.5f) * 2.f / H;
+    if (!d.win.Create(GetModuleHandleW(nullptr), OrbitScreenRect(m), work,
+                      L"SmartWallpaper shortcut ring - drag to move",
+                      [this, idx = m.index, bw, bh](float x, float y, bool commit) -> RECT {
+        const MonitorInfo* mm = monitors_.byIndex(size_t(idx));
+        if (!mm) return RECT{};
+        const float Hh = float(mm->px.h);
+        // The layer reports where its top-left wants to be; the ring is stored by its centre, so the
+        // two halves of the box are what turn one convention into the other.
+        wpm_.SetOrbitPos(x + bw * 0.5f, y + bh * 0.5f);
+        const RECT r = OrbitScreenRect(*mm);
+        if (commit) {
+            std::string e;
+            wpm_.Save(e);
+            ArmOrbitDrag(false, e);
+        }
+        return r;
+                      }, error)) {
+        Warn(MOD, "orbit drag layer: {}", error);
+        return false;
+    }
+    d.monitor = m.index;
+    d.rect = OrbitScreenRect(m);
+    Info(MOD, "orbit drag layer armed on {} at {}x{}+{},{}", m.tag,
+         d.rect.right - d.rect.left, d.rect.bottom - d.rect.top, d.rect.left, d.rect.top);
+    return true;
+}
+
+bool Application::ArmOrbitHit(std::string& error) {
+    if (orbitHitMonitor_ >= 0) return true;
+    if (!orbitOn_ || !iconsBuilt_ || !renderer_.orbitReady()) {
+        error = "the shortcut ring is not on the desktop, so there is nothing to click";
+        return false;
+    }
+    // The layer belongs to one monitor, on the same grounds as the two panel drag layers above it: the
+    // ring is one global layout, and a second layer would have to be told a second position.
+    const DesktopHost& host = desktop_.host();
+    POINT cp{};
+    GetCursorPos(&cp);
+    const MonitorInfo* pick = monitors_.byIndex(0);
+    for (auto& mm : monitors_.list())
+        if (cp.x >= mm.px.x && cp.x < mm.px.x + mm.px.w &&
+            cp.y >= mm.px.y && cp.y < mm.px.y + mm.px.h) pick = &mm;
+    if (!pick) { error = "no monitor to click on"; return false; }
+    const MonitorInfo m = *pick;
+    const RECT area{ m.px.x, m.px.y, m.px.x + m.px.w, m.px.y + m.px.h };
+    if (!iconHit_.Create(GetModuleHandleW(nullptr), host.iconHost, host.defView, area,
+                         [this](int slot) { LaunchRingSlot(slot); }, error)) {
+        Warn(MOD, "orbit click layer: {}", error);
+        return false;
+    }
+    orbitHitMonitor_ = int(m.index);
+    Info(MOD, "orbit click layer armed on {}, icon layer {}", m.tag, host.describe());
+    // Which shortcut each slot is. The order comes from a sorted enumeration of the Desktop folders,
+    // so it is not something anyone can guess from the picture, and "what would this click start" has
+    // to be answerable without starting it.
+    std::string names;
+    const int shown = int(std::min(orbitCount_, std::min(icons_.countFound(), UINT(kMaxOrbitIcons))));
+    for (int k = 0; k < shown; ++k) names += std::format(" {}={}", k, ToUtf8(icons_.items()[k].label));
+    Info(MOD, "orbit slots{}", names);
+    return true;
+}
+
+void Application::LaunchRingSlot(int slot) {
+    static_assert(kMaxOrbitIcons == IconHitWindow::kMaxSlots,
+                  "the ring's constant buffer, its shader loop and its click boxes must all be the "
+                  "same number of slots");
+    const auto& items = icons_.items();
+    if (slot < 0 || size_t(slot) >= items.size()) {
+        Warn(MOD, "orbit click on slot {} but only {} shortcuts were read", slot, items.size());
+        return;
+    }
+    const ShellIcon& it = items[size_t(slot)];
+    SHELLEXECUTEINFOW si{ sizeof(si) };
+    // SEE_MASK_FLAG_NO_UI: the rule for this surface is that a failure goes to the log and never in
+    // front of the user as a dialog, and ShellExecute's own error box would break that.
+    si.fMask = SEE_MASK_FLAG_NO_UI;
+    si.lpFile = it.lnkPath.c_str();      // the .lnk, not the target: the shell resolves the working
+    si.nShow = SW_SHOWNORMAL;            // directory and any arguments out of it
+    if (!ShellExecuteExW(&si)) {
+        Warn(MOD, "orbit click: {} '{}' did not start: {}", slot, ToUtf8(it.lnkPath), GetLastError());
+        return;
+    }
+    Info(MOD, "orbit click: slot {} '{}' started", slot, ToUtf8(it.label));
+}
+
+bool Application::SetIconsHidden(bool hide, std::string& error) {
+    const HWND list = desktop_.host().iconList;
+    if (!list) { error = "this desktop has no icon list window to hide"; return false; }
+    const bool ok = hide ? iconlayer::Hide(list, error) : iconlayer::Show(list, error);
+    if (!ok) return false;
+    iconsHidden_ = hide;
+    iconListSeen_ = hide ? list : nullptr;
+    // The note is what makes recovery independent of this process getting to run anything: a kill
+    // leaves it, and the next start reads it before it draws a frame.
+    std::error_code ec;
+    if (hide) {
+        std::ofstream mark(iconMarkPath_.c_str(), std::ios::trunc);
+        mark << "hidden";
+    } else std::filesystem::remove(std::filesystem::path(iconMarkPath_), ec);
+    Info(MOD, "desktop icons {}: list=0x{:X} shell HideIcons={} {}", hide ? "hidden" : "shown",
+         (uintptr_t)list, iconlayer::ShellState(), error);
+    return true;
+}
+
+void Application::HealIconLayer() {
+    std::error_code ec;
+    if (!std::filesystem::exists(std::filesystem::path(iconMarkPath_), ec)) return;
+    const HWND list = desktop_.host().iconList;
+    if (!list) {
+        Warn(MOD, "an earlier run noted the icons hidden but this desktop has no icon list to restore");
+        return;
+    }
+    std::string e;
+    iconlayer::Show(list, e);
+    iconsHidden_ = false;
+    iconListSeen_ = nullptr;
+    std::filesystem::remove(std::filesystem::path(iconMarkPath_), ec);
+    Info(MOD, "icons restored from the note a previous run left: shell HideIcons={} {}",
+         iconlayer::ShellState(), e);
+}
+
+// The ring's own clock, once per frame for every screen at once. Held still while the pointer is on an
+// icon: at a 45 s period the front of the ring travels about thirty pixels a second, which is a target
+// nobody can land a click on, and a ring that stops under the hand stops being a moving target.
+void Application::AdvanceOrbit(ULONGLONG nowMs) {
+    if (!orbitOn_ || !iconsBuilt_) {
+        orbitLastMs_ = nowMs;
+        orbitHover_ = -1;
+        return;
+    }
+    // Polled every frame whether or not the angle moves: the rectangles the layer holds came from last
+    // frame, and a pointer that walks onto a stopped ring still has to light it up.
+    POINT cp{};
+    GetCursorPos(&cp);
+    orbitHover_ = iconHit_.active() ? iconHit_.SlotAt(cp) : -1;
+
+    const ULONGLONG dtMs = orbitLastMs_ <= nowMs ? nowMs - orbitLastMs_ : 0;
+    orbitLastMs_ = nowMs;
+    // A gap longer than a quarter second is not a frame - an unlock, a stalled loop - and advancing the
+    // angle across it teleports the icons, which is what the frame delta already refuses to do.
+    if (dtMs > 250) return;
+    // Also held while the ring is being dragged: a handle that slides out from under the pointer
+    // because the ring itself is moving is the jitter the card's drag layer already had to be fixed for.
+    if (orbitPeriodS_ <= 0.0 || orbitHover_ >= 0 || orbitDrag_.monitor >= 0) return;
+    orbitPhase_ += float(double(dtMs) * 0.001 * 6.28318530718 / orbitPeriodS_);
+    if (orbitPhase_ > 6.28318530718f) orbitPhase_ = std::fmod(orbitPhase_, 6.28318530718f);
 }
 
 void Application::DrawSlot(Slot& s, double nowSeconds) {
@@ -772,6 +1014,58 @@ void Application::DrawSlot(Slot& s, double nowSeconds) {
         f.chartType = float(wpm_.settings().chartType + 1);   // 0 means "draw nothing" in the shader
         f.chartFrame = float(wpm_.settings().chartFrame);
     }
+    // The ring's geometry, computed here in this monitor's device pixels rather than in the shader.
+    // Making it clickable put a second reader on the same layout - the invisible window that turns a
+    // pixel into a program - and two independent trigonometries drift apart, so one side computes and
+    // both the shader (f.orbitIcon) and the window (the rects below) follow what is written here.
+    if (orbitOn_ && iconsBuilt_) {
+        const RingShape sh = RingFor(m);
+        const int n = int(std::min(orbitCount_, std::min(icons_.countFound(), UINT(kMaxOrbitIcons))));
+        // Quality can shrink the surface below the monitor, and the shader's px are surface pixels. The
+        // click layer and the drag layer live in monitor pixels and take the unscaled numbers.
+        const float scale = m.px.h > 0 ? float(surf.height()) / float(m.px.h) : 1.f;
+        const bool clickable = orbitHitMonitor_ == int(m.index);
+        f.orbitCount = float(n);
+        f.orbitCols = float(icons_.cols());
+        f.orbitRows = float(icons_.rows());
+        f.orbitDimBack = 0.45f;
+        f.orbitHover = float(clickable ? orbitHover_ : -1);
+        std::vector<IconHitRect> rects;
+        for (int k = 0; k < n; ++k) {
+            const float a = orbitPhase_ + float(k) / float(n) * 6.28318530718f;
+            const float se = std::sin(a), co = std::cos(a);
+            const float depth = se;                        // > 0 in front of the centre, < 0 behind
+            const float px = sh.cx + sh.rx * co, py = sh.cy + sh.ry * se;
+            float half = sh.iconPx * 0.5f * (0.55f + 0.45f * (depth + 1.f) * 0.5f);
+            // Behind, and inside the middle object: hidden. Written as size 0 rather than dropped,
+            // because the atlas cell is the slot number - packing the array would slide every remaining
+            // icon onto somebody else's picture. A hidden slot draws nothing and is not clickable, so
+            // nothing that is on screen can fail to be.
+            const float ex = (px - sh.cx) / sh.occX, ey = (py - sh.cy) / sh.occY;
+            if (depth < 0.f && ex * ex + ey * ey < 1.f) half = 0.f;
+            f.orbitIcon[k][0] = px * scale;
+            f.orbitIcon[k][1] = py * scale;
+            f.orbitIcon[k][2] = half * scale;
+            f.orbitIcon[k][3] = depth;
+            if (half > 0.f && clickable)
+                rects.push_back({ { m.px.x + int(px - half), m.px.y + int(py - half),
+                                    m.px.x + int(px + half), m.px.y + int(py + half) }, k });
+        }
+        // Once a second, and only while something can actually be clicked: the probe that measures the
+        // feature has to click the rectangles the engine believes it drew, and reading them off a
+        // screenshot would be measuring a third hand at the same job. At a 45 s period an icon travels
+        // about thirty pixels a second, so a line this old is still inside its own box.
+        // This sits above the hand-off because the hand-off takes the vector by move.
+        if (clickable && nowSeconds - orbitGeomLogT_ >= 1.0) {
+            orbitGeomLogT_ = nowSeconds;
+            std::string packed;
+            for (const auto& r : rects)
+                packed += std::format(" {}:{},{}+{}", r.slot, (r.px.left + r.px.right) / 2,
+                                      (r.px.top + r.px.bottom) / 2, (r.px.right - r.px.left) / 2);
+            Info(MOD, "orbit rects hover={} slot:cx,cy+half{}", orbitHover_, packed);
+        }
+        if (clickable) iconHit_.SetRects(std::move(rects));
+    }
     // Keep each grab layer welded to its panel. Only when the rectangle actually moved: SetWindowPos
     // every frame would queue a message per frame for the whole time the desktop is being drawn.
     // And not while the user is holding it: that window is being moved by the pointer in the message
@@ -786,6 +1080,20 @@ void Application::DrawSlot(Slot& s, double nowSeconds) {
                    want.right != d.rect.right || want.bottom != d.rect.bottom) {
             d.rect = want;
             d.win.Move(want);
+        }
+    }
+
+    // The ring's own grab layer, welded to the ring the same way - and it does move, because the
+    // bounding box follows the centre the pointer is dragging.
+    {
+        PanelDrag& d = orbitDrag_;
+        if (d.monitor == m.index && d.win.active() && !d.win.dragging()) {
+            const RECT want = OrbitScreenRect(m);
+            if (want.left != d.rect.left || want.top != d.rect.top ||
+                want.right != d.rect.right || want.bottom != d.rect.bottom) {
+                d.rect = want;
+                d.win.Move(want);
+            }
         }
     }
 
@@ -806,6 +1114,10 @@ void Application::DrawSlot(Slot& s, double nowSeconds) {
     if (wpm_.settings().chart && renderer_.chartReady()) {
         if (!renderer_.DrawChart(dev_.ctx.Get(), surf.rtv(), surf.width(), surf.height(), err))
             Warn(MOD, "{}: chart panel: {}", m.tag, err);
+    }
+    if (orbitOn_ && renderer_.orbitReady()) {
+        if (!renderer_.DrawOrbit(dev_.ctx.Get(), surf.rtv(), surf.width(), surf.height(), err))
+            Warn(MOD, "{}: icon orbit: {}", m.tag, err);
     }
 
     // One corner sample a second is enough to tell "animating" from "frozen", and it is the
@@ -935,6 +1247,32 @@ void Application::UpdateSnapshot() {
     // Ready is reported apart from enabled: a card the user switched on that the renderer could
     // not prepare would otherwise read as working, with nothing on the screen and no reason why.
     r.set("hud_ready", Json::Of(renderer_.hudReady()));
+    // The icon layer as the two authorities see it: what we asked for, and what explorer's own
+    // 显示桌面图标 value says. Reading them apart is the only way to notice the two disagreeing, which
+    // is the failure this switch has to be auditable for.
+    r.set("icons_hidden", Json::Of(iconsHidden_));
+    r.set("icons_shell_hide", Json::Of(iconlayer::ShellState() == 1));
+    r.set("icons_list_visible", Json::Of(!iconlayer::Hidden(desktop_.host().iconList)));
+    // The ring, with its two readiness halves apart: the icons may have been read while the shader
+    // could not be compiled, or the other way round, and a single "available" flag would let the
+    // settings window show a switch that does nothing in either case.
+    r.set("orbit", Json::Of(orbitOn_));
+    r.set("orbit_icons", Json::Of(iconsBuilt_));
+    r.set("orbit_ready", Json::Of(renderer_.orbitReady()));
+    r.set("orbit_clickable", Json::Of(iconHit_.active()));
+    r.set("orbit_period_s", Json::Of(int(orbitPeriodS_)));
+    r.set("orbit_count", Json::Of(int(orbitCount_)));
+    r.set("orbit_slots", Json::Of(int(icons_.countFound())));
+    r.set("orbit_drag", Json::Of(orbitDrag_.monitor >= 0));
+    if (wpm_.settings().orbitX >= 0.f && wpm_.settings().orbitY >= 0.f) {
+        Json pos = Json::Array();
+        pos.push(Json::Of(double(wpm_.settings().orbitX)));
+        pos.push(Json::Of(double(wpm_.settings().orbitY)));
+        r.set("orbit_pos", std::move(pos));
+    } else {
+        r.set("orbit_pos", Json::Null());
+    }
+    if (!orbitError_.empty()) r.set("orbit_error", Json::Of(orbitError_));
     if (!hudError_.empty()) r.set("hud_error", Json::Of(hudError_));
     r.set("power", Json::Of(power_.StatusLine()));
     {
@@ -1590,6 +1928,7 @@ int Application::Run() {
         ULONGLONG nowMs = GetTickCount64();
         power_.Poll(nowMs);
         TickRotation(nowMs);
+        AdvanceOrbit(nowMs);
         if (nowMs - machineAtMs_ >= 1000) {
             machineAtMs_ = nowMs;
             // The drive's temperature is a device query rather than a counter read, and it moves on a
@@ -1623,6 +1962,26 @@ int Application::Run() {
             cursorPx_ = cp;
             if (!cl_.noDesktop) {
                 desktop_.Recheck();
+                // Two ways the icons can come back without us, and the switch has to follow both
+                // rather than silently disagree with the screen. explorer rebuilding the layer (its own
+                // restart, a theme change) hands back a different window, so the hide is re-applied;
+                // the user's own 显示桌面图标 click re-shows the same window, and that wins - our
+                // switch goes off and the crash note goes away, because overruling a man who just
+                // asked for his icons back is not a thing a wallpaper should do.
+                if (iconsHidden_) {
+                    const HWND list = desktop_.host().iconList;
+                    std::string e;
+                    if (list && list != iconListSeen_) {
+                        SetIconsHidden(true, e);
+                    } else if (list && !iconlayer::Hidden(list)) {
+                        Info(MOD, "the icon layer came back without us (the shell's own menu?) - "
+                                  "switch turned off");
+                        iconsHidden_ = false;
+                        iconListSeen_ = nullptr;
+                        std::error_code ec;
+                        std::filesystem::remove(std::filesystem::path(iconMarkPath_), ec);
+                    }
+                }
                 for (auto& s : slots_) {
                     std::string e;
                     s.window.Rebind(desktop_.host(), e);
@@ -1929,6 +2288,69 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         ArmDrag(kPanelChart, false, e);
         result = std::format(R"({{"ok":true,"chart_corner":"{}"}})",
                              HudCornerName(wpm_.settings().chartCorner));
+    } else if (action == "icons") {
+        // The shell's own icon layer, which the ring stands in for. Not persisted for the same reason
+        // the ring is not: a desktop that lost its shortcuts because this program was killed should not
+        // lose them again by its own choice on the next start.
+        const bool hide = arg == "on" || arg == "true" || arg == "1" || arg == "hide";
+        std::string ierr;
+        const bool ok = SetIconsHidden(hide, ierr);
+        result = std::format(R"({{"ok":{},"icons_hidden":{},"shell_hideicons":{},"error":"{}"}})",
+                             ok ? "true" : "false", iconsHidden_ ? "true" : "false",
+                             iconlayer::ShellState(), ierr);
+    } else if (action == "orbitdrag") {
+        // Arming the layer is the whole switch: like the card's, it exists only while the user is
+        // holding it, so the desktop's own clicks are unaffected the rest of the time.
+        const bool on = arg == "on" || arg == "true" || arg == "1";
+        std::string e;
+        if (on) ArmOrbitDrag(true, e); else ArmOrbitDrag(false, e);
+        result = std::format(R"({{"ok":true,"orbit_drag":{},"error":"{}"}})",
+                             orbitDrag_.monitor >= 0 ? "true" : "false", e);
+    } else if (action == "orbithome") {
+        wpm_.ClearOrbitPos();
+        std::string e;
+        wpm_.Save(e);
+        ArmOrbitDrag(false, e);
+        result = R"({"ok":true,"orbit_custom":false})";
+    } else if (action == "orbit") {
+        // Not persisted, on the same grounds as the drag switch: a ring of the user's own shortcuts
+        // sitting over their desktop, and an invisible window over their icon layer, should not come
+        // back after a crash without being asked for.
+        orbitOn_ = arg == "on" || arg == "true" || arg == "1";
+        std::string herr;
+        if (orbitOn_) ArmOrbitHit(herr); else { iconHit_.Destroy(); orbitHitMonitor_ = -1;
+                                                 std::string de; ArmOrbitDrag(false, de); }
+        result = std::format(R"({{"ok":true,"orbit":{},"icons_ready":{},"icons_drawn":{},"on_screen":{},"clickable":{},"hover":{}}})",
+                             orbitOn_ ? "true" : "false", iconsBuilt_ ? "true" : "false",
+                             icons_.countIconsDrawn(),
+                             (orbitOn_ && iconsBuilt_ && renderer_.orbitReady()) ? "true" : "false",
+                             iconHit_.active() ? "true" : "false", orbitHover_);
+        if (orbitOn_ && !iconsBuilt_)
+            Warn(MOD, "orbit asked for but no icon atlas: {}", orbitError_);
+        if (orbitOn_ && !iconHit_.active())
+            Warn(MOD, "orbit drawn but not clickable: {}", herr);
+    } else if (action == "orbitlayer") {
+        // The click layer on its own, for the case where it was refused at switch-on (the desktop host
+        // is found a few seconds after startup, and arming is otherwise only reachable from `orbit`).
+        std::string herr;
+        const bool ok = arg == "off" ? (iconHit_.Destroy(), orbitHitMonitor_ = -1, true)
+                                     : ArmOrbitHit(herr);
+        result = std::format(R"({{"ok":{},"clickable":{},"error":"{}"}})", ok ? "true" : "false",
+                             iconHit_.active() ? "true" : "false", herr);
+    } else if (action == "orbitspeed") {
+        // Seconds per revolution; 0 holds the ring still. Clamped at the slow end because a period
+        // below a couple of seconds makes each icon flicker in and out of the centre object faster
+        // than the eye can follow.
+        const double p = std::atof(arg.c_str());
+        orbitPeriodS_ = (p <= 0.0) ? 0.0 : std::max(3.0, p);
+        result = std::format(R"({{"ok":true,"orbit_period_s":{}}})", orbitPeriodS_);
+    } else if (action == "orbitcount") {
+        // Clamped rather than refused: the ring's cost is the per-pixel loop over this many icons, so
+        // the ceiling is a performance decision and belongs here, not with the caller. It is also
+        // kMaxOrbitIcons, because that is how many rows the constant buffer and the shader's loop have.
+        const int n = std::atoi(arg.c_str());
+        orbitCount_ = (UINT)std::max(1, std::min(kMaxOrbitIcons, n));
+        result = std::format(R"({{"ok":true,"orbit_count":{}}})", orbitCount_);
     } else if (action == "powercap") {
         const int value = std::atoi(arg2.c_str());
         if (!power_.SetCap(arg, value)) {
@@ -2200,6 +2622,11 @@ void Application::Stop(const std::string& why) {
 void Application::Shutdown() {
     if (shutdown_) return;
     shutdown_ = true;
+    // First thing, before anything else is torn down: this process borrowed the desktop's icons and
+    // they go back on the way out. If it does not get to run this at all, the note in
+    // HealIconLayer() puts them back on the next start, and the desktop's own context menu puts them
+    // back without us.
+    if (iconsHidden_) { std::string e; SetIconsHidden(false, e); }
     DestroySlots();
     if (ipc_) {
         ipc_->Stop();

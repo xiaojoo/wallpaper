@@ -60,17 +60,25 @@ void TrayMenu::attach(QWindow* window) {
     autoPlay_ = menu_->addAction(QString());
     stopPlay_ = menu_->addAction(QString());
     menu_->addSeparator();
+    orbit_ = menu_->addAction(QString());
+    hideIcons_ = menu_->addAction(QString());
+    menu_->addSeparator();
     quit_ = menu_->addAction(QString());
     // Checkable so the mark renders; the rows themselves never read their own mark, they only act,
     // and syncStates() re-marks both from what the renderer says.
     autoPlay_->setCheckable(true);
     stopPlay_->setCheckable(true);
+    orbit_->setCheckable(true);
+    hideIcons_->setCheckable(true);
 
     connect(quit_, &QAction::triggered, this, [] { QApplication::quit(); });
     connect(next_, &QAction::triggered, this, [this] { bridge_.stepWallpaper(1); });
     connect(prev_, &QAction::triggered, this, [this] { bridge_.stepWallpaper(-1); });
     connect(autoPlay_, &QAction::triggered, this, [this] { bridge_.setRotate(true); });
     connect(stopPlay_, &QAction::triggered, this, [this] { bridge_.setRotate(false); });
+    connect(orbit_, &QAction::triggered, this, [this] { bridge_.setOrbit(!bridge_.orbit()); });
+    connect(hideIcons_, &QAction::triggered, this,
+            [this] { bridge_.setIconsHidden(!bridge_.iconsHidden()); });
 
     icon_ = new QSystemTrayIcon(makeIcon(), this);
     connect(icon_, &QSystemTrayIcon::activated, this, [this] (QSystemTrayIcon::ActivationReason r) {
@@ -105,6 +113,8 @@ void TrayMenu::retranslate() {
     prev_->setText(bridge_.t(QStringLiteral("prev")));
     autoPlay_->setText(bridge_.t(QStringLiteral("tray_auto_play")));
     stopPlay_->setText(bridge_.t(QStringLiteral("tray_stop_play")));
+    orbit_->setText(bridge_.t(QStringLiteral("orbit_ring")));
+    hideIcons_->setText(bridge_.t(QStringLiteral("hide_icons")));
 }
 
 void TrayMenu::syncStates() {
@@ -112,6 +122,13 @@ void TrayMenu::syncStates() {
     const bool up = bridge_.connected();
     const bool rotating = bridge_.rotateOn();
     for (QAction* a : {next_, prev_, autoPlay_, stopPlay_}) a->setEnabled(up);
+    // The ring needs more than a live pipe to be switchable: the renderer has to have read the icons
+    // and compiled the pass. Grey it out when it cannot, rather than letting the tick move and the
+    // desktop stay as it was.
+    orbit_->setEnabled(up && bridge_.orbitIcons() && bridge_.orbitReady());
+    hideIcons_->setEnabled(up);
+    orbit_->setChecked(up && bridge_.orbit());
+    hideIcons_->setChecked(up && bridge_.iconsHidden());
     // The check mark is the state, so both rows go blank rather than claim "stopped" on a renderer
     // this window cannot read.
     autoPlay_->setChecked(up && rotating);

@@ -1910,8 +1910,149 @@ ApplicationWindow {
                             }
                         }
 
-                    }
+                        // The shortcut ring, and the one thing about it that touches something
+                        // outside this program: the shell's own icon layer.
+                        Group {
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("orbit_ring")
+                                    color: th.text; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Slide {
+                                    checked: Bridge.orbit
+                                    enabled: Bridge.connected && Bridge.orbitIcons && Bridge.orbitReady
+                                    onToggled: function (on) { Bridge.setOrbit(on) }
+                                }
+                            }
+                            Text {
+                                text: trs("orbit_desc")
+                                wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                            }
+                            RowLayout {
+                                visible: Bridge.orbit
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("orbit_period")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Range {
+                                    label: trs("orbit_period")
+                                    from: 0
+                                    to: 120
+                                    value: Bridge.orbitPeriod
+                                    unit: " s"
+                                    zeroText: trs("orbit_stopped")
+                                    labelW: 48
+                                    enabled: Bridge.connected
+                                    onCommitted: function (v) { Bridge.setOrbitPeriod(v) }
+                                }
+                            }
+                            RowLayout {
+                                visible: Bridge.orbit
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("orbit_count")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Range {
+                                    label: trs("orbit_count")
+                                    from: 1
+                                    to: 16
+                                    value: Bridge.orbitCount
+                                    unit: ""
+                                    zeroText: ""
+                                    enabled: Bridge.connected
+                                    onCommitted: function (v) { Bridge.setOrbitCount(v) }
+                                }
+                            }
+                            // The ring's centre, on the same terms the status card's position is on:
+                            // a switch that puts a grab layer on the desktop only while it is held,
+                            // and once it has been dragged the row stops offering presets it no
+                            // longer uses and offers the way back instead.
+                            RowLayout {
+                                visible: Bridge.orbit
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("orbit_pos")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                RowLayout {
+                                    visible: Bridge.orbitCustom
+                                    spacing: 8
+                                    Text {
+                                        text: trs("hud_corner_custom")
+                                        color: th.text; font.family: root.fontFamily; font.pixelSize: 12
+                                    }
+                                    Btn {
+                                        text: trs("orbit_home")
+                                        compact: true
+                                        raised: true
+                                        enabled: Bridge.connected
+                                        onClicked: Bridge.resetOrbitPos()
+                                    }
+                                }
+                                Slide {
+                                    checked: Bridge.orbitDrag
+                                    enabled: Bridge.connected
+                                    onToggled: function (on) { Bridge.setOrbitDrag(on) }
+                                }
+                            }
+                            Text {
+                                visible: Bridge.orbit && Bridge.orbitDrag
+                                text: trs("orbit_pos_desc")
+                                wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("hide_icons")
+                                    color: th.text; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Slide {
+                                    checked: Bridge.iconsHidden
+                                    enabled: Bridge.connected
+                                    onToggled: function (on) { Bridge.setIconsHidden(on) }
+                                }
+                            }
+                            Text {
+                                text: trs("hide_icons_desc")
+                                wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                            }
+                            // Two states a switch alone cannot report: the ring could not be built at
+                            // all, and the reason why. (Which screen is clickable is not shown: on a
+                            // one-screen desktop - this one - a line about other screens would be a
+                            // description of something the user cannot have.)
+                            ColumnLayout {
+                                visible: Bridge.orbit && !(Bridge.orbitIcons && Bridge.orbitReady)
+                                Layout.fillWidth: true
+                                spacing: 2
+                                Text {
+                                    text: trs("orbit_unavailable")
+                                    color: th.warn; font.family: root.fontFamily; font.pixelSize: 11
+                                }
+                                Text {
+                                    text: Bridge.orbitError
+                                    wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                                }
+                            }
+                        }
 
+                    }
                     // ---------------------------------------------------------- 图表
                     // A second overlay panel rather than more rows on the status card: a ring wants a
                     // square and a history wants width, and switching this on must not move anything
@@ -3133,11 +3274,16 @@ ApplicationWindow {
         // "taskbar transparency" unconditionally, which was true only while it had
         // one user; a second Range would have announced itself as the first one's.
         property string label: trs("tray_alpha")
+        // What the number on the left means. The component was written for one slider, the taskbar's
+        // percentage, and said "%" unconditionally - borrowed for "seconds per revolution" and "icons
+        // on the ring" it read "45%" and "12%", which is a label that names the wrong thing.
+        property string unit: "%"
+        property string zeroText: trs("off")
         property int value: 0            // what the renderer holds
         property int held: -1            // what the pointer is on, only read while it is down
         readonly property int shown: trackHover.pressed ? (held >= 0 ? held : value) : value
         readonly property int pad: 10
-        readonly property int labelW: 34
+        property int labelW: 34          // widened by the rows whose text is longer than "100%"
         readonly property int knob: 14
         readonly property real trackW: Math.max(0, width - pad * 2 - labelW - knob)
         readonly property real frac: to > from ? (shown - from) / (to - from) : 0
@@ -3161,7 +3307,7 @@ ApplicationWindow {
             x: rng.pad
             anchors.verticalCenter: parent.verticalCenter
             width: rng.labelW
-            text: rng.shown === 0 ? trs("off") : rng.shown + "%"
+            text: rng.shown === 0 && rng.zeroText.length > 0 ? rng.zeroText : rng.shown + rng.unit
             color: th.text; font.family: root.fontFamily; font.pixelSize: 11
         }
         Rectangle {

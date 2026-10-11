@@ -366,7 +366,7 @@ bool D3D11Renderer::InitHud(ID3D11Device* dev, IWICImagingFactory* wic, const st
     if (!ok) { error = ToUtf8(srcPath) + " not readable"; return false; }
 
     Texture atlas;
-    if (!atlas.Load(dev, wic, shaders + L"\\glyphs.png", error)) {
+    if (!atlas.Load(dev, wic, shaders + L"\\glyphs.png", error, false)) {
         error = "hud glyph atlas: " + error;
         return false;
     }
@@ -409,7 +409,7 @@ bool D3D11Renderer::InitHud(ID3D11Device* dev, IWICImagingFactory* wic, const st
 }
 
 void D3D11Renderer::BindOverlay(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
-                                const Shader& s) {
+                                const Shader& s, ID3D11ShaderResourceView* atlas) {
     const float factor[4] = { 0, 0, 0, 0 };
     D3D11_VIEWPORT vp{ 0.f, 0.f, (float)w, (float)h, 0.f, 1.f };
     ctx->OMSetRenderTargets(1, &rtv, nullptr);
@@ -428,7 +428,7 @@ void D3D11Renderer::BindOverlay(ID3D11DeviceContext* ctx, ID3D11RenderTargetView
     ctx->PSSetConstantBuffers(0, 1, frameCb_.GetAddressOf());
     ctx->PSSetConstantBuffers(2, 1, statsCb_.GetAddressOf());
     // Slot 0 stays empty so the atlas lands on t1, where Glyphs.hlsl declares it.
-    ID3D11ShaderResourceView* srvs[2] = { nullptr, glyphs_.Get() };
+    ID3D11ShaderResourceView* srvs[2] = { nullptr, atlas };
     ctx->PSSetShaderResources(0, 2, srvs);
     ID3D11SamplerState* samplers[2] = { wrap_.Get(), wrap_.Get() };
     ctx->PSSetSamplers(0, 2, samplers);
@@ -441,7 +441,7 @@ void D3D11Renderer::BindOverlay(ID3D11DeviceContext* ctx, ID3D11RenderTargetView
 bool D3D11Renderer::DrawHud(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
                             std::string& error) {
     if (!hudReady_ || !rtv) { error = "status card overlay not ready"; return false; }
-    BindOverlay(ctx, rtv, w, h, hud_);
+    BindOverlay(ctx, rtv, w, h, hud_, glyphs_.Get());
     ctx->Draw(3, 0);
 
     // Unbind, so the next wallpaper's pass cannot read the overlay's atlas through a slot it thinks
@@ -456,7 +456,58 @@ bool D3D11Renderer::DrawHud(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rt
 bool D3D11Renderer::DrawChart(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
                               std::string& error) {
     if (!chartReady_ || !rtv) { error = "chart overlay not ready"; return false; }
-    BindOverlay(ctx, rtv, w, h, chart_);
+    BindOverlay(ctx, rtv, w, h, chart_, glyphs_.Get());
+    ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* none[2] = { nullptr, nullptr };
+    ctx->PSSetShaderResources(0, 2, none);
+    ctx->PSSetShader(nullptr, nullptr, 0);
+    ctx->VSSetShader(nullptr, nullptr, 0);
+    return true;
+}
+
+bool D3D11Renderer::InitOrbit(ID3D11Device* dev, const std::wstring& root, std::string& error) {
+    orbitReady_ = false;
+    // The same root InitHud reads from, so a staged tree that is missing this file is diagnosed the
+    // same way as one missing HudCard.hlsl - the path in the message, not just "not readable".
+    const std::wstring shaders = root + L"\\Shaders";
+    const std::wstring srcPath = shaders + L"\\IconOrbit.hlsl";
+    bool ok = false;
+    const std::string src = ReadFileUtf8(srcPath, ok);
+    if (!ok) { error = ToUtf8(srcPath) + " not readable"; return false; }
+
+    Shader::Entries e{};   // vs_5_0 + ps_5_0, the same pair the other two overlay passes compile
+    if (!orbit_.Compile(src, L"IconOrbit.hlsl", { shaders }, e, error)) {
+        error = "orbit shader: " + error;
+        return false;
+    }
+    if (!orbit_.CreatePipeline(dev, error)) { error = "orbit pipeline: " + error; return false; }
+    // Reflected and refused for the same reason as the card: b1 is one shared upload slot, and an
+    // overlay with its own Params would reallocate it every frame of every monitor.
+    if (!orbit_.ReflectParams(error)) { error = "orbit params: " + error; return false; }
+    if (orbit_.hasParams()) {
+        error = "IconOrbit.hlsl declares a Params cbuffer; the overlay must read only b0 and b2";
+        return false;
+    }
+    orbitReady_ = true;
+    Info(MOD, "icon orbit overlay ready");
+    return true;
+}
+
+bool D3D11Renderer::SetIconAtlas(ID3D11Device* dev, const BYTE* bgra, UINT w, UINT h, std::string& error) {
+    if (!bgra || !w || !h) { error = "no icon atlas pixels"; return false; }
+    Texture t;
+    if (!t.FromPixels(dev, w, h, bgra, error)) { error = "icon atlas upload: " + error; return false; }
+    iconAtlas_ = std::move(t);
+    return true;
+}
+
+bool D3D11Renderer::DrawOrbit(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
+                              std::string& error) {
+    if (!orbitReady_ || !rtv) { error = "icon orbit overlay not ready"; return false; }
+    // No atlas yet means the shell gave us nothing to draw, which is a state, not a failure: say
+    // nothing and draw nothing rather than logging once per frame.
+    if (!iconAtlas_.loaded()) return true;
+    BindOverlay(ctx, rtv, w, h, orbit_, iconAtlas_.srv());
     ctx->Draw(3, 0);
     ID3D11ShaderResourceView* none[2] = { nullptr, nullptr };
     ctx->PSSetShaderResources(0, 2, none);

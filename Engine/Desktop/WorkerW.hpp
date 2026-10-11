@@ -10,6 +10,7 @@ struct DesktopHost {
     HWND parent = nullptr;      // what our per-monitor windows are parented to
     HWND progman = nullptr;
     HWND defView = nullptr;     // SHELLDLL_DefView (the icon surface)
+    HWND iconList = nullptr;    // its SysListView32 child - the window that actually holds the icons
     HWND iconHost = nullptr;    // the top-level window that owns defView
     HostMethod method = HostMethod::None;
     POINT origin{};             // parent client (0,0) in desktop pixels

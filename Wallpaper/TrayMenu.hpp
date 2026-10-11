@@ -45,6 +45,11 @@ private:
     QAction* prev_ = nullptr;
     QAction* autoPlay_ = nullptr;
     QAction* stopPlay_ = nullptr;
+    // The two desktop overlays that are worth turning on without opening the window: the ring, and
+    // the shell's icon layer it stands in for. Both are checkable because both are states, and the
+    // check is the only place they can be read from here.
+    QAction* orbit_ = nullptr;
+    QAction* hideIcons_ = nullptr;
     bool hinted_ = false;   // the "it is still running" toast is a once-per-session thing
 };
 

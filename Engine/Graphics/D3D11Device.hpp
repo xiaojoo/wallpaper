@@ -39,6 +39,11 @@ private:
 // series is a whole number of float4 rows in the constant buffer.
 constexpr int kChartSamples = 16;
 
+// How many shortcuts the ring can draw at once. The per-pixel loop in Shaders/IconOrbit.hlsl runs this
+// many times per pixel of the ring's bounding box, so this is a frame-cost ceiling, not a feature
+// limit - the atlas itself holds far more than this.
+constexpr int kMaxOrbitIcons = 16;
+
 // The per-frame constants every wallpaper shader sees (cbuffer "Frame", register b0).
 struct FrameCB {
     float time = 0.f, delta = 0.f, frame = 0.f, targetFps = 0.f;
@@ -67,6 +72,21 @@ struct FrameCB {
     // is 1 bar, 2 donut, 3 line; 0 means the panel is off and nothing is drawn.
     float chartX = 0.f, chartY = 0.f, chartW = 0.f, chartH = 0.f;
     float chartType = 0.f, chartFrame = 0.f, chartPad1 = 0.f, chartPad2 = 0.f;
+    // uOrbit / uOrbit2 / uOrbit3: the desktop shortcut ring, the third overlay pass. Same reason for
+    // living in b0 as the two panels above it - the engine and only the engine knows this monitor's
+    // size, and a second b1 would fight the package's parameter buffer over the one shared upload
+    // slot. The ring's geometry is no longer a radius and a phase because the click layer has to land
+    // on exactly the pixels the shader paints; what is left here is the count and two atlas numbers.
+    float orbitCount = 0.f, orbitPad0 = 0.f, orbitPad1 = 0.f, orbitPad2 = 0.f;
+    float orbitPad3 = 0.f, orbitPad4 = 0.f, orbitCols = 8.f, orbitRows = 1.f;
+    float orbitPad5 = 0.f, orbitPad6 = 0.f, orbitDimBack = 0.45f, orbitHover = -1.f;
+    float orbitPad7 = 0.f, orbitPad8 = 0.f, orbitPad9 = 0.f, orbitPad10 = 0.f;
+    // uOrbitIcon: one row per ring slot, xy the centre in this surface's device pixels, z the half
+    // size (0 for a slot the centre object hides), w the depth. `kMaxOrbitIcons` is the same number
+    // as `kMaxIcons` in Shaders/IconOrbit.hlsl and the `16` in the contract's array declaration; the
+    // static_assert below catches the two drifting apart on this side.
+    float orbitIcon[kMaxOrbitIcons][4];
+    static_assert(kMaxOrbitIcons <= 32, "IconOrbit.hlsl only reads 16 slots");
 };
 static_assert(sizeof(FrameCB) % 16 == 0, "FrameCB must be 16-byte aligned");
 

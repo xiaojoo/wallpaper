@@ -1,10 +1,13 @@
 #include "Engine/Graphics/Texture.hpp"
 #include "Engine/Core/Log.hpp"
 
+#include <algorithm>
+
 namespace sw {
 static constexpr const char* MOD = "tex";
 
-bool Texture::Load(ID3D11Device* dev, IWICImagingFactory* wic, const std::wstring& path, std::string& error) {
+bool Texture::Load(ID3D11Device* dev, IWICImagingFactory* wic, const std::wstring& path, std::string& error,
+             bool mipmaps) {
     if (!dev || !wic) {
         error = "no device / WIC factory";
         return false;
@@ -50,36 +53,96 @@ bool Texture::Load(ID3D11Device* dev, IWICImagingFactory* wic, const std::wstrin
         return false;
     }
 
+    path_ = path;
+    return Upload(dev, w, h, std::move(pixels), error, mipmaps, path);
+}
+
+bool Texture::FromPixels(ID3D11Device* dev, UINT w, UINT h, const BYTE* bgra, std::string& error,
+                         bool mipmaps) {
+    if (!dev) { error = "no device"; return false; }
+    if (!w || !h) { error = "zero-sized pixel buffer"; return false; }
+    if (!bgra) { error = "null pixel buffer"; return false; }
+    path_.clear();
+    std::vector<BYTE> pixels(bgra, bgra + (size_t)w * h * 4);
+    return Upload(dev, w, h, std::move(pixels), error, mipmaps, L"<memory>");
+}
+
+bool Texture::Upload(ID3D11Device* dev, UINT w, UINT h, std::vector<BYTE>&& pixels, std::string& error,
+                     bool mipmaps, const std::wstring& label) {
+    // A full mip chain, built here on the CPU and handed over as one subresource per level.
+    //
+    // Why: every wallpaper texture is sampled with D3D11_FILTER_MIN_MAG_MIP_LINEAR
+    // (D3D11Renderer.cpp), and with a single level that filter has nothing to choose between -
+    // minifying this 2084 px drawing into a 403 px preview box reads one 2x2 footprint per output
+    // pixel, so 1 px lines survive only where they happen to land. Measured against a CPU
+    // area-averaged reference of the same pixels: 24% of the drawing's line pixels were missing and
+    // 32% of what was drawn sat where the drawing has nothing.
+    //
+    // Why CPU and not ID3D11DeviceContext::GenerateMips: both shapes the GPU offers were rejected
+    // with E_INVALIDARG on this device - MipLevels = 0, and an explicit count with
+    // D3D11_RESOURCE_MISC_GENERATE_MIPS (with and without pInitialData). The subresource-array path
+    // is the one the docs state plainly, and it costs ~10 MB of transient RAM at load.
+    UINT levels = 1;
+    if (mipmaps)
+        for (UINT s = (w > h ? w : h); s > 1; s >>= 1) levels++;
+
+    std::vector<std::vector<BYTE>> chain(levels);
+    std::vector<D3D11_SUBRESOURCE_DATA> subs(levels);
+    UINT mw = w, mh = h;
+    chain[0] = std::move(pixels);
+    for (UINT l = 0; l < levels; ++l) {
+        subs[l].pSysMem = chain[l].data();
+        subs[l].SysMemPitch = mw * 4;
+        subs[l].SysMemSlicePitch = 0;
+        if (l + 1 == levels) break;
+        const UINT nw = mw > 1 ? mw / 2 : 1, nh = mh > 1 ? mh / 2 : 1;
+        chain[l + 1].resize((size_t)nw * nh * 4);
+        const BYTE* src = chain[l].data();
+        BYTE* dst = chain[l + 1].data();
+        // Plain 2x2 box average, clamped at odd edges - the same footprint the hardware would take.
+        for (UINT y = 0; y < nh; ++y)
+            for (UINT x = 0; x < nw; ++x)
+                for (INT c = 0; c < 4; ++c) {
+                    UINT sum = 0;
+                    for (UINT dy = 0; dy < 2; ++dy)
+                        for (UINT dx = 0; dx < 2; ++dx) {
+                            const UINT sx = std::min(x * 2 + dx, mw - 1), sy = std::min(y * 2 + dy, mh - 1);
+                            sum += src[((size_t)sy * mw + sx) * 4 + c];
+                        }
+                    dst[((size_t)y * nw + x) * 4 + c] = (BYTE)((sum + 2) / 4);
+                }
+        mw = nw;
+        mh = nh;
+    }
+
     D3D11_TEXTURE2D_DESC td{};
     td.Width = w;
     td.Height = h;
-    td.MipLevels = 1;
+    td.MipLevels = levels;
     td.ArraySize = 1;
     td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    D3D11_SUBRESOURCE_DATA sd{};
-    sd.pSysMem = pixels.data();
-    sd.SysMemPitch = stride;
-    hr = dev->CreateTexture2D(&td, &sd, &tex_);
+    HRESULT hr = dev->CreateTexture2D(&td, subs.data(), &tex_);
     if (FAILED(hr)) {
-        error = "CreateTexture2D: " + HResultToString(hr);
+        error = "CreateTexture2D: " + HResultToString(hr) + " for " + ToUtf8(label);
         return false;
     }
     D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
     sv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    sv.Texture2D.MipLevels = 1;
+    sv.Texture2D.MostDetailedMip = 0;
+    sv.Texture2D.MipLevels = levels;
     hr = dev->CreateShaderResourceView(tex_.Get(), &sv, &srv_);
     if (FAILED(hr)) {
-        error = "CreateShaderResourceView: " + HResultToString(hr);
+        error = "CreateShaderResourceView: " + HResultToString(hr) + " for " + ToUtf8(label);
         return false;
     }
     w_ = w;
     h_ = h;
-    path_ = path;
-    Info(MOD, "loaded {} ({}x{}, {} KB)", ToUtf8(path), w, h, (unsigned)(pixels.size() >> 10));
+    Info(MOD, "loaded {} ({}x{}, {} mips, {} KB)", ToUtf8(label), w, h, levels,
+         (unsigned)((size_t)w * h * 4 >> 10));
     return true;
 }
 

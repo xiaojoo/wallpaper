@@ -122,8 +122,13 @@ bool WorkerW::LocateLayer() {
     }
     host_.iconHost = defViewOwner;
     host_.defView = FindWindowExW(defViewOwner, nullptr, kDefView, nullptr);
-    Info(MOD, "icon layer: defView=0x{:X} owned by 0x{:X} class '{}' {}", (uintptr_t)host_.defView,
-         (uintptr_t)defViewOwner, ClassOf(defViewOwner).c_str(), RectOf(defViewOwner).c_str());
+    // The icons themselves live one level further in. Hiding DefView takes the desktop's own context
+    // menu with it; hiding this leaves the menu alive, which is what gives the user a way back that
+    // does not need our process running - measured with tools/probe-icon-restore.ps1.
+    host_.iconList = FindWindowExW(host_.defView, nullptr, L"SysListView32", nullptr);
+    Info(MOD, "icon layer: defView=0x{:X} list=0x{:X} owned by 0x{:X} class '{}' {}",
+         (uintptr_t)host_.defView, (uintptr_t)host_.iconList, (uintptr_t)defViewOwner,
+         ClassOf(defViewOwner).c_str(), RectOf(defViewOwner).c_str());
 
     // The wallpaper layer is the WorkerW sitting *below* the icon host in Z-order.
     for (HWND n = GetWindow(defViewOwner, GW_HWNDNEXT); n; n = GetWindow(n, GW_HWNDNEXT)) {

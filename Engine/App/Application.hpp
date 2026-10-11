@@ -6,12 +6,14 @@
 #include "Engine/System/MachineMetrics.hpp"
 #include "Engine/Desktop/DesktopWindow.hpp"
 #include "Engine/Desktop/HudDragWindow.hpp"
+#include "Engine/Desktop/IconHitWindow.hpp"
 #include "Engine/System/DiskTemp.hpp"
 #include "Engine/Desktop/MonitorManager.hpp"
 #include "Engine/Desktop/TrayTransparency.hpp"
 #include "Engine/Desktop/WorkerW.hpp"
 #include "Engine/Graphics/D3D11Device.hpp"
 #include "Engine/Graphics/D3D11Renderer.hpp"
+#include "Engine/Desktop/ShellIcons.hpp"
 #include "Engine/Performance/FPSController.hpp"
 #include "Engine/Performance/PowerManager.hpp"
 #include "Engine/Packages/WallpaperInstance.hpp"
@@ -206,6 +208,14 @@ private:
     // Turns a panel's draggable layer on and off. Turning it on with the panel hidden would leave a
     // click target over a desktop with nothing in it, so this refuses unless that panel is showing.
     bool ArmDrag(int panel, bool on, std::string& error);
+    // The same arming, for the shortcut ring's click layer, and for the ring's own clock.
+    bool ArmOrbitHit(std::string& error);
+    void AdvanceOrbit(ULONGLONG nowMs);
+    void LaunchRingSlot(int slot);
+    // Hiding the shell's own icons and giving them back, including the crash note that makes the
+    // second one happen even when this process did not get to run it.
+    bool SetIconsHidden(bool hide, std::string& error);
+    void HealIconLayer();
     // Moves the rotation pointer by delta and shows the result. Returns the id that got on screen.
     std::string RotateStep(int delta);
     static bool IsAutostartEnabled(std::string& error);
@@ -277,6 +287,44 @@ private:
     ULONGLONG spinWindowStart_ = 0;
     std::string lastError_;
     std::string hudError_;   // why the status card could not be prepared, empty when it can
+    std::string orbitError_; // the same, for the shortcut ring
+
+    // The desktop shortcut ring. Off by default and deliberately never persisted: an orbit of the
+    // user's own icons sitting on their desktop is not something a crash should bring back. Toggled by
+    // the `orbit` control verb.
+    bool orbitOn_ = false;
+    ShellIcons icons_;
+    bool iconsBuilt_ = false;
+    // How many of the desktop's shortcuts the ring draws. The atlas holds all of them; the ring is
+    // capped so the per-pixel loop in IconOrbit.hlsl stays cheap on a 4K panel at 48 fps, and by
+    // kMaxOrbitIcons because that is how many rows the constant buffer has.
+    UINT orbitCount_ = 12;
+    // Seconds for one full revolution. 0 stops the ring.
+    double orbitPeriodS_ = 45.0;
+    // The ring's angle, accumulated in Run() rather than read off a clock. Deriving it from absolute
+    // time was fine while nothing could be pointed at: once the pointer can hold the ring still to
+    // aim, an absolute phase would make it jump back to where wall-clock time says it should be the
+    // moment the pointer leaves. Accumulated instead, so a pause is a pause.
+    float orbitPhase_ = 0.f;
+    ULONGLONG orbitLastMs_ = 0;
+    // The slot the pointer is over, -1 for none. The click layer holds the same answer for the button,
+    // and this is polled from the frame loop rather than pushed by mouse messages because the ring
+    // moves under a pointer that is not: no message arrives when a highlight should change.
+    int orbitHover_ = -1;
+    IconHitWindow iconHit_;
+    // Which monitor's ring is clickable, or -1. One, on the same grounds as the two panel drag layers:
+    // a layer per screen would need a per-screen position, and this is one global ring.
+    int orbitHitMonitor_ = -1;
+    // The desktop's own icon layer, hidden while the ring stands in for it. Deliberately not a
+    // persisted setting like the ring itself: `iconlayer.state` in the app directory is written when
+    // we hide the icons and removed when we give them back, so a process that was killed rather than
+    // closed leaves a note for the next start to clean up - and a user who hid his own icons from the
+    // desktop menu before we ever ran is never touched, because no note exists.
+    bool iconsHidden_ = false;
+    HWND iconListSeen_ = nullptr;   // the list window we applied to, to notice explorer replacing it
+    std::wstring iconMarkPath_;
+    // When the ring's rectangles were last written to the log, in the frame loop's own seconds.
+    double orbitGeomLogT_ = 0.0;
     // The monitor whose panel is being dragged, or -1. The layer exists only while this is >= 0, which
     // is why the desktop's own clicks are unaffected the rest of the time.
     struct PanelDrag {
@@ -286,6 +334,22 @@ private:
                           // panel's own rect changed rather than every frame
     };
     PanelDrag drag_[kPanelCount];
+    // The ring's own drag layer, kept apart from the two panels on purpose: a panel's stored position
+    // is its top-left corner and the ring's is its centre, and folding the two into one array would
+    // have made every reader of that array ask "which convention is this one" again.
+    PanelDrag orbitDrag_;
+    // Everything about where the ring sits and how big it is, in device pixels relative to this
+    // monitor's top-left, computed once. The shader's icon boxes, the click layer's rectangles and
+    // the drag layer's outline all come out of this, so they cannot disagree about where the ring is.
+    struct RingShape {
+        float cx = 0.f, cy = 0.f;   // the centre
+        float rx = 0.f, ry = 0.f;   // the two radii
+        float iconPx = 0.f;         // one icon's full size at the front of the ring
+        float occX = 0.f, occY = 0.f;   // the middle object's half-width and half-height
+    };
+    RingShape RingFor(const MonitorInfo& m) const;
+    RECT OrbitScreenRect(const MonitorInfo& m) const;
+    bool ArmOrbitDrag(bool on, std::string& error);
     // The chart panel's history, one row of four per sampled second. Every slot starts at -1 rather
     // than at zero, because a zero on a gauge is a claim ("this metric read 0%") and an absence is not.
     // `= { -1.f }` would only have set the first one, which is the whole reason this is a fill.
