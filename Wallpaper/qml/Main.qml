@@ -78,6 +78,46 @@ ApplicationWindow {
     property string msgTab: ""
     property bool msgLive: false
     property Item openField: null    // the Choice whose list is up; only one at a time
+    // The shortcut ring's picker. Its open state lives on the window because the row's button, the
+    // scrim and the drawer's own 完成 all have to agree on it, and a Popup's visibility turned out to
+    // be the one thing three places cannot share.
+    property bool orbitPickOpen: false
+    // "已选 12 / 43", or the sentence that says nobody has picked anything and the ring is showing
+    // every shortcut on the desktop. The counts come from the renderer's own list, so a shortcut the
+    // user deleted since is already gone from both numbers.
+    function orbitPickedText() {
+        const all = Bridge.orbitIconList.length
+        if (!Bridge.orbitPicked) return trs("orbit_pick_all") + " (" + all + ")"
+        let n = 0
+        for (let i = 0; i < all; ++i) if (Bridge.orbitIconList[i].picked) ++n
+        return trs("orbit_pick_selected") + " " + n + " / " + all
+    }
+    // The drawer edits a copy, so the ticks answer the pointer immediately and the renderer's answer,
+    // which takes about a second to come back through the queue, does not have to.
+    function fillOrbitPicks() {
+        orbitPickModel.clear()
+        const all = Bridge.orbitIconList
+        for (let i = 0; i < all.length; ++i)
+            orbitPickModel.append({ name: all[i].name, picked: all[i].picked })
+    }
+    function sendOrbitPicks() {
+        const names = []
+        for (let i = 0; i < orbitPickModel.count; ++i)
+            if (orbitPickModel.get(i).picked) names.push(orbitPickModel.get(i).name)
+        Bridge.setOrbitPicks(names)
+    }
+    // The drawer's own count, off the copy it is editing, so a tick changes the number under the
+    // pointer in the same frame rather than when the renderer answers.
+    function orbitPickLocalText() {
+        let n = 0
+        for (let i = 0; i < orbitPickModel.count; ++i)
+            if (orbitPickModel.get(i).picked) ++n
+        return trs("orbit_pick_selected") + " " + n + " / " + orbitPickModel.count
+    }
+    function setAllOrbitPicks(on) {
+        for (let i = 0; i < orbitPickModel.count; ++i) orbitPickModel.setProperty(i, "picked", on)
+        sendOrbitPicks()
+    }
     property bool carouselPlaying: true
     // The big picture shows the wallpaper being drawn right now (Wallpaper/LivePreview.cpp).
     // It used to be an Image with a new URL per frame, which measured 16-18 fps and blanked the
@@ -1965,8 +2005,12 @@ ApplicationWindow {
                                 Range {
                                     label: trs("orbit_count")
                                     from: 1
-                                    to: 16
-                                    value: Bridge.orbitCount
+                                    // The ceiling is the desktop's own shortcut count, which is what he
+                                    // asked for; sixty four is the constant buffer's row count and only
+                                    // matters on a machine with more shortcuts than that.
+                                    to: Math.max(1, Math.min(64, Bridge.orbitSlots))
+                                    value: Math.min(Math.max(1, Math.min(64, Bridge.orbitSlots)),
+                                                     Bridge.orbitCount)
                                     unit: ""
                                     zeroText: ""
                                     enabled: Bridge.connected
@@ -2012,6 +2056,36 @@ ApplicationWindow {
                                     enabled: Bridge.connected
                                     onCommitted: function (v) { Bridge.setOrbitIconScale(v) }
                                 }
+                            }
+                            // Which shortcuts the ring may paint. The count is read back from the
+                            // renderer rather than tracked here, because a shortcut the user deletes on
+                            // the desktop drops out of the selection on its own and this is the only
+                            // place that number can become honest.
+                            RowLayout {
+                                visible: Bridge.orbit
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("orbit_pick")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Text {
+                                    text: root.orbitPickedText()
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                }
+                                Btn {
+                                    compact: true
+                                    text: trs("orbit_pick_edit")
+                                    enabled: Bridge.connected && Bridge.orbitIconList.length > 0
+                                    onClicked: { root.fillOrbitPicks(); root.orbitPickOpen = true }
+                                }
+                            }
+                            Text {
+                                visible: Bridge.orbit
+                                text: trs("orbit_pick_desc")
+                                color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                                Layout.fillWidth: true
                             }
                             // The ring's centre, on the same terms the status card's position is on:
                             // a switch that puts a grab layer on the desktop only while it is held,
@@ -2653,6 +2727,143 @@ ApplicationWindow {
         MouseArea {
             anchors.fill: parent
             onClicked: { root.openField = null; root.contentItem.forceActiveFocus() }
+        }
+    }
+
+    // The shortcut ring's picker: a drawer on the right edge of the window, because forty-odd names do
+    // not fit in a row and a separate dialog would be a second window for what is one list of ticks.
+    // Every tick is sent as it is made - there is no confirm button that could be missed - and 完成
+    // only closes the drawer. The list is re-read from the renderer each time it opens, so a shortcut
+    // added or deleted on the desktop since is already right.
+    Rectangle {
+        id: orbitPickScrim
+        anchors.fill: parent
+        color: "#73000000"
+        visible: root.orbitPickOpen && root.settingsOpen
+        z: 990
+        MouseArea { anchors.fill: parent; onClicked: root.orbitPickOpen = false }
+    }
+    Rectangle {
+        id: orbitPickDrawer
+        width: 340
+        height: root.height
+        x: root.width - width
+        y: 0
+        z: 1000
+        visible: root.orbitPickOpen && root.settingsOpen
+        color: th.surface
+        border.color: th.line
+
+        ListModel { id: orbitPickModel }
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 14
+            spacing: 10
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Text {
+                    Layout.fillWidth: true
+                    text: trs("orbit_pick")
+                    color: th.text; font.family: root.fontFamily; font.pixelSize: 14; font.bold: true
+                }
+                Text {
+                    text: root.orbitPickLocalText()
+                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Btn {
+                    compact: true
+                    text: trs("orbit_pick_all")
+                    onClicked: root.setAllOrbitPicks(true)
+                }
+                Btn {
+                    compact: true
+                    text: trs("orbit_pick_none")
+                    onClicked: root.setAllOrbitPicks(false)
+                }
+                Item { Layout.fillWidth: true }
+            }
+            ListView {
+                id: orbitPickList
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                spacing: 2
+                boundsBehavior: Flickable.StopAtBounds
+                model: orbitPickModel
+                ScrollIndicator.vertical: ScrollIndicator { }
+                delegate: Rectangle {
+                    id: del
+                    required property int index
+                    required property string name
+                    required property bool picked
+                    width: orbitPickList.width
+                    height: Math.max(34, delRow.implicitHeight + 12)
+                    radius: 6
+                    color: rowMa.containsMouse ? th.surfaceAlt : "transparent"
+                    RowLayout {
+                        id: delRow
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.margins: 8
+                        spacing: 8
+                        // The platform checkbox is not ours to style, so it is drawn: a 16 px plate
+                        // that fills with the accent and leaves a hole in the middle.
+                        Rectangle {
+                            Layout.alignment: Qt.AlignVCenter
+                            width: 16; height: 16; radius: 4
+                            color: del.picked ? th.accent : "transparent"
+                            border.width: 1
+                            border.color: del.picked ? th.accent : th.line
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: 6; height: 6; radius: 1
+                                color: th.surface
+                                visible: del.picked
+                            }
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: del.name
+                            // Wraps rather than elides: a name is the only thing telling these rows
+                            // apart, and a truncated one cannot be read back.
+                            wrapMode: Text.Wrap
+                            color: th.text; font.family: root.fontFamily; font.pixelSize: 12
+                        }
+                    }
+                    MouseArea {
+                        id: rowMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            orbitPickModel.setProperty(del.index, "picked", !del.picked)
+                            root.sendOrbitPicks()
+                        }
+                    }
+                }
+            }
+            Text {
+                visible: orbitPickModel.count === 0
+                text: trs("orbit_pick_empty")
+                color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                Layout.fillWidth: true
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Btn {
+                    text: trs("orbit_pick_close")
+                    accent: true
+                    onClicked: { root.orbitPickOpen = false; root.contentItem.forceActiveFocus() }
+                }
+            }
         }
     }
 

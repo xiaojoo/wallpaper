@@ -45,6 +45,15 @@ struct CommandLine {
     std::string qualityOverride;
     int fpsOverride = 0;
     std::string pipeOverride;
+    // `--nested log` runs a command that arrives inside another one, the way this worked before the
+    // queue was guarded, and only writes the fact to the log. It exists so the overlap can be counted
+    // by tools/probe-preview-reentrancy.ps1 instead of inferred from one crash.
+    bool deferNested = true;
+    // Fault on purpose, one second in, so the crash reporter can be proven to work. A handler that has
+    // never been seen to fire is a guess, and the only honest way to see it fire is to cause the same
+    // kind of fault - which needs a switch, because injecting one from a debugger proved unreliable.
+    // Nothing else reads it; a normal launch never sets it.
+    bool selfCrash = false;
 };
 
 class IPCServer;
@@ -293,12 +302,27 @@ private:
     // user's own icons sitting on their desktop is not something a crash should bring back. Toggled by
     // the `orbit` control verb.
     bool orbitOn_ = false;
+    // True while a queued control command is being executed on the presenting thread, so a second one
+    // cannot run inside the first (see ProcessQueued).
+    bool inCommand_ = false;
+    bool deferNested_ = true;
     ShellIcons icons_;
     bool iconsBuilt_ = false;
     // How many of the desktop's shortcuts the ring draws. The atlas holds all of them; the ring is
     // capped so the per-pixel loop in IconOrbit.hlsl stays cheap on a 4K panel at 48 fps, and by
     // kMaxOrbitIcons because that is how many rows the constant buffer has.
     UINT orbitCount_ = 12;
+    // Ring slot -> which of the desktop's shortcuts sits there. Identity while nobody has picked a
+    // subset; after that it is the picked names in the desktop's own name order, so the ring's order
+    // never depends on the order the picker happened to tick them in. Everything that asks "what is
+    // slot k" - the constant buffer, the click boxes, the launch - reads this one table.
+    std::vector<int> orbitOrder_;
+    void RebuildOrbitOrder();
+    // How many of those slots the ring draws this frame. One place, because the constant buffer's row
+    // count, the click boxes and the log line all have to agree on it.
+    int OrbitSlotsShown() const;
+    // What each slot would start, for the log. Re-read after a pick changes the mapping.
+    void LogOrbitSlots();
     // Seconds for one full revolution. 0 stops the ring.
     double orbitPeriodS_ = 45.0;
     // The ring's angle, accumulated in Run() rather than read off a clock. Deriving it from absolute

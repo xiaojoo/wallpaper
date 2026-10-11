@@ -35,7 +35,12 @@ cbuffer Frame : register(b0) {
     // Placed by Application.cpp rather than from an angle here, because making the ring clickable put
     // a second reader on the same geometry - the invisible window that turns a pixel into a program -
     // and two independent trigonometries drift apart. One side computes, the other follows.
-    float4 uOrbitIcon[16];
+    float4 uOrbitIcon[64];
+    // Which atlas cell each of those slots paints, in .x (the other three components are padding the
+    // constant buffer's 16-byte rows force anyway). Slot order and cell order are the same thing only
+    // when the ring paints every shortcut on the desktop in name order; as soon as the user can pick a
+    // subset, the slot is a position on the ring and the cell is which shortcut sits at it.
+    float4 uOrbitCell[64];
 // uHud and uHud2 belong to the engine's own overlay pass, not to packages. A wallpaper that reads them
 // gets nothing useful: they are where the HUD is going to be drawn over it, in screen heights.
 // The card's margins are not here either - they are part of the card's own design, measured off the

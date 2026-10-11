@@ -179,6 +179,15 @@ const Entry kStrings[] = {
     {"orbit_count", "环上数量", "Icons on the ring"},
     {"orbit_size", "圆环大小", "Ring size"},
     {"orbit_icon_size", "图标大小", "Icon size"},
+    {"orbit_pick", "选择图标", "Icons on the ring"},
+    {"orbit_pick_edit", "挑选", "Choose"},
+    {"orbit_pick_desc", "勾选哪几个上环；环上的顺序按名字排。",
+     "Tick which shortcuts go on the ring. Their order stays by name."},
+    {"orbit_pick_selected", "已选", "Selected"},
+    {"orbit_pick_all", "全部", "All"},
+    {"orbit_pick_none", "清空", "None"},
+    {"orbit_pick_close", "完成", "Done"},
+    {"orbit_pick_empty", "桌面上没有可读的快捷方式。", "No desktop shortcuts could be read."},
     {"orbit_unavailable", "快捷键环不可用", "Shortcut ring unavailable"},
     {"orbit_pos", "环心位置", "Ring centre"},
     {"orbit_pos_desc", "按住出现的虚线框拖到想要的位置，松手即生效。",
@@ -525,6 +534,17 @@ void Bridge::ingest(const Json& status, const Json& list) {
     orbitSlots_ = status.intOr("orbit_slots", 0);
     orbitScale_ = status.intOr("orbit_scale", 100);
     orbitIconScale_ = status.intOr("orbit_icon_scale", 100);
+    orbitPickable_ = status.intOr("orbit_pickable", 0);
+    orbitPicked_ = status.boolOr("orbit_picked");
+    orbitIconList_.clear();
+    if (const Json* p = status.find("orbit_icons"); p && p->isArray())
+        for (auto& e : p->items()) {
+            QVariantMap row;
+            row.insert("index", e.intOr("i"));
+            row.insert("name", QString::fromStdString(e.strOr("name")));
+            row.insert("picked", e.boolOr("picked"));
+            orbitIconList_.push_back(row);
+        }
     orbitError_ = QString::fromStdString(status.strOr("orbit_error", ""));
     iconsHidden_ = status.boolOr("icons_hidden");
     orbitDrag_ = status.boolOr("orbit_drag");
@@ -870,6 +890,31 @@ void Bridge::setOrbitIconScale(int pct) {
     Json out;
     std::string body = std::format(R"({{"cmd":"orbiticonscale","arg":"{}"}})", pct);
     request(body.c_str(), 1500, &out);
+    emit stateChanged();
+    refresh();
+}
+
+// The list travels as names joined with '|', which needs no escaping because Windows forbids that
+// character in a file name - so does it forbid " and \, which is why the same shortcut works for the
+// border-style verbs. An empty list is sent as `none` rather than as nothing, because nothing means
+// `all` to the renderer.
+void Bridge::setOrbitPicks(const QStringList& names) {
+    Json out;
+    std::string joined;
+    for (const QString& n : names) {
+        if (!joined.empty()) joined += "|";
+        joined += n.toStdString();
+    }
+    if (joined.empty()) joined = "none";
+    std::string body = std::format(R"({{"cmd":"orbitpicks","arg":"{}"}})", joined);
+    request(body.c_str(), 1500, &out);
+    emit stateChanged();
+    refresh();
+}
+
+void Bridge::setOrbitPicksAll() {
+    Json out;
+    request(R"({"cmd":"orbitpicks","arg":"all"})", 1500, &out);
     emit stateChanged();
     refresh();
 }

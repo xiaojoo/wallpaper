@@ -58,6 +58,11 @@ class Bridge final : public QObject {
     // card's and chart's scale properties are on, so a slider can show them without a conversion.
     Q_PROPERTY(int orbitScale READ orbitScale NOTIFY stateChanged)
     Q_PROPERTY(int orbitIconScale READ orbitIconScale NOTIFY stateChanged)
+    // The picker's data: the desktop's own shortcuts, each with whether the ring is showing it, plus
+    // how many slots the current selection can fill and whether a selection is in force at all.
+    Q_PROPERTY(QVariantList orbitIconList READ orbitIconList NOTIFY stateChanged)
+    Q_PROPERTY(int orbitPickable READ orbitPickable NOTIFY stateChanged)
+    Q_PROPERTY(bool orbitPicked READ orbitPicked NOTIFY stateChanged)
     Q_PROPERTY(QString orbitError READ orbitError NOTIFY stateChanged)
     Q_PROPERTY(bool iconsHidden READ iconsHidden NOTIFY stateChanged)
     Q_PROPERTY(bool orbitDrag READ orbitDrag NOTIFY stateChanged)
@@ -152,6 +157,9 @@ public:
     int orbitSlots() const { return orbitSlots_; }
     int orbitScale() const { return orbitScale_; }
     int orbitIconScale() const { return orbitIconScale_; }
+    QVariantList orbitIconList() const { return orbitIconList_; }
+    int orbitPickable() const { return orbitPickable_; }
+    bool orbitPicked() const { return orbitPicked_; }
     QString orbitError() const { return orbitError_; }
     bool iconsHidden() const { return iconsHidden_; }
     bool orbitDrag() const { return orbitDrag_; }
@@ -227,6 +235,8 @@ public:
     Q_INVOKABLE void setOrbitCount(int n);
     Q_INVOKABLE void setOrbitScale(int pct);
     Q_INVOKABLE void setOrbitIconScale(int pct);
+    Q_INVOKABLE void setOrbitPicks(const QStringList& names);
+    Q_INVOKABLE void setOrbitPicksAll();
     Q_INVOKABLE void setIconsHidden(bool hide);
     Q_INVOKABLE void setOrbitDrag(bool on);
     Q_INVOKABLE void resetOrbitPos();
@@ -330,6 +340,9 @@ private:
     int orbitSlots_ = 0;
     int orbitScale_ = 100;
     int orbitIconScale_ = 100;
+    QVariantList orbitIconList_;
+    int orbitPickable_ = 0;
+    bool orbitPicked_ = false;
     QString orbitError_;
     bool iconsHidden_ = false;
     bool orbitDrag_ = false;

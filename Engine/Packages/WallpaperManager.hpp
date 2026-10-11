@@ -71,8 +71,13 @@ struct Settings {
     // the same perspective view - and `orbitIconPct` sizes one icon at the front of the ring.
     int orbitScalePct = 100;
     int orbitIconPct = 100;
-    std::vector<Assignment> assignments;
-    Json power = Json::Object();
+    // Which shortcuts the ring may paint, as UTF-8 display names. `orbitPicked` is the difference
+    // between "nobody chose" - the ring takes the whole desktop, which is what it did before there was
+    // a picker - and "the user unchecked everything", which is an empty ring. Both are an empty list
+    // and only one of them should survive a restart as itself.
+    std::vector<std::string> orbitPicks;
+    bool orbitPicked = false;
+    std::vector<Assignment> assignments;    Json power = Json::Object();
 };
 
 // The four corners a card can sit in. Kept as strings in config.json and on the pipe so a hand-edited
@@ -134,6 +139,8 @@ public:
     // The shortcut ring's two sizes, in the same percentage-of-reference units as the card's scale.
     void SetOrbitScale(int pct);
     void SetOrbitIconScale(int pct);
+    void SetOrbitPicks(std::vector<std::string> names);
+    void ClearOrbitPicks();
     // The chart panel's six, mirroring the card's: the same corner/dragged-position rule, the same
     // "echo what is on the screen" contract on the name-taking ones.
     void SetChart(bool on);

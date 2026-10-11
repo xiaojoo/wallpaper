@@ -31,7 +31,7 @@
 Texture2D Atlas : register(t1);
 SamplerState LinearSampler : register(s0);
 
-#define kMaxIcons 16
+#define kMaxIcons 64
 #define kCellPx 256.0
 
 float4 PSMain(VSOut i) : SV_TARGET {
@@ -61,8 +61,11 @@ float4 PSMain(VSOut i) : SV_TARGET {
         float depth = e.w;
         if (depth <= best) continue;                       // something nearer already owns this pixel
 
-        uint col = (uint)k % (uint)cols;
-        uint row = (uint)floor((float)k / (float)cols);
+        // The cell this slot paints, not the slot number: the user can put any subset of the desktop's
+        // shortcuts on the ring, and the ring's slot is a position while the cell is a shortcut.
+        int src = int(uOrbitCell[k].x + 0.5);
+        uint col = (uint)src % (uint)cols;
+        uint row = (uint)floor((float)src / (float)cols);
         // The gradients are in ATLAS UV per device pixel: one cell covers 1/cols of the atlas and is
         // drawn 2*half_ pixels wide. Getting this wrong is not subtle - the first version of this line
         // passed texels-per-pixel where the hardware wants uv-per-pixel, and uv 1.64 per pixel says

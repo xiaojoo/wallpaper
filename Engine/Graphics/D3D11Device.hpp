@@ -41,8 +41,10 @@ constexpr int kChartSamples = 16;
 
 // How many shortcuts the ring can draw at once. The per-pixel loop in Shaders/IconOrbit.hlsl runs this
 // many times per pixel of the ring's bounding box, so this is a frame-cost ceiling, not a feature
-// limit - the atlas itself holds far more than this.
-constexpr int kMaxOrbitIcons = 16;
+// limit - and the loop only ever runs `orbit_count` times, which is why opening the array up to sixty
+// four costs nothing until someone asks for that many. It is sixty four because that is more than this
+// desktop's forty-three desktop shortcuts, so the slider's real ceiling is the desktop's own count.
+constexpr int kMaxOrbitIcons = 64;
 
 // The per-frame constants every wallpaper shader sees (cbuffer "Frame", register b0).
 struct FrameCB {
@@ -83,11 +85,17 @@ struct FrameCB {
     float orbitPad7 = 0.f, orbitPad8 = 0.f, orbitPad9 = 0.f, orbitPad10 = 0.f;
     // uOrbitIcon: one row per ring slot, xy the centre in this surface's device pixels, z the half
     // size, w the depth. `orbitFadeBack` is the opacity an icon has at the very back of the ring; it
-    // rises to 1 at the front. `kMaxOrbitIcons` is the same number
-    // as `kMaxIcons` in Shaders/IconOrbit.hlsl and the `16` in the contract's array declaration; the
-    // static_assert below catches the two drifting apart on this side.
+    // rises to 1 at the front. `kMaxOrbitIcons` is the same number as `kMaxIcons` in
+    // Shaders/IconOrbit.hlsl and the array length in the contract; the static_assert below catches the
+    // two drifting apart on this side.
     float orbitIcon[kMaxOrbitIcons][4];
-    static_assert(kMaxOrbitIcons <= 32, "IconOrbit.hlsl only reads 16 slots");
+    // uOrbitCell: which atlas cell each ring slot paints, one row per slot using only .x. It is a
+    // float4 row and not a float array on purpose - an HLSL scalar array costs a 16-byte row per
+    // element anyway, and packing them four to a row is the only way the C++ side and the reflection
+    // agree (the same trap uCore fell into). Without this row the cell would be the slot number, which
+    // is what the ring did until the user was allowed to choose a subset of the desktop.
+    float orbitCell[kMaxOrbitIcons][4];
+    static_assert(kMaxOrbitIcons <= 64, "IconOrbit.hlsl only reads 64 slots");
 };
 static_assert(sizeof(FrameCB) % 16 == 0, "FrameCB must be 16-byte aligned");
 

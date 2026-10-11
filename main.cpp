@@ -122,6 +122,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         else if (a == "--no-power") cl.noPower = true;
         else if (a == "--no-desktop" || a == "--window") cl.noDesktop = true, cl.logToConsole = true;
         else if (a == "--console") cl.logToConsole = true;
+        else if (a == "--selfcrash") cl.selfCrash = true;
+        else if (a == "--nested") cl.deferNested = next(i) != "log";
         else if (a == "--ctl") {
             ctl = true;
             ctlCmd = next(i);
@@ -166,6 +168,13 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                            "\nSee logs/renderer-<pid>.log for the full trace.";
         PrintToParentConsole(text + "\n");
         return 1;
+    }
+    if (cl.selfCrash) {
+        // Proof for tools/probe-crash-selftest.ps1: the reporter has to be seen to fire. One second of
+        // running first, so the fault lands on a live message loop with the handler installed and the
+        // log open, the way a real one does.
+        Sleep(1000);
+        *reinterpret_cast<volatile int*>(0) = 1;
     }
     int rc = app.Run();
     app.Shutdown();

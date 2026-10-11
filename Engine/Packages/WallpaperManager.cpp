@@ -94,6 +94,12 @@ bool WallpaperManager::Load(const std::wstring& exeDir, std::string& error) {
     // the config on disk and the number on screen cannot disagree about what the ring is doing.
     SetOrbitScale(r.find("orbit_scale") ? r.find("orbit_scale")->asInt(100) : 100);
     SetOrbitIconScale(r.find("orbit_icon_scale") ? r.find("orbit_icon_scale")->asInt(100) : 100);
+    if (const Json* p = r.find("orbit_picks"); p && p->isArray()) {
+        s_.orbitPicked = true;
+        s_.orbitPicks.clear();
+        for (const auto& e : p->items())
+            if (e.isString()) s_.orbitPicks.push_back(e.asString());
+    }
     s_.hudScalePct = r.find("hud_scale") ? r.find("hud_scale")->asInt(100) : 100;
     if (s_.hudScalePct < 60) s_.hudScalePct = 60;
     if (s_.hudScalePct > 250) s_.hudScalePct = 250;
@@ -154,6 +160,11 @@ std::string WallpaperManager::ConfigText() const {
     }
     r.set("orbit_scale", Json::Of(s_.orbitScalePct));
     r.set("orbit_icon_scale", Json::Of(s_.orbitIconPct));
+    if (s_.orbitPicked) {
+        Json picks = Json::Array();
+        for (const auto& n : s_.orbitPicks) picks.push(Json::Of(n));
+        r.set("orbit_picks", std::move(picks));
+    }
     r.set("hud_scale", Json::Of(s_.hudScalePct));
     r.set("hud_frame", Json::Of(std::string(HudFrameName(s_.hudFrame))));
     r.set("chart", Json::Of(s_.chart));
@@ -305,6 +316,13 @@ void WallpaperManager::SetOrbitPos(float x, float y) { s_.orbitX = x, s_.orbitY 
 void WallpaperManager::SetOrbitScale(int pct) { s_.orbitScalePct = pct < 20 ? 20 : (pct > 200 ? 200 : pct); }
 
 void WallpaperManager::SetOrbitIconScale(int pct) { s_.orbitIconPct = pct < 20 ? 20 : (pct > 200 ? 200 : pct); }
+
+void WallpaperManager::SetOrbitPicks(std::vector<std::string> names) {
+    s_.orbitPicked = true;
+    s_.orbitPicks = std::move(names);
+}
+
+void WallpaperManager::ClearOrbitPicks() { s_.orbitPicked = false; s_.orbitPicks.clear(); }
 
 void WallpaperManager::ClearOrbitPos() { s_.orbitX = s_.orbitY = -1.f; }
 
