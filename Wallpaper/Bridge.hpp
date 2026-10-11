@@ -52,7 +52,11 @@ class Bridge final : public QObject {
     Q_PROPERTY(bool orbitReady READ orbitReady NOTIFY stateChanged)
     Q_PROPERTY(bool orbitClickable READ orbitClickable NOTIFY stateChanged)
     Q_PROPERTY(int orbitPeriod READ orbitPeriod NOTIFY stateChanged)
-    Q_PROPERTY(int orbitCount READ orbitCount NOTIFY stateChanged)
+    Q_PROPERTY(int orbitPerRing READ orbitPerRing NOTIFY stateChanged)
+    Q_PROPERTY(int orbitRings READ orbitRings NOTIFY stateChanged)
+    Q_PROPERTY(int orbitShown READ orbitShown NOTIFY stateChanged)
+    Q_PROPERTY(QString orbitShape READ orbitShape NOTIFY stateChanged)
+    Q_PROPERTY(QStringList orbitShapeLevels READ orbitShapeLevels CONSTANT)
     Q_PROPERTY(int orbitSlots READ orbitSlots NOTIFY stateChanged)
     // The ring's two sizes, as percentages of the layout it was measured at - the same convention the
     // card's and chart's scale properties are on, so a slider can show them without a conversion.
@@ -153,7 +157,11 @@ public:
     bool orbitReady() const { return orbitReady_; }
     bool orbitClickable() const { return orbitClickable_; }
     int orbitPeriod() const { return orbitPeriod_; }
-    int orbitCount() const { return orbitCount_; }
+    int orbitPerRing() const { return orbitPerRing_; }
+    int orbitRings() const { return orbitRings_; }
+    int orbitShown() const { return orbitShown_; }
+    QString orbitShape() const { return orbitShape_; }
+    QStringList orbitShapeLevels() const;
     int orbitSlots() const { return orbitSlots_; }
     int orbitScale() const { return orbitScale_; }
     int orbitIconScale() const { return orbitIconScale_; }
@@ -233,6 +241,8 @@ public:
     Q_INVOKABLE void setOrbit(bool on);
     Q_INVOKABLE void setOrbitPeriod(int seconds);
     Q_INVOKABLE void setOrbitCount(int n);
+    Q_INVOKABLE void setOrbitRings(int n);
+    Q_INVOKABLE void setOrbitShape(const QString& name);
     Q_INVOKABLE void setOrbitScale(int pct);
     Q_INVOKABLE void setOrbitIconScale(int pct);
     Q_INVOKABLE void setOrbitPicks(const QStringList& names);
@@ -336,7 +346,10 @@ private:
     bool orbitReady_ = false;
     bool orbitClickable_ = false;
     int orbitPeriod_ = 45;
-    int orbitCount_ = 12;
+    int orbitPerRing_ = 12;
+    int orbitRings_ = 1;
+    int orbitShown_ = 0;
+    QString orbitShape_ = QStringLiteral("ellipse");
     int orbitSlots_ = 0;
     int orbitScale_ = 100;
     int orbitIconScale_ = 100;

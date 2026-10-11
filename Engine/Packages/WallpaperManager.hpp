@@ -71,6 +71,13 @@ struct Settings {
     // the same perspective view - and `orbitIconPct` sizes one icon at the front of the ring.
     int orbitScalePct = 100;
     int orbitIconPct = 100;
+    // How many concentric rings the shortcuts are spread over, and which path each of them walks.
+    // Both are manual: the count of rings and the count per ring (below) are the two halves of one
+    // decision, and an automatic split would have to guess which of the two he cares about.
+    // The shape applies to every ring at once - a set of rings that each walked a different path
+    // would be four pictures on the desktop rather than one layout.
+    int orbitRings = 1;
+    int orbitShape = 0;
     // Which shortcuts the ring may paint, as UTF-8 display names. `orbitPicked` is the difference
     // between "nobody chose" - the ring takes the whole desktop, which is what it did before there was
     // a picker - and "the user unchecked everything", which is an empty ring. Both are an empty list
@@ -94,6 +101,13 @@ int HudFrameCount();
 const char* ChartTypeName(int index);
 int ParseChartType(std::string_view s, int def = 0);
 int ChartTypeCount();
+
+// The trajectories the shortcuts can be laid out on: the ellipse the ring started with, a funnel that
+// stacks those circles one below the next, and a five-pointed star. Named, not numbered, for the same
+// reason the corners are: a hand-edited "2" means nothing to anybody who has not read this file.
+const char* OrbitShapeName(int index);
+int ParseOrbitShape(std::string_view s, int def = 0);
+int OrbitShapeCount();
 
 class WallpaperManager {
 public:
@@ -141,6 +155,10 @@ public:
     void SetOrbitIconScale(int pct);
     void SetOrbitPicks(std::vector<std::string> names);
     void ClearOrbitPicks();
+    // How many rings, and which path they walk. The shape returns what is now in force so an
+    // unrecognised name echoes back the one on the screen instead of the one that was asked for.
+    void SetOrbitRings(int n);
+    int SetOrbitShape(const std::string& name);
     // The chart panel's six, mirroring the card's: the same corner/dragged-position rule, the same
     // "echo what is on the screen" contract on the name-taking ones.
     void SetChart(bool on);
