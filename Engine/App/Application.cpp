@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include "Engine/App/IPCServer.hpp"
+#include "Engine/Core/Crash.hpp"
 #include "Engine/Core/Log.hpp"
 #include "Engine/Desktop/IconLayer.hpp"
 #include "Engine/Graphics/FFmpegPlayer.hpp"
@@ -88,8 +89,13 @@ MemSample SampleProcess(ULONGLONG& lastWallNs, ULONGLONG& lastCpuNs) {
 
 bool Application::Start(const CommandLine& cl, std::string& error) {
     cl_ = cl;
+    deferNested_ = cl.deferNested;
     std::wstring logDir = cl_.logDir.empty() ? LogDirFor(cl_.exeDir) : cl_.logDir;
     CreateDirectoryW(logDir.c_str(), nullptr);
+    // Before the log itself: the whole point of this handler is to survive the cases where the logger
+    // is the thing that is broken. See Engine/Core/Crash.hpp for why the process has no other way of
+    // telling us where it died.
+    InstallCrashHandler(logDir);
     std::wstring logFile = logDir + L"\\renderer-" + std::to_wstring(GetCurrentProcessId()) + L".log";
     std::string lvl = !cl_.logLevel.empty() ? cl_.logLevel : "info";
     if (!log::Open(logFile, LevelFromString(lvl), cl_.logToConsole)) {
@@ -167,6 +173,7 @@ bool Application::Start(const CommandLine& cl, std::string& error) {
             std::string berr;
             if (icons_.Build(berr)) {
                 iconsBuilt_ = true;
+                RebuildOrbitOrder();
                 std::string uerr;
                 if (!renderer_.SetIconAtlas(dev_.dev.Get(), icons_.pixels().data(),
                                             icons_.atlasWidth(), icons_.atlasHeight(), uerr)) {
@@ -832,6 +839,24 @@ bool Application::ArmOrbitDrag(bool on, std::string& error) {
     return true;
 }
 
+void Application::RebuildOrbitOrder() {
+    orbitOrder_.clear();
+    const auto& items = icons_.items();
+    for (size_t i = 0; i < items.size(); ++i) orbitOrder_.push_back(int(i));
+    const auto& s = wpm_.settings();
+    if (!s.orbitPicked) return;      // nobody chose: the whole desktop, in the order it was read in
+    // Walk the desktop, not the pick list: that keeps the ring's order by name no matter what order
+    // the ticks came in, and a shortcut the user has since deleted simply drops out instead of leaving
+    // a slot that points at nothing.
+    std::vector<int> kept;
+    for (int i : orbitOrder_) {
+        const std::string name = ToUtf8(items[size_t(i)].label);
+        if (std::find(s.orbitPicks.begin(), s.orbitPicks.end(), name) != s.orbitPicks.end())
+            kept.push_back(i);
+    }
+    orbitOrder_ = std::move(kept);
+}
+
 bool Application::ArmOrbitHit(std::string& error) {
     if (orbitHitMonitor_ >= 0) return true;
     if (!orbitOn_ || !iconsBuilt_ || !renderer_.orbitReady()) {
@@ -861,10 +886,27 @@ bool Application::ArmOrbitHit(std::string& error) {
     // so it is not something anyone can guess from the picture, and "what would this click start" has
     // to be answerable without starting it.
     std::string names;
-    const int shown = int(std::min(orbitCount_, std::min(icons_.countFound(), UINT(kMaxOrbitIcons))));
-    for (int k = 0; k < shown; ++k) names += std::format(" {}={}", k, ToUtf8(icons_.items()[k].label));
+    for (int k = 0; k < OrbitSlotsShown(); ++k)
+        names += std::format(" {}={}", k, ToUtf8(icons_.items()[size_t(orbitOrder_[k])].label));
     Info(MOD, "orbit slots{}", names);
     return true;
+}
+
+// The same line, for the moment the answer changes without the layer being re-armed: after a pick the
+// log has to say what a click on slot 2 would start now, not what it would have started before.
+void Application::LogOrbitSlots() {
+    if (!iconHit_.active()) return;
+    std::string names;
+    for (int k = 0; k < OrbitSlotsShown(); ++k)
+        names += std::format(" {}={}", k, ToUtf8(icons_.items()[size_t(orbitOrder_[k])].label));
+    Info(MOD, "orbit slots{}", names);
+}
+
+// How many ring slots the desktop can actually fill right now: what the user asked for, capped by the
+// constant buffer's row count and by how many shortcuts the current selection holds.
+int Application::OrbitSlotsShown() const {
+    return int(std::min(orbitCount_,
+                        std::min(UINT(orbitOrder_.size()), UINT(kMaxOrbitIcons))));
 }
 
 void Application::LaunchRingSlot(int slot) {
@@ -872,11 +914,12 @@ void Application::LaunchRingSlot(int slot) {
                   "the ring's constant buffer, its shader loop and its click boxes must all be the "
                   "same number of slots");
     const auto& items = icons_.items();
-    if (slot < 0 || size_t(slot) >= items.size()) {
-        Warn(MOD, "orbit click on slot {} but only {} shortcuts were read", slot, items.size());
+    if (slot < 0 || size_t(slot) >= orbitOrder_.size()) {
+        Warn(MOD, "orbit click on slot {} but the ring is holding {} shortcuts", slot,
+             orbitOrder_.size());
         return;
     }
-    const ShellIcon& it = items[size_t(slot)];
+    const ShellIcon& it = items[size_t(orbitOrder_[size_t(slot)])];
     SHELLEXECUTEINFOW si{ sizeof(si) };
     // SEE_MASK_FLAG_NO_UI: the rule for this surface is that a failure goes to the log and never in
     // front of the user as a dialog, and ShellExecute's own error box would break that.
@@ -1021,7 +1064,7 @@ void Application::DrawSlot(Slot& s, double nowSeconds) {
     // both the shader (f.orbitIcon) and the window (the rects below) follow what is written here.
     if (orbitOn_ && iconsBuilt_) {
         const RingShape sh = RingFor(m);
-        const int n = int(std::min(orbitCount_, std::min(icons_.countFound(), UINT(kMaxOrbitIcons))));
+        const int n = OrbitSlotsShown();
         // Quality can shrink the surface below the monitor, and the shader's px are surface pixels. The
         // click layer and the drag layer live in monitor pixels and take the unscaled numbers.
         const float scale = m.px.h > 0 ? float(surf.height()) / float(m.px.h) : 1.f;
@@ -1048,6 +1091,10 @@ void Application::DrawSlot(Slot& s, double nowSeconds) {
             f.orbitIcon[k][1] = py * scale;
             f.orbitIcon[k][2] = half / ShellIcons::kCellArt * scale;
             f.orbitIcon[k][3] = depth;
+            // Which shortcut paints here. The click box above is the same slot number, so the picture,
+            // the box and the program it starts all come from this one row of the table.
+            f.orbitCell[k][0] = float(orbitOrder_[size_t(k)]);
+            f.orbitCell[k][1] = f.orbitCell[k][2] = f.orbitCell[k][3] = 0.f;
             if (clickable)
                 rects.push_back({ { m.px.x + int(px - half), m.px.y + int(py - half),
                                     m.px.x + int(px + half), m.px.y + int(py + half) }, k });
@@ -1268,6 +1315,30 @@ void Application::UpdateSnapshot() {
     // onto a slider instead of guessing at a default.
     r.set("orbit_scale", Json::Of(wpm_.settings().orbitScalePct));
     r.set("orbit_icon_scale", Json::Of(wpm_.settings().orbitIconPct));
+    // What the picker needs. `orbit_pickable` is the honest ceiling for 环上数量 once a subset
+    // exists - it is the size of the selection, not of the desktop. `orbit_icons` is the desktop's own
+    // list with each name marked picked or not, in the order the ring would walk it.
+    r.set("orbit_pickable", Json::Of(int(orbitOrder_.size())));
+    // False means "nobody picked": the ring is showing the whole desktop and the picker's title says
+    // so, which is a different sentence from "you picked all 43 of them" even though the ring looks
+    // identical either way.
+    r.set("orbit_picked", Json::Of(wpm_.settings().orbitPicked));
+    {
+        const auto& items = icons_.items();
+        const auto& s = wpm_.settings();
+        Json list = Json::Array();
+        for (size_t i = 0; i < items.size(); ++i) {
+            const std::string name = ToUtf8(items[i].label);
+            Json e = Json::Object();
+            e.set("i", Json::Of(int(i)));
+            e.set("name", Json::Of(name));
+            e.set("picked", Json::Of(!s.orbitPicked || std::find(s.orbitPicks.begin(),
+                                                                 s.orbitPicks.end(), name) !=
+                                     s.orbitPicks.end()));
+            list.push(std::move(e));
+        }
+        r.set("orbit_icons", std::move(list));
+    }
     r.set("orbit_drag", Json::Of(orbitDrag_.monitor >= 0));
     if (wpm_.settings().orbitX >= 0.f && wpm_.settings().orbitY >= 0.f) {
         Json pos = Json::Array();
@@ -1860,6 +1931,28 @@ void Application::DrawPreview(double nowSeconds) {
 }
 
 void Application::ProcessQueued() {
+    // One command at a time, and never from inside another one.
+    //
+    // `preview` warms a clip on a worker thread and keeps the desktop alive meanwhile by pumping
+    // messages (WarmWhileDrawing) - and that pump delivers WM_IPC_WAKE, which lands back here with a
+    // second command running on top of the first one's half-finished state. Measured on 2026-10-11 at
+    // 22:32:48: the outer command was StartPreview, which had just reaped the cached instances and left
+    // `preview_.inst` pointing at one of them; the nested one built a status snapshot, which reads
+    // `preview_.inst->video()`, and the VideoSource was already gone - an access violation reading
+    // 0x6EEF at Application.cpp:1381, with StartPreview -> WarmWhileDrawing -> DrainMessages -> WndProc
+    // -> ProcessQueued -> UpdateSnapshot below it.
+    //
+    // Returning is enough: Run() drains the queue on every iteration, so the outer command finishes and
+    // the next frame takes what is left. A frame is 7-21 ms; a warm-up is 50-150 ms.
+    if (inCommand_) {
+        Warn(MOD, "command queue re-entered while running; {} deferred", queued_.size());
+        if (deferNested_) return;
+    }
+    inCommand_ = true;
+    struct Releaser {
+        bool& f;
+        ~Releaser() { f = false; }
+    } rel{inCommand_};
     std::vector<Queued> todo;
     {
         std::lock_guard lk(mtx_);
@@ -2384,6 +2477,34 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         wpm_.Save(e);
         result = std::format(R"({{"ok":true,"{}":{}}})", ring ? "orbit_scale" : "orbit_icon_scale",
                              ring ? wpm_.settings().orbitScalePct : wpm_.settings().orbitIconPct);
+    } else if (action == "orbitpicks") {
+        // `all` hands the ring back to the whole desktop, `none` is an empty ring the user chose, and
+        // anything else is the list itself separated by '|'. Names rather than indexes: the desktop is
+        // enumerated in display-name order, so adding or deleting a shortcut next door would slide an
+        // index onto somebody else's program, while a name just drops out. Saved, like the sizes.
+        if (arg == "all") {
+            wpm_.ClearOrbitPicks();
+        } else {
+            std::vector<std::string> picks;
+            if (arg != "none") {
+                size_t p = 0;
+                while (p < arg.size()) {
+                    const size_t q = arg.find('|', p);
+                    const std::string one = arg.substr(p, q == std::string::npos ? q : q - p);
+                    if (!one.empty()) picks.push_back(one);
+                    if (q == std::string::npos) break;
+                    p = q + 1;
+                }
+            }
+            wpm_.SetOrbitPicks(std::move(picks));
+        }
+        RebuildOrbitOrder();
+        LogOrbitSlots();
+        std::string e;
+        wpm_.Save(e);
+        result = std::format(R"({{"ok":true,"orbit_picked":{},"orbit_pickable":{}}})",
+                             wpm_.settings().orbitPicked ? "true" : "false",
+                             int(orbitOrder_.size()));
     } else if (action == "powercap") {
         const int value = std::atoi(arg2.c_str());
         if (!power_.SetCap(arg, value)) {

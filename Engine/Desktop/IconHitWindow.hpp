@@ -49,8 +49,8 @@ class IconHitWindow {
 public:
     // One box per ring slot, so this is the ring's own ceiling - kMaxOrbitIcons in
     // Engine/Graphics/D3D11Device.hpp, which Application.cpp asserts against it rather than trusting
-    // two files to keep saying 16.
-    static constexpr int kMaxSlots = 16;
+    // two files to keep saying the same number.
+    static constexpr int kMaxSlots = 64;
 
     // Called on the thread that pumps messages, with the slot the button came up on.
     using ClickFn = std::function<void(int slot)>;

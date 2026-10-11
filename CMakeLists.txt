@@ -12,6 +12,7 @@ endif()
 add_executable(WallpaperRenderer WIN32
   main.cpp
   resources/app.rc
+  Engine/Core/Crash.cpp
   Engine/Core/Log.cpp
   Engine/Core/Json.cpp
   Engine/Graphics/D3D11Device.cpp

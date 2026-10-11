@@ -226,7 +226,42 @@ Wallpaper.exe --settings-tab monitors   # 打开并停在某一类（general/mon
 `ui.log` 落 `engine went away, relaunching (attempt 1)` → **2452 ms** 后 pid 31664 在放桌面视频；
 02:48 对 31664 发 `--ctl quit` → `engine stopped itself (31664), leaving it down` → 观察 13 秒**没有**再起来。
 崩溃那一侧还改了引擎入口：`SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX)`，所以访问违例
-就是进程直接消失，不再把 Windows 那句"已停止工作"顶在他正在用的桌面上；`main.cpp` 里两处 `MessageBoxA`
+就是进程直接消失，不再把 Windows 那句"已停止工作"顶在他正在用的桌面上；代价是 Windows 也**不写任何故障
+报告**（没有对话框、没有 WER 记录、没有 dump），于是一次访问违例在日志里只剩"写到一半就没下文"。
+2026-10-11 补上了这一半：`Engine/Core/Crash.cpp` 在 `Application::Start` 里（日志刚开、互斥量之前）装
+`SetUnhandledExceptionFilter` + `std::set_terminate`，死之前往 `logs/crash-<pid>.txt` 写异常码、出问题的
+指令（`模块+偏移`）、访问违例还写它到底在读/写哪个地址，以及 11 层调用栈。不在崩溃现场解析符号：那要
+加载 dbghelp、要分配内存，而崩的可能正是分配器；偏移留着事后对着旁边的 .pdb 查
+（`cdb -c "ln WallpaperRenderer.exe+29298; q" WallpaperRenderer.exe`）。
+**这条是量过的，不是写完就算**：引擎入口加了 `--selfcrash`（起来一秒后往空指针写一次），
+`tools/probe-crash-selftest.ps1` 跑 `--window --no-ipc --selfcrash` 的独立实例 → 退出码
+`0xC0000005`、`crash-8484.txt` 落盘、内容 `code 0xC0000005 at WallpaperRenderer.exe+029298 / writing
+0000000000000000`，再用上面那条 `ln` 查回 `WallpaperRenderer!WinMain+0x1608` = `main.cpp` 里那次写。
+之前试过用 cdb 注入故障（`call kernel32!RaiseException`、`r @rip=0`）都不成立——挂着的调试器会先把异常
+拿走，正是这个上报路径要活下来的那种情况。
+
+**装好十九分钟，它抓到了真的那一次**（22:32:48，`crash-9648.txt`）：
+`code 0xC0000005 at WallpaperRenderer.exe+10B5CB / reading 0000000000006EEF`，29 层栈。对着旁边的 .pdb
+用 `u`（带行号）把偏移查回源码：崩在 `Application.cpp:1381` 上 `preview_.inst->video()` 之后那三个虚调用。
+栈的形状本身就是根因——里面有两层 `ProcessQueued`，中间夹着 `USER32!DispatchMessage`：
+
+```
+Run → DrainMessages → WndProc(WM_IPC_WAKE) → ProcessQueued → DoCommandLocal(preview)
+    → StartPreview → WarmWhileDrawing → DrainMessages → WndProc(WM_IPC_WAKE)
+    → ProcessQueued → DoCommandLocal → UpdateSnapshot → 崩
+```
+
+预热是"一边等 worker 一边泵消息"的（上面 `WarmWhileDrawing` 那段注释：不这么做就会把合成桌面按在一张画上
+100-180 ms），而泵消息会把**第二条命令**放进来，跑在第一条建到一半的状态上——外层 `StartPreview` 刚把缓存里
+的实例 `ReapLater` 掉，`preview_.inst` 还指着其中一个。修法是 `ProcessQueued` 一次只跑一条，重入的那条留在
+队列里由下一帧取（一帧 7-21 ms，一次预热 50-150 ms）。
+
+**没证的一半要说清**：合成锤（`previewoff` → `preview` → 隔 45 ms 再 `preview`+`orbit`，60 轮）在
+`--nested log` 模式（放开守卫、只把重入记进日志）下数到 **0 次重入**——也就是说这个锤根本没造出那次重叠，
+它不能拿来证明守卫有效；有效性只来自上面那份抓到的栈。锤证明的是另一件事：8 条命令同时砸进去，日志里
+8 条都执行、最终状态正确，守卫不吞命令也不死锁。
+
+同一处还改了 `main.cpp` 里两处 `MessageBoxA`
 （无控制台时的兜底、启动失败的弹窗）改成写 `logs/startup-error.log`——兜底那条真咬过人：02:48 那次
 `--ctl quit` 从无控制台的 PowerShell 里发出去，进程挂在信息框上直到 02:52 被我杀掉，那期间框就在他桌面上。
 **崩了不弹框这半要重编引擎才生效**，而 `Engine/Graphics/Shader.cpp`（00:41）比在跑的
@@ -1040,11 +1075,12 @@ Draw，不是一张壁纸包。
 | 存下来的值活过重启 | 写 150/120 → 杀进程重开 → status 读回 **150 / 120** |
 | 界面那两行真的在 | 从滑杆上拖出来的三条命令（50、50、186）都进了引擎日志，桌面当前读数 rx=314 ry=167 前排图标 90 px = 环 50%、图标 50%，中心 2238,875 与设置前差 1 px |
 
-顺带一条与本次改动无关的观察：**实时预览开着的时候引擎会反复重启**（四起分别在 18:33:38、18:34:43、
-18:35:55、18:36:27，各活了 105 / 61 / 70 / 28 s，日志没有 `final:`、没有 error、WER 也没有当天记录），环开着和关着各两起，所以不是这一层；同一台机器
-今天更早、不含本次改动的运行里有同样的收尾。客户端的看门狗十分钟三次之后会放弃，那四起之后桌面就是
-静止的。预览每帧重建一次管线（`parameter constant buffer sized` 每秒 60 行 = 30 帧 × 2 次）也是旧行为，
-不是这次带进来的。
+顺带一条与本次改动无关的观察：**实时预览开着的时候引擎会结束**（四起分别在 18:33:38、18:34:43、
+18:35:55、18:36:27，各活了 105 / 61 / 70 / 28 s，日志没有 `final:`、没有 error、WER 也没有当天记录），
+环开着和关着各两起，所以不是这一层。——**当晚回头看，这四起里有一部分是我自己杀的**：看门狗把
+`Stop-Process` 记成崩溃，所以这串时间戳只能当"发生过"，不能当频率。真正抓到的一次是父进程读到的子进程
+退出码 `0xC0000005`，见阶段 9 末尾与"崩溃那一侧"那节。预览每帧重建一次管线（`parameter constant buffer
+sized` 每秒 60 行 = 30 帧 × 2 次）是旧行为，不是这次带进来的，也没被证明和崩溃有关。
 
 ### 重叠处的"边框"：一格透明留白（阶段 8，2026-10-11）
 
@@ -1071,6 +1107,51 @@ Draw，不是一张壁纸包。
 
 同一轮把两把滑杆的下限从 50% 降到 **20%**（上限仍 200%）：50% 的最小图标仍会叠在最小圆环上，而那正是
 这两个旋钮该能避开的东西。20% 时前排图标 36 px、rx 127 px、周长约 760 px ÷ 12 格 ≈ 63 px 间距，不叠。
+
+### 环上放几个、放哪几个（阶段 9，2026-10-11）
+
+「数量最大能不能就是桌面上图标的数量」——16 从来不是功能上限，是四处写死的数组长度：常量缓冲
+`orbitIcon[16][4]`、着色器 `uOrbitIcon[16]`/`kMaxIcons`、点击层 `kMaxSlots = 16`、`--ctl orbitcount` 的
+钳位。一次全抬到 **64**（循环次数按实际数量走，数组开大不花帧时间的钱），滑杆的上限改成
+`min(64, 可选图标数)`——也就是桌面的 43。
+
+「自己选图标」需要一个新数：**槽位号不再等于图集格子号**。槽是环上的位置，格子是某个快捷方式，
+所以加了 `uOrbitCell[k].x`（和 `orbitIcon` 一样按 float4 一行放，标量数组在 HLSL 里每元素也占 16 字节）。
+选中的集合按显示名存在 `orbit_picks` 里——不是按索引：桌面按名字排序枚举，删掉旁边一个快捷方式会把
+索引整体往前挪，名字只会自己掉出去。`orbitPicked` 这个标志区分"没人挑过"（画全部）和"挑了但全取消"
+（画空环），两者都是空列表，只有一个该活过重启。
+
+| 判据 | 实测 |
+|---|---|
+| 不挑的时候 | status `orbit_pickable=43`、`orbit_picked=false`、`orbit_icons` 列出 43 条名字，环上 12 个照旧 |
+| 挑 3 个 | `--ctl orbitpicks "Apifox\|Blender 5.2\|CC Switch"` → `orbit_pickable=3`，`orbit_icons` 里**只有这三条** picked=true，其余 40 条 false |
+| 挑错名字 | 三条里两条不是真实名字时 pickable=1（不是 3）：按名字匹配，匹配不上就是不画，不会静默补位 |
+| 活过重启 | 杀进程重开 → pickable 3、picked true、名字逐位相同；`config.json` 里 `orbit_picks` 三项 |
+| 交回全部 | `orbitpicks all` → pickable 43、picked false，`orbit_picks` 从配置里整条消失 |
+| 界面那两行 | 工具页截图：`选择图标   全部 (43)   [挑选]` 加一行说明，位置在「图标大小」下面、「环心位置」上面；`ui.log` 里没有新代码的 QML 报错 |
+| 43 个的帧代价 | 冻结不了的环境：12→43 个时数帧计数器 48.96→48.62 fps（两者都贴着 48 的预算），**只能证明 43 塞得进现有预算，量不出预算以下省了多少**。要分辨得把桌面露出来抬预算重测 |
+
+分隔符用 `|` 不需要转义：它是 Windows 禁止出现在文件名里的字符之一（`"` 和 `\` 同列），所以快捷方式的
+显示名不可能带它。
+
+**没验到的两条，点名挂着**：抽屉本身长什么样没看到——量到一半他的屏幕被全屏的 League 客户端占住
+（`WindowFromPoint` 三个点全报 `RiotWindowClass`），我不往他的游戏里点，所以点击层 3/3 的回归和抽屉的
+像素都欠着；上面那条帧代价同理，桌面被盖住时预算只有 15 fps，抬不上去。
+
+顺带查出两件与本次无关的旧账：
+
+1. **引擎会以访问违例结束，但没有我先前说的那么频繁。** 抓到的是硬的一条：我作为父进程起的实例，在
+   设置窗新起后 **41 s** 以退出码 `0xC0000005` 消失。但当晚 `ui.log` 里那 112 条「engine went away,
+   relaunching」**大部分是我自己造成的**——看门狗分辨"崩了"和"被杀"靠的是日志末尾的 `final:` 行，
+   `Stop-Process` 写不出这一行，所以我每一次构建前杀引擎、每一次探针收尾杀引擎，都被记成一次崩溃并
+   拉起新的。复现全部落空：预览开/关抖 116 次共 150 s、设置窗开着静置 300 s 与 420 s、装了 WER
+   LocalDumps 守 2400 s、挂 cdb 守 300 s——一次都没再死。十九分钟后崩溃上报自己抓到了下一次，
+   根因与修法见上面"崩溃那一侧"那节末尾。
+2. **一条没解释通的观测，记下来别丢。** 清掉挑选列表之后，`status` 已经读回 `orbit_picked=false`，
+   而 `config.json` 在同一分钟被写回了那三个名字。第一反应是"两个实例并存、旧快照覆盖新设置"，
+   **这条已被证否**：`Application::Start` 拿 `Local\SmartWallpaper.Renderer` 互斥，第二个实例直接以
+   退出码 1 退出（实测过）。剩下能自圆其说的解释需要一个当时不在场的写者，我没有找到它。
+   "我改的设置自己回去了"如果再现，先留 `config.json` 的 mtime 和当时的 pid，再查。
 
 ### 还没做的
 
