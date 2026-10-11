@@ -14,6 +14,14 @@ std::string TrimCrLf(std::string s) {
 IpcReply IPCCall(const std::wstring& pipeName, const std::string& request, DWORD timeoutMs) {
     IpcReply r;
     ULONGLONG deadline = GetTickCount64() + timeoutMs;
+    // A pipe nobody owns is answered in microseconds by the object manager, and retrying it to the end
+    // of the caller's budget was the whole cost of every poll while no renderer was running: the
+    // settings window's GUI thread sat in this loop for 500 ms out of every 700 (the preview beat),
+    // which is what he felt as "退出渲染器之后整个客户端都卡".
+    // The retry is not a mistake though - it is there for the second or two after a launch, when the
+    // process is up but its pipe is not open yet, and giving up instantly would report a starting
+    // renderer as a missing one. So it gets a grace window of its own, not the caller's whole timeout.
+    const ULONGLONG notFoundUntil = GetTickCount64() + (timeoutMs < 250 ? DWORD(timeoutMs) : 250);
     HANDLE h = INVALID_HANDLE_VALUE;
     for (;;) {
         h = CreateFileW(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
@@ -24,7 +32,8 @@ IpcReply IPCCall(const std::wstring& pipeName, const std::string& request, DWORD
             r.error = "open pipe: " + HResultToString(HRESULT_FROM_WIN32(err));
             return r;
         }
-        if (GetTickCount64() >= deadline) {
+        if (GetTickCount64() >= deadline
+            || (err == ERROR_FILE_NOT_FOUND && GetTickCount64() >= notFoundUntil)) {
             r.error = err == ERROR_PIPE_BUSY ? "pipe busy" : "no renderer is running on this pipe";
             return r;
         }
