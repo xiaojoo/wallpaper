@@ -28,10 +28,23 @@ POINT IconHitWindow::MessagePoint(LPARAM l) {
 }
 
 int IconHitWindow::SlotAt(POINT desktopPx) const {
-    for (const auto& r : rects_)
+    // The pointer has to be on *this* window, not merely inside the rectangle an icon was drawn in
+    // last frame. A geometric test alone also answers "yes" while another program's window covers that
+    // part of the desktop, and because the ring holds still under the pointer, a browser or an editor
+    // sitting over the wallpaper was enough to stop it turning - the pointer never touched the ring.
+    //
+    // WindowFromPoint is the z-order answer, and it is honest here precisely because it is geometry
+    // and stacking only: it does not consult WM_NCHITTEST, so it names whoever really owns the pixel.
+    // Measured both ways on this desktop: over an uncovered icon it names `SmartWallpaper.IconHit`,
+    // and over the same icon while a game window covers it, `RiotWindowClass`.
+    const HWND top = WindowFromPoint(desktopPx);
+    if (!top) return -1;
+    for (const auto& r : rects_) {
+        if (r.slot < 0 || r.slot >= kMaxSlots) continue;
+        if (win_[r.slot] != top) continue;
         if (desktopPx.x >= r.px.left && desktopPx.x < r.px.right &&
-            desktopPx.y >= r.px.top && desktopPx.y < r.px.bottom)
-            return r.slot;
+            desktopPx.y >= r.px.top && desktopPx.y < r.px.bottom) return r.slot;
+    }
     return -1;
 }
 
