@@ -290,7 +290,9 @@ std::wstring ExePath() {
 
 // Login autostart is one HKCU Run value: adding or deleting only our own named value, never the
 // key itself, so it stays a "只加不改" change to his session and is off unless he turns it on.
-bool Application::IsAutostartEnabled(std::string& error) {
+// No error string: a missing Run key is not a failure to report, it is the state "off", and the only
+// caller that could show a reason is the switch that writes it (SetAutostart below).
+bool Application::IsAutostartEnabled() {
     HKEY k = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ, &k) != ERROR_SUCCESS) return false;
     wchar_t buf[4096];
@@ -868,7 +870,6 @@ bool Application::ArmOrbitDrag(bool on, std::string& error) {
                       [this, idx = m.index, bw, bh](float x, float y, bool commit) -> RECT {
         const MonitorInfo* mm = monitors_.byIndex(size_t(idx));
         if (!mm) return RECT{};
-        const float Hh = float(mm->px.h);
         // The layer reports where its top-left wants to be; the ring is stored by its centre, so the
         // two halves of the box are what turn one convention into the other.
         wpm_.SetOrbitPos(x + bw * 0.5f, y + bh * 0.5f);
@@ -1347,7 +1348,7 @@ void Application::UpdateSnapshot() {
     r.set("ffmpeg", Json::Of(FfmpegBuildNote()));
     r.set("root", Json::Of(ToUtf8(wpm_.settings().root)));
     r.set("paused", Json::Of(paused_.load()));
-    { std::string ae; r.set("autostart", Json::Of(IsAutostartEnabled(ae))); }
+    r.set("autostart", Json::Of(IsAutostartEnabled()));
     r.set("max_fps", Json::Of(wpm_.settings().globalMaxFps));
     // The settings window reads these two back to label the 画质档 field. Without them it always
     // falls back to "package", so picking an option changed the renderer but never the UI.
@@ -2821,7 +2822,7 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
     } else if (action == "autostart") {
         std::string err;
         if (arg == "get") {
-            result = std::format(R"({{"ok":true,"autostart":{}}})", IsAutostartEnabled(err) ? "true" : "false");
+            result = std::format(R"({{"ok":true,"autostart":{}}})", IsAutostartEnabled() ? "true" : "false");
         } else {
             const bool want = arg == "on" || arg == "true" || arg == "1";
             if (!SetAutostart(want, err)) result = std::format(R"({{"ok":false,"error":"{}"}})", err);

@@ -167,7 +167,10 @@ MachineStats MachineMetrics::Sample(const GpuUse& gpu) {
             // every localhost connection this machine makes and would read as network traffic.
             if (r.Type == IF_TYPE_SOFTWARE_LOOPBACK) continue;
             if (r.MediaConnectState != MediaConnectStateConnected) continue;
-            if (r.OperStatus != NET_IF_OPER_STATUS_UP) continue;
+            // IfOperStatusUp, not NET_IF_OPER_STATUS_UP: MIB_IF_ROW2::OperStatus is an IF_OPER_STATUS,
+            // and the two enums carry the same numbers under different names. Comparing the second
+            // one's enumerator works and is still wrong - MSVC calls it out as C5054.
+            if (r.OperStatus != IfOperStatusUp) continue;
             in += r.InOctets; out += r.OutOctets;
         }
         FreeMibTable(tab);
@@ -227,15 +230,18 @@ void FillStatsCB(const MachineStats& x, StatsCB& out) {
     out.cpu[2] = x.cpuUserPct; out.cpu[3] = x.cpuPrivPct;
     out.memory[0] = x.memPct; out.memory[1] = x.memUsedMb;
     out.memory[2] = x.memTotalMb; out.memory[3] = x.commitMb;
-    out.gpu[0] = x.gpu.device; out.gpu[1] = x.gpu.memUtilPct;
-    out.gpu[2] = x.gpu.memUsedMb; out.gpu[3] = x.gpu.memTotalMb;
-    out.gpu2[0] = x.gpu.tempC; out.gpu2[1] = x.gpu.powerW; out.gpu2[2] = x.gpu.clockMHz;
+    // GpuUse answers as double because NVML hands back whole numbers that way; the constant buffer's
+    // rows are float4 because that is what a shader can read. The narrowing is on purpose, so it is
+    // written out - C4244 is the compiler asking us to say so rather than to disagree.
+    out.gpu[0] = float(x.gpu.device); out.gpu[1] = float(x.gpu.memUtilPct);
+    out.gpu[2] = float(x.gpu.memUsedMb); out.gpu[3] = float(x.gpu.memTotalMb);
+    out.gpu2[0] = float(x.gpu.tempC); out.gpu2[1] = float(x.gpu.powerW); out.gpu2[2] = float(x.gpu.clockMHz);
     out.disk[0] = x.diskReadBs; out.disk[1] = x.diskWriteBs;
     out.disk[2] = x.diskActivePct; out.disk[3] = x.cpuQueue;
     out.disk2[0] = x.diskFreeGb; out.disk2[1] = x.diskTotalGb;
     out.disk2[2] = x.processCount; out.disk2[3] = x.uptimeS;
     out.net[0] = x.netRecvBs; out.net[1] = x.netSendBs;
-    out.temp[0] = x.gpu.device; out.temp[1] = x.diskTempC; out.temp[2] = x.mbTempC;
+    out.temp[0] = float(x.gpu.device); out.temp[1] = x.diskTempC; out.temp[2] = x.mbTempC;
     out.disk3[0] = x.diskTempC; out.disk3[1] = x.diskWarnC;
     out.disk3[2] = x.diskCritC; out.disk3[3] = float(x.diskSensors);
     out.meta[0] = float(x.valid); out.meta[1] = x.ageS; out.meta[2] = float(x.coreCount);
@@ -250,7 +256,7 @@ void PushChartSeries(float* ring, const MachineStats& x) {
     // Shaders/HudChart.hlsl: x gpu, y drive, z motherboard thermal zone. The fourth column is unused
     // and stays -1 because the constant buffer's row is a float4 either way. The only thing keeping
     // the two orders in step is this comment.
-    const float v[4] = { x.gpu.device, x.diskTempC, x.mbTempC, -1.f };
+    const float v[4] = { float(x.gpu.device), x.diskTempC, x.mbTempC, -1.f };
     for (int i = 0; i + 1 < kChartSamples; ++i)
         for (int m = 0; m < 4; ++m) ring[i * 4 + m] = ring[(i + 1) * 4 + m];
     for (int m = 0; m < 4; ++m)

@@ -227,7 +227,7 @@ private:
     void HealIconLayer();
     // Moves the rotation pointer by delta and shows the result. Returns the id that got on screen.
     std::string RotateStep(int delta);
-    static bool IsAutostartEnabled(std::string& error);
+    static bool IsAutostartEnabled();
     static bool SetAutostart(bool on, std::string& error);
     std::string DoCommandLocal(const std::string& action, const std::string& arg, const std::string& arg2);
     Quality EffectiveQuality(const Slot& s) const;

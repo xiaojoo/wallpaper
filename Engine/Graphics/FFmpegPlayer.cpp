@@ -20,6 +20,11 @@
 #include "Engine/Core/Json.hpp"
 #include "Engine/Core/Log.hpp"
 
+// libav*'s own headers warn under MSVC - `av_clip` returns `int` narrowed to the type it clips to,
+// which is correct FFmpeg and not ours to fix. MSVC's documented way to keep a third-party header out
+// of the build's warning count is to lower the level around it and restore it after, so the four C4244
+// lines from libavutil/common.h stop hiding the ones in our own code.
+#pragma warning(push, 0)
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -31,6 +36,7 @@ extern "C" {
 // hwcontext_d3d11va.h pulls in the D3D11 headers, and those define C++ operators - so it must not sit
 // inside extern "C" (the same trap tools/dxvaspike.cpp hit on its first compile).
 #include <libavutil/hwcontext_d3d11va.h>
+#pragma warning(pop)
 
 #include <psapi.h>
 
