@@ -30,12 +30,12 @@ CMake 找 SDK 的顺序：`-DWALLPAPER_FFMPEG_DIR=<路径>` → 环境变量 `FF
 ```
 WallpaperRenderer.exe                          双击/命令行直接开跑，读同目录 config.json
 WallpaperRenderer.exe --selftest 20            跑 20 秒自动退出并把测量结果写日志
-WallpaperRenderer.exe --wallpaper embers       指定壁纸
+WallpaperRenderer.exe --wallpaper snowfall      指定壁纸
 WallpaperRenderer.exe --window                 普通顶层窗口，不碰桌面（开发用）
 WallpaperRenderer.exe --no-power               忽略遮挡/全屏降帧（开发用，量帧率时才用）
 
 WallpaperRenderer.exe --ctl status             读运行中实例的真实状态（JSON）
-WallpaperRenderer.exe --ctl apply aurora M0    换壁纸（M0/M1/all）
+WallpaperRenderer.exe --ctl apply matrixclock M0  换壁纸（M0/M1/all）
 WallpaperRenderer.exe --ctl pause | resume | reload | quit
 WallpaperRenderer.exe --ctl quality battery
 WallpaperRenderer.exe --ctl fps 30
@@ -97,7 +97,7 @@ cmake -S . -B bld -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH=D:/Progr
 cmake --build bld --config RelWithDebInfo
 bash tools/run-ui.sh                  # 暂存 qml/ 并启动（改 QML 不用重编）
 bash tools/run-ui.sh --with-renderer  # 顺便把渲染器起来
-Wallpaper.exe --select embers    # 直接选中一张，让轮播停在它上面
+Wallpaper.exe --select snowfall  # 直接选中一张，让轮播停在它上面
 Wallpaper.exe --settings         # 直接打开设置对话框
 Wallpaper.exe --settings-tab monitors   # 打开并停在某一类（general/monitors/power/wallpapers/renderer）
 ```
@@ -701,7 +701,7 @@ Esc 一次只关两层（先下拉列表，再设置）—— 两条都按过键
 ## 壁纸包格式
 
 ```
-Wallpapers/aurora/
+Wallpapers/snowfall/
     wallpaper.json      名称、fps、quality、shader、params、textures
     main.hlsl           运行期用 d3dcompiler_47.dll 编译，不重编程序
     textures/*.png      WIC 解码成 BGRA 纹理，按数组顺序绑到 t0..tN
@@ -909,6 +909,107 @@ B 行是反证：槽被两个消费者取得比解码填得快时，跳过必须
 （哪个构建、对应源码在哪、怎么替换 DLL）。后者由 `tools/ffmpeg-notice.sh` 从真实二进制生成，
 两个负面自检都跑过：喂它一个带 `--enable-gpl` 的假构建、以及一个读不出 configuration 的假构建，
 都返回 REFUSE/2 而不是写出一份"看起来合规"的说明。
+
+## 桌面快捷键环（引擎的第三叠加层，阶段 3：可点击）
+
+把桌面上的 `.lnk` 排成一圈转动的图标，点一下启动它指向的程序。图标来自 shell 自己（`ShellIcons.cpp`
+问目标 exe 要 256 px，问 `.lnk` 只能拿到 32 px），环是引擎在同一块 DirectComposition 表面上的第三次
+Draw，不是一张壁纸包。
+
+开关全部走控制管道，**都不持久化**——一圈属于用户自己的图标盖在他桌面上，不该在崩溃之后自己回来：
+
+| 命令 | 作用 |
+|---|---|
+| `--ctl orbit on\|off` | 开/关整个环（关的时候顺带拆掉点击层） |
+| `--ctl orbitspeed 45` | 转一圈的秒数，`0` 停住 |
+| `--ctl orbitcount 12` | 环上放几个，1..16（16 是常量缓冲和着色器循环的槽数） |
+| `--ctl orbitlayer on\|off` | 只拆/装点击层，用来做像素 A/B |
+
+**几何只在一处算**。第一版把椭圆和相位放在着色器里；一旦要有东西替每个图标接住鼠标，两处各自算三角
+函数就会漂，点到离图画十像素外的地方这个功能就废了。现在 `Application.cpp` 算出每个槽的设备像素矩形，
+一份写进 `uOrbitIcon`（着色器照着画），一份交给点击层（窗口照着摆），被中间物体挡住的槽写成 size 0
+而不是从数组里挤掉——图集的格子号就是槽号，压缩数组会把图标串到别人的图上。
+
+### 这一阶段量到的四条（2026-10-11，`tools/probe-orbit-click.ps1`、`tools/probe-orbit-fallthrough.ps1`）
+
+| 判据 | 结果 |
+|---|---|
+| 真点击真的启动程序 | 点槽 0 → 日志 `orbit click: slot 0 '!SWorbit-test' started`，夹具目标自己写的日志 3→4 行。夹具是临时建在桌面上的一个 `.lnk`（目标是 `cmd /c echo >>文件`，不弹任何窗），测完已删 |
+| 环内的像素归点击层 | 11 个可见槽的中心 **11/11** 报 `SmartWallpaper.IconHit` |
+| 环外仍然是桌面的（止损） | 每框外扩 12 px 的 11 个点 **0/11** 还报我们的窗，全是 `SysListView32`；再用后果验一次：先用 UIA 选中一个桌面图标，点环外空桌面，选中被清掉=桌面收到了；反证（盖一层不透明顶层窗再点）选中保持 ⇒ 这把尺子能报红 |
+| 点击层不画任何东西 | 6 个框、每框 2 万~3 万像素，层开/层关像素差 **0** |
+| 图标真的画在点击框里 | 11 个框逐个量饱和像素：环开 2043~21537，环关**同一批框 10/11 是 0**（槽 2 那个框压在壁纸自己会动的区域上，它那 14647 是壁纸的，同状态两帧它也差 2554 px，所以那一格这条判据不分辨）；其余框同状态两帧差 0~24 px |
+| 指针停上就停转 | 停在槽 3 上时连续两帧 11 个框坐标逐位相同；指针移开后每 0.7 s 推进约 73 px |
+
+### 这台机上量出来的两条平台事实（换机器要重验）
+
+- **子窗口的 `WM_NCHITTEST → HTTRANSPARENT` 不把点击交还给下面**。第一版是一个铺满整屏的子窗口，
+  打算靠 HTTRANSPARENT 让环外的点击落回桌面：实测环外空桌面上的一次点击**没有**落到桌面（预先用
+  UIA 选中的图标不会被清掉），把窗口缩到 200x200 之后同一个点 `WindowFromPoint` 就报 `SysListView32`
+  且点击生效。所以"环外不属于我们"现在是结构事实——一个图标一个窗，窗户外面根本没有我们的窗口。
+- **`WindowFromPoint` 不跑 `WM_NCHITTEST`**，它只按几何报窗口：整屏那版它对每个桌面像素都报我们的
+  窗，于是"环外 11/11 还报我们"这个红是量具在骗人而不是功能坏了。停损一律改量后果（选中状态、
+  目标程序真的启动），别拿 `WindowFromPoint` 当命中。
+- 顺带一条：这次差点把 Chrome 自己挪了位置读成"我们的层让桌面图标消失了"——同状态对照和跨状态
+  对照的**时间间隔必须一样**，否则噪声底是假的。
+
+### 开关与"不依赖我们进程"的还原路径（阶段 4，2026-10-11）
+
+设置窗 > 工具 里现在是三行：资源状态卡、**快捷键环**（开/关 + 转一圈秒数 + 环上数量）、**隐藏桌面图标**。
+托盘右键菜单里同样有后两行（可勾选）。环和图标层是两个独立开关，不持久化；转速和数量不本地回显，
+读回引擎的值，因为引擎会把周期夹到 ≥3 s、把数量夹到 16。
+
+藏图标藏的是 `SysListView32`（不是 `SHELLDLL_DefView`），这条是量出来的：藏 DefView 会连桌面右键菜单
+一起没掉，藏列表菜单还在（实测 10 项，含「查看」）。同时写 explorer 自己的
+`HKCU\...\Explorer\Advanced\HideIcons`，并留一个 `iconlayer.state` 记号在本目录。四条退路的实测：
+
+| 退路 | 图标回来的时间 | 怎么量的 |
+|---|---|---|
+| 干净退出（`--ctl quit`） | **243 ms** | `Shutdown()` 第一件事就是还原；轮询窗口可见性 |
+| 被强杀（崩溃），下次启动 | **1844 ms**（含进程自身启动） | `Stop-Process -Force` 后图标仍藏、记号仍在；再起进程读记号自愈 |
+| 客户端看门狗拉起 | **3.21 s** | 客户端在场时杀渲染器，从杀的瞬间起算 |
+| 我们完全不运行，用户自己点 | **133 ms** | 右键桌面 > 查看 > 显示桌面图标，一次点击 |
+
+**已知缺陷（量出来的，不是猜的）**：我们藏起来之后，那条菜单项仍然显示 `[On]`——勾是从 shell 内存里的
+状态读的，不读 `HideIcons`。点它仍然有效（133 ms 图标回来，`HideIcons` 由 1 回到 0），但用户在点之前
+看到的勾是错的。修法要么是让 shell 重读（没找到不动它窗口的办法），要么放弃写窗口可见性只写值（实测
+只写值不会立刻改变画面）。这条留在缺点里。
+
+另外：用户在桌面菜单里自己点回图标时，我们 5 秒一轮的宿主检查会发现"列表又可见了"并把开关和记号一起
+收掉——他刚要回来的东西不会被我们再按回去。
+
+### 环心做成参数（阶段 5，2026-10-11）
+
+环心原来固定在工作区正中，压在壁纸人物上是**撞上的**，换一张壁纸就不成立。现在它是设置项
+`orbit_pos`（单位与状态卡一致：监视器高度、从该监视器左上角起算，两个负数=没人拖过=回到工作区正中），
+`Application::RingFor()` 一处算出中心/两轴半径/图标尺寸/中间物体，着色器的 `uOrbitIcon`、点击盒、
+拖动层的虚线框全部从它派生。拖动复用状态卡那套 `HudDragWindow`（只在按住时存在，松手即销毁），
+所以拖动时环停转、图标盒让位，避免"把手自己跑掉"那种抖动。verb：`orbitdrag on|off`、`orbithome`。
+
+| 判据 | 实测 |
+|---|---|
+| 拖多少环走多少 | 拖 +320,-180 → 槽位点击盒走 **+319,-180**（`tools/probe-ring-drag.ps1`，环冻结状态下） |
+| 存下来的值活过重启 | 写进 `config.json` 的 `[1.036741, 0.405407]`，在我重启和**没安排的**一次重启之后都逐位读回 |
+| 拖动层只在按住时存在 | 武装前日志 `layer: absent`，松手后 `absent`、`orbit_drag=false` |
+| 界面那颗「回到中央」 | 点下去 `orbit_pos` 由 `[1.036741, 0.405407]` 变 `null` |
+| 层拆掉之后点击层照旧 | 桌面清空、环冻结时 **11/11** 环内归点击层、**0/11** 环外越界 |
+
+顺带量到一条不是 bug 的行为：把环心拖到设置窗底下之后，同一张表读到 **6/11**——那 5 个点归
+`Qt6112QWindowIcon`，正是"窗口在桌面上面时我们不抢它的点击"。这条读数和上一行是同一天同一把尺子给的，
+区别只在有没有窗压着。
+
+拖动层的窗口标题按各自归属分开写（status card / chart panel / shortcut ring），三个共用一个类时
+标题都写着 status card，alt-tab 和任何窗口读法都会指错东西。
+
+### 还没做的
+
+多屏时只有指针所在那块屏的环可点（和两个面板的拖动层同一个约定）；点击盒尺寸按 8 px 取整、允许滞后
+4 px，因为一圈 45 s 时前排图标每秒走约 30 px，逐帧 `SetWindowPos` 十六个窗口不值那 4 px。
+
+转速/数量两个滑杆原来借的是任务栏那颗百分比滑杆，会读成"45%"、"12%"；给 `Range` 加了单位和零值文案。
+渲染实测（设置窗 > 工具）：转一圈显示 **"45 s"**、环上数量显示 **"16"**。最长串按同一字体
+（Microsoft YaHei UI 11px）量得 `45 s`=26px、`120 s`=33px、`16`=17px，标签框宽 48px ⇒ 顶格值还余
+15px，不会被裁。"停住"那条零值文案**没有量**：要看到它得把他正在用的转速拖到 0，那是他的活设置。
 
 ## 实测（这台机器：i9-14900KF + RTX 4080 SUPER，单显示器 3840x2160 @144Hz，缩放 100%）
 
@@ -1156,7 +1257,10 @@ Engine/Desktop     显示器枚举（物理像素/DPI/刷新率）、WorkerW 层
 Engine/Packages   壁纸包、实例（编译后）、配置与分配
 Engine/Performance 帧率分配（每屏一路）、降功耗状态机
 Engine/App         应用外壳、托盘、命名管道服务端/客户端
-Wallpapers/        aurora、embers、snowfall（GPU 粒子）
+Wallpapers/        matrixclock、snowfall（GPU 粒子）。2026-10-11 他点名只留这两张，其余十张
+                   （aurora、binarydrift、datarain、embers、machinedrift、neonfall、ironwalk、
+                   ironstand、ironline、ironwire）已删除。下面各表里以那些名字出现的读数都是
+                   删除之前量下的历史证据，保留原样，照做会复现不了。
 Shaders/           Contract.hlsl（帧常量 + 噪声/色调工具）、Fullscreen.hlsl（全屏三角形）、
                    ParticleCommon.hlsl（48 字节粒子布局）
 tools/             构建、桌面层级探针、屏幕截图与逐像素对比

@@ -111,11 +111,25 @@ public:
     bool DrawChart(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
                    std::string& error);
 
+    // The desktop shortcut ring: the same overlay machinery, a third shader, and an atlas that is not
+    // a file. ShellIcons.cpp builds the icon grid out of the shell's own icons at runtime, so this
+    // takes the pixels rather than a path - and they are the user's shortcuts, which must not be
+    // written into our cache directory on the way to the GPU.
+    //
+    // Separate from InitHud on purpose: the glyph atlas is a repo file that is either there or not,
+    // while the icon atlas depends on what the user's Desktop folder holds and can legitimately come
+    // back empty or be rebuilt later. Failing it must not take the status card down with it.
+    bool InitOrbit(ID3D11Device* dev, const std::wstring& root, std::string& error);
+    bool SetIconAtlas(ID3D11Device* dev, const BYTE* bgra, UINT w, UINT h, std::string& error);
+    bool orbitReady() const { return orbitReady_; }
+    bool DrawOrbit(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
+                   std::string& error);
+
 private:
     // The state both overlay passes need and neither changes: the same blend, viewport and b0/b2
     // bindings, so the second pass is a shader and a draw rather than a second copy of that block.
     void BindOverlay(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h,
-                     const Shader& s);
+                     const Shader& s, ID3D11ShaderResourceView* atlas);
     // The overlay's own compiled pair, and the glyph atlas they read.
     // The fullscreen triangle the wallpaper's PS runs over.
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, const DrawArgs& args,
@@ -144,9 +158,12 @@ private:
     Com<ID3D11SamplerState> wrap_, clamp_;
     Shader hud_;
     Shader chart_;
+    Shader orbit_;
     Com<ID3D11ShaderResourceView> glyphs_;
+    Texture iconAtlas_;
     bool hudReady_ = false;
     bool chartReady_ = false;
+    bool orbitReady_ = false;
 };
 
 } // namespace sw

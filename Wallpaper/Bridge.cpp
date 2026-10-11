@@ -171,6 +171,20 @@ const Entry kStrings[] = {
     {"hud_unavailable", "状态卡不可用", "Status card unavailable"},
     {"hud_off_hint", "引擎没能准备这张卡，原因见下。",
      "The renderer could not prepare it; the reason follows."},
+    {"orbit_ring", "快捷键环", "Shortcut ring"},
+    {"orbit_desc", "把桌面上的快捷方式排成一圈画在壁纸上，单击启动。",
+     "Puts the desktop's shortcuts in a ring on the wallpaper. One click starts one."},
+    {"orbit_period", "转一圈", "Revolution"},
+    {"orbit_stopped", "停住", "Stopped"},
+    {"orbit_count", "环上数量", "Icons on the ring"},
+    {"orbit_unavailable", "快捷键环不可用", "Shortcut ring unavailable"},
+    {"orbit_pos", "环心位置", "Ring centre"},
+    {"orbit_pos_desc", "按住出现的虚线框拖到想要的位置，松手即生效。",
+     "Drag the dashed frame that appears; it takes effect on release."},
+    {"orbit_home", "回到中央", "Back to centre"},
+    {"hide_icons", "隐藏桌面图标", "Hide desktop icons"},
+    {"hide_icons_desc", "让位给这一圈。桌面右键 > 查看 > 显示桌面图标 随时改回来。",
+     "Gives the desktop to the ring. Right-click the desktop > View > Show desktop icons undoes it."},
     {"tray_alpha", "任务栏透明度", "Taskbar transparency"},
 
     {"state", "状态", "State"},
@@ -500,6 +514,17 @@ void Bridge::ingest(const Json& status, const Json& list) {
     hudScale_ = status.intOr("hud_scale", 100);
     hudFrame_ = QString::fromStdString(status.strOr("hud_frame", "notch"));
     hudDrag_ = status.boolOr("hud_drag");
+    orbit_ = status.boolOr("orbit");
+    orbitIcons_ = status.boolOr("orbit_icons");
+    orbitReady_ = status.boolOr("orbit_ready");
+    orbitClickable_ = status.boolOr("orbit_clickable");
+    orbitPeriod_ = status.intOr("orbit_period_s", 45);
+    orbitCount_ = status.intOr("orbit_count", 12);
+    orbitSlots_ = status.intOr("orbit_slots", 0);
+    orbitError_ = QString::fromStdString(status.strOr("orbit_error", ""));
+    iconsHidden_ = status.boolOr("icons_hidden");
+    orbitDrag_ = status.boolOr("orbit_drag");
+    if (const Json* p = status.find("orbit_pos"); p) orbitCustom_ = p->isArray();
     chart_ = status.boolOr("chart");
     chartReady_ = status.boolOr("chart_ready");
     chartType_ = QString::fromStdString(status.strOr("chart_type", "bar"));
@@ -793,6 +818,62 @@ void Bridge::resetHudPos() {
     Json out;
     request(R"({"cmd":"hudhome"})", 1500, &out);
     hudCustom_ = false;
+    emit stateChanged();
+    refresh();
+}
+
+// The shortcut ring. Echoed locally for the same reason the drag switch is - the pipe answers
+// "queued" - but only the switch itself: the period and the count come back from the snapshot, so a
+// slider the engine clamped (it holds the ring's cost ceiling) cannot end up showing a number the
+// desktop is not using.
+void Bridge::setOrbit(bool on) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"orbit","arg":"{}"}})", on ? "on" : "off");
+    request(body.c_str(), 1500, &out);
+    orbit_ = on;
+    if (!on) orbitClickable_ = false;
+    emit stateChanged();
+    refresh();
+}
+
+void Bridge::setOrbitPeriod(int seconds) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"orbitspeed","arg":"{}"}})", seconds);
+    request(body.c_str(), 1500, &out);
+    emit stateChanged();
+    refresh();
+}
+
+void Bridge::setOrbitCount(int n) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"orbitcount","arg":"{}"}})", n);
+    request(body.c_str(), 1500, &out);
+    emit stateChanged();
+    refresh();
+}
+
+void Bridge::setOrbitDrag(bool on) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"orbitdrag","arg":"{}"}})", on ? "on" : "off");
+    request(body.c_str(), 1500, &out);
+    orbitDrag_ = on;
+    emit stateChanged();
+    refresh();
+}
+
+void Bridge::resetOrbitPos() {
+    Json out;
+    request(R"({"cmd":"orbithome"})", 1500, &out);
+    orbitCustom_ = false;
+    emit stateChanged();
+    refresh();
+}
+
+void Bridge::setIconsHidden(bool hide) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"icons","arg":"{}"}})", hide ? "on" : "off");
+    request(body.c_str(), 1500, &out);
+    iconsHidden_ = hide;
     emit stateChanged();
     refresh();
 }

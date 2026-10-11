@@ -86,6 +86,10 @@ bool WallpaperManager::Load(const std::wstring& exeDir, std::string& error) {
         const double x = p->items()[0].asNumber(-1.0), y = p->items()[1].asNumber(-1.0);
         if (x >= 0.0 && y >= 0.0) { s_.hudX = float(x); s_.hudY = float(y); }
     }
+    if (const Json* p = r.find("orbit_pos"); p && p->isArray() && p->items().size() == 2) {
+        const double x = p->items()[0].asNumber(-1.0), y = p->items()[1].asNumber(-1.0);
+        if (x >= 0.0 && y >= 0.0) { s_.orbitX = float(x); s_.orbitY = float(y); }
+    }
     s_.hudScalePct = r.find("hud_scale") ? r.find("hud_scale")->asInt(100) : 100;
     if (s_.hudScalePct < 60) s_.hudScalePct = 60;
     if (s_.hudScalePct > 250) s_.hudScalePct = 250;
@@ -137,6 +141,12 @@ std::string WallpaperManager::ConfigText() const {
         pos.push(Json::Of(double(s_.hudX)));
         pos.push(Json::Of(double(s_.hudY)));
         r.set("hud_pos", std::move(pos));
+    }
+    if (s_.orbitX >= 0.f && s_.orbitY >= 0.f) {
+        Json pos = Json::Array();
+        pos.push(Json::Of(double(s_.orbitX)));
+        pos.push(Json::Of(double(s_.orbitY)));
+        r.set("orbit_pos", std::move(pos));
     }
     r.set("hud_scale", Json::Of(s_.hudScalePct));
     r.set("hud_frame", Json::Of(std::string(HudFrameName(s_.hudFrame))));
@@ -279,6 +289,10 @@ int WallpaperManager::SetHudCorner(const std::string& name) {
     s_.hudX = s_.hudY = -1.f;      // a corner and a dragged position cannot both be the answer
     return s_.hudCorner;
 }
+
+void WallpaperManager::SetOrbitPos(float x, float y) { s_.orbitX = x, s_.orbitY = y; }
+
+void WallpaperManager::ClearOrbitPos() { s_.orbitX = s_.orbitY = -1.f; }
 
 void WallpaperManager::SetHudPos(float x, float y) { s_.hudX = x, s_.hudY = y; }
 

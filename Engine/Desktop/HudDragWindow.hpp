@@ -33,8 +33,11 @@ public:
     ~HudDragWindow() { Destroy(); }
 
     // `screenRect` is where the card is now, in desktop pixels; `work` is that monitor's full pixel
-    // rect, which is what converts a pointer back into the card's own units.
-    bool Create(HINSTANCE inst, const RECT& screenRect, const RECT& work,
+    // rect, which is what converts a pointer back into the card's own units. `title` names which
+    // overlay this layer belongs to - the same window class serves the status card, the chart panel
+    // and the shortcut ring, and a layer whose window still says "status card" while you are dragging
+    // the ring is a label that points at the wrong thing (in the alt-tab list, in any window reader).
+    bool Create(HINSTANCE inst, const RECT& screenRect, const RECT& work, const wchar_t* title,
                 MoveFn onMove, std::string& error);
     void Destroy();
     bool active() const { return hwnd_ != nullptr; }

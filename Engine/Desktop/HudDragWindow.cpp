@@ -140,7 +140,7 @@ void HudDragWindow::FollowPointer(bool commit) {
 }
 
 bool HudDragWindow::Create(HINSTANCE inst, const RECT& screenRect, const RECT& work,
-                           MoveFn onMove, std::string& error) {
+                           const wchar_t* title, MoveFn onMove, std::string& error) {
     static bool registered = false;
     if (!registered) {
         WNDCLASSEXW wc{};
@@ -161,7 +161,7 @@ bool HudDragWindow::Create(HINSTANCE inst, const RECT& screenRect, const RECT& w
     cardH_ = float(work.bottom - work.top);
     onMove_ = std::move(onMove);
     hwnd_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kClassName,
-                            L"SmartWallpaper status card - drag to move", WS_POPUP,
+                            title, WS_POPUP,
                             screenRect.left, screenRect.top,
                             screenRect.right - screenRect.left, screenRect.bottom - screenRect.top,
                             nullptr, nullptr, inst, this);

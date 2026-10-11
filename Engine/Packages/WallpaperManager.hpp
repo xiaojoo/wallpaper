@@ -59,6 +59,12 @@ struct Settings {
     float chartX = -1.f, chartY = -1.f;
     int chartScalePct = 100;
     int chartFrame = 0;
+    // The shortcut ring's centre, in the same units as hudX/hudY: monitor heights from this monitor's
+    // top-left, both negative until the user drags it. Negative is not "the middle of the screen" -
+    // the middle is computed from the work area and is what a config that never mentions a position
+    // gets - it is "nobody has said where", which is the difference that lets a wallpaper change
+    // re-centre the ring instead of leaving it where it happened to land.
+    float orbitX = -1.f, orbitY = -1.f;
     std::vector<Assignment> assignments;
     Json power = Json::Object();
 };
@@ -112,6 +118,8 @@ public:
     int SetHudCorner(const std::string& name);
     // Where the user dropped the card, in screen heights from the monitor's top-left. Clamped by the
     // caller, which is the only place that knows the card's size and this monitor's taskbar strip.
+    void SetOrbitPos(float x, float y);
+    void ClearOrbitPos();
     void SetHudPos(float x, float y);
     void ClearHudPos();
     void SetHudScale(int pct);

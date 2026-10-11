@@ -47,6 +47,17 @@ class Bridge final : public QObject {
     // True once the card has been dragged somewhere, which is what makes the position row say
     // 「自定义」 instead of naming a corner.
     Q_PROPERTY(bool hudCustom READ hudCustom NOTIFY stateChanged)
+    Q_PROPERTY(bool orbit READ orbit NOTIFY stateChanged)
+    Q_PROPERTY(bool orbitIcons READ orbitIcons NOTIFY stateChanged)
+    Q_PROPERTY(bool orbitReady READ orbitReady NOTIFY stateChanged)
+    Q_PROPERTY(bool orbitClickable READ orbitClickable NOTIFY stateChanged)
+    Q_PROPERTY(int orbitPeriod READ orbitPeriod NOTIFY stateChanged)
+    Q_PROPERTY(int orbitCount READ orbitCount NOTIFY stateChanged)
+    Q_PROPERTY(int orbitSlots READ orbitSlots NOTIFY stateChanged)
+    Q_PROPERTY(QString orbitError READ orbitError NOTIFY stateChanged)
+    Q_PROPERTY(bool iconsHidden READ iconsHidden NOTIFY stateChanged)
+    Q_PROPERTY(bool orbitDrag READ orbitDrag NOTIFY stateChanged)
+    Q_PROPERTY(bool orbitCustom READ orbitCustom NOTIFY stateChanged)
     // The chart panel. Same shape as the card's, plus the history depth: a line that can only show
     // four seconds of sixteen is a different picture from one that is full, and the page says so
     // rather than letting a mostly-empty gauge look broken.
@@ -125,6 +136,20 @@ public:
     QString hudFrame() const { return hudFrame_; }
     bool hudDrag() const { return hudDrag_; }
     bool hudCustom() const { return hudCustom_; }
+    // The shortcut ring and the shell's icon layer. `orbitClickable` is its own read-out because the
+    // ring can be drawn on every screen and still only be clickable on the one the layer was armed
+    // for, and a switch that promises "click to open" has to say when it cannot.
+    bool orbit() const { return orbit_; }
+    bool orbitIcons() const { return orbitIcons_; }
+    bool orbitReady() const { return orbitReady_; }
+    bool orbitClickable() const { return orbitClickable_; }
+    int orbitPeriod() const { return orbitPeriod_; }
+    int orbitCount() const { return orbitCount_; }
+    int orbitSlots() const { return orbitSlots_; }
+    QString orbitError() const { return orbitError_; }
+    bool iconsHidden() const { return iconsHidden_; }
+    bool orbitDrag() const { return orbitDrag_; }
+    bool orbitCustom() const { return orbitCustom_; }
     bool chart() const { return chart_; }
     bool chartReady() const { return chartReady_; }
     QStringList chartTypeLevels() const;
@@ -191,6 +216,12 @@ public:
     Q_INVOKABLE void setHudDrag(bool on);
     // Puts the card back on its corner preset.
     Q_INVOKABLE void resetHudPos();
+    Q_INVOKABLE void setOrbit(bool on);
+    Q_INVOKABLE void setOrbitPeriod(int seconds);
+    Q_INVOKABLE void setOrbitCount(int n);
+    Q_INVOKABLE void setIconsHidden(bool hide);
+    Q_INVOKABLE void setOrbitDrag(bool on);
+    Q_INVOKABLE void resetOrbitPos();
     Q_INVOKABLE void setChart(bool on);
     Q_INVOKABLE void setChartType(const QString& t);
     Q_INVOKABLE void setChartCorner(const QString& corner);
@@ -282,6 +313,17 @@ private:
     QString hudFrame_ = QStringLiteral("notch");
     bool hudDrag_ = false;
     bool hudCustom_ = false;
+    bool orbit_ = false;
+    bool orbitIcons_ = false;
+    bool orbitReady_ = false;
+    bool orbitClickable_ = false;
+    int orbitPeriod_ = 45;
+    int orbitCount_ = 12;
+    int orbitSlots_ = 0;
+    QString orbitError_;
+    bool iconsHidden_ = false;
+    bool orbitDrag_ = false;
+    bool orbitCustom_ = false;
     bool chart_ = false;
     bool chartReady_ = false;
     QString chartType_ = QStringLiteral("bar");

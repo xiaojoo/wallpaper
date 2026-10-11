@@ -17,6 +17,24 @@ cbuffer Frame : register(b0) {
     float4 uHud2;   // x: which of the measured borders draws the frame
     float4 uChart;  // the chart panel's rectangle, same units as uHud
     float4 uChart2;  // x: 1 bar, 2 donut, 3 line, 0 off. y: which border draws its frame
+    // uOrbit: the desktop shortcut ring, the third engine-level overlay pass. x: how many slots this
+    // frame offers, 0 turns the pass off. The rest of this row and all of uOrbit4 are spare; the ring's
+    // geometry is no longer here because it is not derived any more - see uOrbitIcon.
+    float4 uOrbit;
+    // z: atlas columns. w: atlas rows. These two are the atlas's own shape and cannot be inferred from
+    // uOrbit.x - the ring draws 12 of the 43 icons the grid holds, and deriving rows from that read
+    // every cell three rows too far down, which came out as multicoloured horizontal stripes.
+    float4 uOrbit2;
+    // z: how far a back icon dims. w: which slot the pointer is over, -1 for none.
+    float4 uOrbit3;
+    float4 uOrbit4;
+    // The icon boxes, in this surface's device pixels: xy = centre, z = half width (a hidden slot
+    // carries 0 and draws nothing), w = depth, +1 at the front of the ring and -1 at the back.
+    //
+    // Placed by Application.cpp rather than from an angle here, because making the ring clickable put
+    // a second reader on the same geometry - the invisible window that turns a pixel into a program -
+    // and two independent trigonometries drift apart. One side computes, the other follows.
+    float4 uOrbitIcon[16];
 // uHud and uHud2 belong to the engine's own overlay pass, not to packages. A wallpaper that reads them
 // gets nothing useful: they are where the HUD is going to be drawn over it, in screen heights.
 // The card's margins are not here either - they are part of the card's own design, measured off the
