@@ -477,13 +477,28 @@ void Bridge::refresh() {
     // 400 ms of every second was more than the strip fallback can afford: its motion clock is a
     // 42 ms Timer and it measured only ~2 ticks a second with the renderer gone. So the wait is
     // short and the poll backs off until the pipe answers.
-    const int timeout = connected_ ? 400 : 150;
+    // Shorter still once we have stopped believing it is there: an open attempt against a pipe nobody
+    // owns is answered in under a millisecond, so the only thing the remaining budget buys is a few
+    // retries of a race the next 2 s poll would catch anyway. Measured with the renderer gone, over
+    // 12 s of WM_NULL probes at 150 ms: median 0.1 ms, p95 1.0 ms, one sample over 100 ms - a 172 ms
+    // hiccup during the two polls it takes to *discover* the renderer is gone (that window still runs
+    // at the connected budget, capped by IPCCall's 250 ms grace). Before this pair of changes the same
+    // measurement gave median 190 ms, p95 411 ms, max 448 ms, 22 of 43 samples over 100 ms.
+    const int timeout = connected_ ? 400 : 60;
     const bool okStatus = request(R"({"cmd":"status"})", timeout, &status);
     if (okStatus) request(R"({"cmd":"list"})", timeout, &list);
 
     if (!okStatus) {
         if (++misses_ >= 2 && connected_) {
             connected_ = false;
+            // Stop asking right away rather than letting the heartbeat discover it on the next beat:
+            // that next beat is another 500 ms of frozen window.
+            if (previewTimer_->isActive()) previewTimer_->stop();
+            // Forget which pass we were watching, so the next refresh after the renderer comes back
+            // re-requests it. The engine ends a pass three seconds after the beats stop, and
+            // `showPreview` only speaks when the id changes - leaving the id set would mean the
+            // second pass never returns until he clicks a different wallpaper.
+            previewId_.clear();
             emit stateChanged();
             engineDied();
         }
@@ -492,6 +507,10 @@ void Bridge::refresh() {
         return;
     }
     if (!connected_ || timer_->interval() != 1000) timer_->start(1000);
+    // Back up: the beat was stopped when the renderer went quiet, and `showPreview` is only called
+    // when the page changes, so nothing else would start it again. An empty id means the page has no
+    // second pass to watch, which is the one case that must stay stopped.
+    if (!previewId_.isEmpty() && !previewTimer_->isActive()) previewTimer_->start(33);
     misses_ = 0;
     connected_ = true;
     ingest(status, list);
@@ -1272,6 +1291,14 @@ void Bridge::hidePreview() {
 }
 
 void Bridge::previewBeat() {
+    // The beat's whole job is to tell a live renderer that the second pass is still being watched.
+    // With no renderer there is nobody to tell, and asking costs this thread - the GUI thread - the
+    // call's entire 500 ms, once every 700. That is the "退出渲染器之后整个客户端都卡" he reported:
+    // the poll had already backed itself off to two seconds, the heartbeat had not.
+    if (!connected_) {
+        if (previewTimer_->isActive()) previewTimer_->stop();
+        return;
+    }
     // The renderer stops its second pass if this window goes quiet, so a crashed settings window
     // cannot leave the desktop renderer burning GPU. LivePreview reads the pixels itself; Bridge
     // only owns the pipe.
