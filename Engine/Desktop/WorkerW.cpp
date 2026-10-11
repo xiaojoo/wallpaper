@@ -189,11 +189,13 @@ bool WorkerW::Attach(std::string& error) {
     if (IsChildOf(host_.progman, nullptr)) (void)0;
 
     // Ask explorer for the wallpaper layer. SendMessageTimeout is used instead of SendMessage so a
-    // busy explorer cannot wedge us; the call is what creates the WorkerW.
+    // busy explorer cannot wedge us; the call is what creates the WorkerW. winuser.h types the result
+    // `LRESULT` even though the documentation calls it a BOOL, so it is held as what the API returns
+    // and tested for non-zero rather than narrowed down to BOOL.
     LRESULT res = 0;
-    BOOL ok = SendMessageTimeoutW(host_.progman, kCreateWallpaperLayer, 0, 0, SMTO_NORMAL, 1000,
-                                  reinterpret_cast<DWORD_PTR*>(&res));
-    Info(MOD, "0x052C sent: ok={} result={}", ok ? "yes" : "no", (long long)res);
+    const LRESULT sent = SendMessageTimeoutW(host_.progman, kCreateWallpaperLayer, 0, 0, SMTO_NORMAL, 1000,
+                                             reinterpret_cast<DWORD_PTR*>(&res));
+    Info(MOD, "0x052C sent: ok={} result={}", sent != 0 ? "yes" : "no", (long long)res);
 
     if (!LocateLayer()) {
         host_.parent = nullptr;

@@ -4,6 +4,7 @@
 #include <winioctl.h>
 
 #include <cstring>
+#include <limits>
 #include <string>
 
 namespace sw {
@@ -13,7 +14,10 @@ namespace {
 // reads exactly like a machine that cannot report a temperature. See the header.
 constexpr int kStorageDeviceTemperatureProperty = 52;
 constexpr int kStorageStandardProperty = 0;
-constexpr short kNotReported = (short)0x8000;
+// The value a drive reports when it has no such sensor. The three fields it is compared against are all
+// `SHORT` in winioctl.h, and 0x8000 written into a SHORT is this - spelled as the limit rather than as a
+// cast, which is the same number without MSVC's C4310 "cast truncates constant value".
+constexpr short kNotReported = std::numeric_limits<short>::min();   // the 0x8000 bit pattern
 
 // A handle that closes itself, because there are three of them here and one early return each.
 class Handle {
