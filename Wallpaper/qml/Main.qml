@@ -408,6 +408,7 @@ ApplicationWindow {
         { key: "power", icon: "bolt", label: "tab_power" },
         { key: "wallpapers", icon: "layers", label: "wallpapers" },
         { key: "tools", icon: "tools", label: "tab_tools" },
+        { key: "shortcuts", icon: "ring", label: "tab_shortcuts" },
         { key: "chart", icon: "motion", label: "chart_tab" },
         { key: "renderer", icon: "cpu", label: "renderer" }
     ]
@@ -456,8 +457,20 @@ ApplicationWindow {
         return out
     }
 
-    readonly property var chartCornerItems: {
+    // The ring's trajectories. `_lang` is read so the list is rebuilt when the language changes:
+    // without a dependency on it the binding caches the labels of whichever language was on screen
+    // when the dialog first opened.
+    readonly property var orbitShapeItems: {
+        const _lang = Bridge.lang
         const out = []
+        for (let i = 0; i < Bridge.orbitShapeLevels.length; ++i) {
+            const s = Bridge.orbitShapeLevels[i]
+            out.push({ value: s, label: trs("orbit_shape_" + s) })
+        }
+        return out
+    }
+
+    readonly property var chartCornerItems: {        const out = []
         for (let i = 0; i < Bridge.chartCornerLevels.length; ++i) {
             const c = Bridge.chartCornerLevels[i]
             out.push({ value: c, label: trs("hud_corner_" + c.replace("-", "_")) })
@@ -1950,6 +1963,15 @@ ApplicationWindow {
                             }
                         }
 
+                    }
+                    // ---------------------------------------------------------- 快捷键
+                    // The ring's own page: it grew to nine rows and a drawer of its own, which is
+                    // more of this column than the two overlay panels it was sharing it with.
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        visible: root.settingsTab === "shortcuts"
+                        spacing: 14
+
                         // The shortcut ring, and the one thing about it that touches something
                         // outside this program: the shell's own icon layer.
                         Group {
@@ -2007,15 +2029,71 @@ ApplicationWindow {
                                     from: 1
                                     // The ceiling is the desktop's own shortcut count, which is what he
                                     // asked for; sixty four is the constant buffer's row count and only
-                                    // matters on a machine with more shortcuts than that.
-                                    to: Math.max(1, Math.min(64, Bridge.orbitSlots))
-                                    value: Math.min(Math.max(1, Math.min(64, Bridge.orbitSlots)),
-                                                     Bridge.orbitCount)
+                                    // matters on a machine with more shortcuts than that. Divided by the
+                                    // rings, because that many per ring is all the buffer has rows for -
+                                    // and a slider that could be pushed past what gets drawn would be
+                                    // showing a number the desktop disagrees with.
+                                    to: Math.max(1, Math.min(Math.floor(64 / Bridge.orbitRings),
+                                                             Bridge.orbitSlots))
+                                    value: Math.min(Math.max(1, Math.min(Math.floor(64 / Bridge.orbitRings),
+                                                                         Bridge.orbitSlots)),
+                                                    Bridge.orbitPerRing)
                                     unit: ""
                                     zeroText: ""
                                     enabled: Bridge.connected
                                     onCommitted: function (v) { Bridge.setOrbitCount(v) }
                                 }
+                            }
+                            RowLayout {
+                                visible: Bridge.orbit
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("orbit_rings")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Range {
+                                    label: trs("orbit_rings")
+                                    from: 1
+                                    to: 4
+                                    value: Bridge.orbitRings
+                                    unit: ""
+                                    zeroText: ""
+                                    enabled: Bridge.connected
+                                    onCommitted: function (v) { Bridge.setOrbitRings(v) }
+                                }
+                            }
+                            Text {
+                                // Only with a second ring: with one, the total is the number the slider
+                                // above already shows and a line repeating it is noise.
+                                visible: Bridge.orbit && Bridge.orbitRings > 1
+                                text: trs("orbit_shown") + " " + Bridge.orbitShown + " "
+                                      + trs("orbit_shown_unit")
+                                wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                            }
+                            RowLayout {
+                                visible: Bridge.orbit
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("orbit_shape")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Choice {
+                                    items: root.orbitShapeItems
+                                    value: Bridge.orbitShape
+                                    enabled: Bridge.connected
+                                    onPicked: function (v) { Bridge.setOrbitShape(v) }
+                                }
+                            }
+                            Text {
+                                visible: Bridge.orbit
+                                text: trs("orbit_shape_desc")
+                                wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
                             }
                             // The two sizes, on the same percentage-of-reference terms as the status
                             // card's own 大小 slider: 100% is the layout the ring was measured at.
@@ -2165,7 +2243,6 @@ ApplicationWindow {
                                 }
                             }
                         }
-
                     }
                     // ---------------------------------------------------------- 图表
                     // A second overlay panel rather than more rows on the status card: a ring wants a
@@ -3161,6 +3238,20 @@ ApplicationWindow {
                 c.beginPath()
                 for (var gi = 0; gi < 8; ++gi) spoke(gi * Math.PI / 4 + Math.PI / 8, 6.9, 9.7)
                 c.stroke()
+                break
+            case "ring":
+                // The shortcut ring's own silhouette: a flat ellipse and four dots on it, the same
+                // perspective the desktop draws. Filled dots, because at 18 px an outlined one is
+                // three pixels of ring around one pixel of nothing.
+                c.beginPath(); c.ellipse(12, 12, 8.8, 4.6, 0, 0, tau); c.stroke()
+                c.beginPath()
+                for (var ri = 0; ri < 4; ++ri) {
+                    var ra = ri * Math.PI / 2 + Math.PI / 4
+                    var rx = 12 + 8.8 * Math.cos(ra), ry = 12 + 4.6 * Math.sin(ra)
+                    c.moveTo(rx + 1.7, ry)
+                    c.arc(rx, ry, 1.7, 0, tau)
+                }
+                c.fill()
                 break
             case "monitor":
                 rr(3.2, 4.4, 17.6, 12.0, 2.0); c.stroke()

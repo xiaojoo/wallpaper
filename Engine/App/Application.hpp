@@ -370,6 +370,13 @@ private:
         float rx = 0.f, ry = 0.f;   // the two radii
         float iconPx = 0.f;         // one icon's full size at the front of the ring
         float occX = 0.f, occY = 0.f;   // the middle object's half-width and half-height
+        // The radius multiplier of the outermost ring, so the bounding box that the click layer and
+        // the drag handle are cut from covers every ring and not just the first one.
+        float outer = 1.f;
+        // The funnel's own half-height: how far the top layer sits above the centre and the bottom
+        // layer below it. Zero for the shapes that stay in one plane, and the bounding box has to
+        // carry it or the drag handle's dashed frame would stop short of the layers it is for.
+        float stack = 0.f;
     };
     RingShape RingFor(const MonitorInfo& m) const;
     RECT OrbitScreenRect(const MonitorInfo& m) const;

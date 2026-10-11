@@ -754,6 +754,37 @@ bool Application::ArmDrag(int panel, bool on, std::string& error) {
     return true;
 }
 
+namespace {
+// The three trajectories, in the order OrbitShapeName() lists them. A fourth shape means adding a
+// name there and a branch in ShapePoint below, and nothing anywhere else - the shader, the click
+// boxes and the drag handle all follow whatever that one function writes.
+constexpr int kOrbitEllipse = 0, kOrbitFunnel = 1, kOrbitStar = 2;
+constexpr float kTau = 6.28318530718f;
+// The funnel's layers sit this many icon heights apart, centre to centre. It has to be more than one:
+// at 1.0 the layers touch, and below that the stack reads as one spiral band rather than as layers.
+constexpr float kFunnelGap = 2.0f;
+// One rim's own half-height, as a fraction of the step to the next rim. The ellipse's 0.16-of-work-area
+// height cannot be used here: it is several times the step, so consecutive rims interleave and the
+// layering disappears - which is the whole thing this shape is for. 0.8 leaves a visible gap between
+// one rim's bottom and the next one's top.
+constexpr float kFunnelRim = 0.8f;
+// How narrow the neck is against the mouth. The reference he sent measures 212 px of half width at the
+// mouth against 64 px at the neck - 3.3:1 - so 0.30. The first version used a pentagram-ish 0.22 and
+// closed up faster than the picture does.
+constexpr float kFunnelNeck = 0.30f;
+// How many revolutions the shortcuts wind while they descend. One turn puts every icon at its own
+// angle and its own height, which draws a diagonal falling line; the picture is a vortex, and that
+// needs the same angle to come round again at a lower, narrower rim.
+constexpr float kFunnelTurns = 3.f;
+}  // namespace
+
+// Each further ring is this much wider than the one inside it. The step is what keeps two rings from
+// reading as one blob at the default sizes: at 1.15 the gap between the front icons of adjacent rings
+// is smaller than one icon, and by 0.6 the outer ring has left the work area. RingFor's `outer` and
+// the per-slot radius below both come from this number, so the bounding box cannot end up smaller
+// than the rings it is supposed to cover.
+constexpr float kOrbitRingStep = 0.42f;
+
 Application::RingShape Application::RingFor(const MonitorInfo& m) const {
     const float wh = m.work.h > 0 ? float(m.work.h) : 1.f;
     const float H = m.px.h > 0 ? float(m.px.h) : 1.f;
@@ -768,6 +799,21 @@ Application::RingShape Application::RingFor(const MonitorInfo& m) const {
     s.ry = 0.16f * wh * ring;    // flat, but not flatter: at 0.11 the icons at each extreme merged into
                                  // one blob. Scaled with rx so a bigger ring is the same view, further.
     s.iconPx = 0.085f * wh * icon;
+    // Each further ring is 42% wider than the one inside it (see kOrbitRingStep above).
+    s.outer = 1.f + float(std::max(1, wpm_.settings().orbitRings) - 1) * kOrbitRingStep;
+    // The funnel's own geometry. `stack` is how far the top and bottom layers sit from the centre and
+    // `ry` stops being the ring's height and becomes one rim's, deliberately flat: at the ellipse's own
+    // height the rims interleave and there is no stack to see. The step wants `kFunnelGap` icon
+    // heights; what it gets is that or whatever fits in 95% of the work area, whichever is smaller -
+    // layers the user cannot see are not layering.
+    s.stack = 0.f;
+    if (wpm_.settings().orbitShape == kOrbitFunnel) {
+        const float n = float(std::max(2, int(orbitCount_)));
+        const float room = 0.95f * wh * 0.5f - s.iconPx * 0.5f;
+        s.stack = std::min(kFunnelGap * s.iconPx * (n - 1.f) * 0.5f,
+                           room / (1.f + kFunnelRim / (n - 1.f)));
+        s.ry = kFunnelRim * s.stack / (n - 1.f);
+    }
     // Unset means the middle of the work area, which is where the reference's figure stands. Set means
     // wherever the user dragged it, in monitor heights from this monitor's top-left - the same units
     // and the same "negative means nobody said" convention as the two panels.
@@ -782,8 +828,12 @@ Application::RingShape Application::RingFor(const MonitorInfo& m) const {
 RECT Application::OrbitScreenRect(const MonitorInfo& m) const {
     const RingShape s = RingFor(m);
     const float pad = s.iconPx * 0.5f;   // the front icons stick out past the ellipse itself
-    return RECT{ LONG(m.px.x + s.cx - s.rx - pad), LONG(m.px.y + s.cy - s.ry - pad),
-                 LONG(m.px.x + s.cx + s.rx + pad), LONG(m.px.y + s.cy + s.ry + pad) };
+    // The outermost ring's radii, not the first ring's, and on the vertical axis the funnel's layers
+    // on top of that: with 环数 > 1 or 漏斗 the click layer and the drag handle have to reach the
+    // icons that are actually furthest out.
+    const float ex = s.rx * s.outer, ey = (s.ry + s.stack) * s.outer;
+    return RECT{ LONG(m.px.x + s.cx - ex - pad), LONG(m.px.y + s.cy - ey - pad),
+                 LONG(m.px.x + s.cx + ex + pad), LONG(m.px.y + s.cy + ey + pad) };
 }
 
 bool Application::ArmOrbitDrag(bool on, std::string& error) {
@@ -811,7 +861,8 @@ bool Application::ArmOrbitDrag(bool on, std::string& error) {
     // The layer is the ring's bounding box, so the dashed outline is the ring's own footprint rather
     // than a rectangle invented for the handle.
     const RingShape s0 = RingFor(m);
-    const float bw = (s0.rx + s0.iconPx * 0.5f) * 2.f / H, bh = (s0.ry + s0.iconPx * 0.5f) * 2.f / H;
+    const float bw = (s0.rx * s0.outer + s0.iconPx * 0.5f) * 2.f / H,
+                bh = ((s0.ry + s0.stack) * s0.outer + s0.iconPx * 0.5f) * 2.f / H;
     if (!d.win.Create(GetModuleHandleW(nullptr), OrbitScreenRect(m), work,
                       L"SmartWallpaper shortcut ring - drag to move",
                       [this, idx = m.index, bw, bh](float x, float y, bool commit) -> RECT {
@@ -902,11 +953,14 @@ void Application::LogOrbitSlots() {
     Info(MOD, "orbit slots{}", names);
 }
 
-// How many ring slots the desktop can actually fill right now: what the user asked for, capped by the
-// constant buffer's row count and by how many shortcuts the current selection holds.
+// How many ring slots the desktop can actually fill right now: what the user asked for - one count
+// per ring, times the number of rings - capped by the constant buffer's row count and by how many
+// shortcuts the current selection holds. The rings fill from the inside out, so a selection smaller
+// than perRing*rings leaves the outer rings short instead of dropping icons: 43 icons at 17 per ring
+// and 3 rings is 17 + 17 + 9, not 17.
 int Application::OrbitSlotsShown() const {
-    return int(std::min(orbitCount_,
-                        std::min(UINT(orbitOrder_.size()), UINT(kMaxOrbitIcons))));
+    const int want = int(orbitCount_) * std::max(1, wpm_.settings().orbitRings);
+    return std::max(0, std::min(want, std::min(int(orbitOrder_.size()), kMaxOrbitIcons)));
 }
 
 void Application::LaunchRingSlot(int slot) {
@@ -996,6 +1050,45 @@ void Application::AdvanceOrbit(ULONGLONG nowMs) {
     if (orbitPhase_ > 6.28318530718f) orbitPhase_ = std::fmod(orbitPhase_, 6.28318530718f);
 }
 
+namespace {
+// Where one slot of the ring sits, relative to the centre, in that ring's own radii.
+// `angle` is the absolute position around the figure (the ring's phase included, so the whole figure
+// turns together); `frac` is which icon this is along the path, 0 at the first and 1 just before the
+// loop closes, and it is what the funnel measures its height with - an icon keeps its layer as the
+// figure turns, rather than the funnel unwinding.
+//
+// `depth` is how far below the centre the icon sits as a fraction of the whole vertical extent, which
+// is what the size ramp and the back-of-ring fade read. On the ellipse - where `stack` is 0 - it is
+// sin(angle), the number the ring has been measured with since it was made, so the other two shapes
+// cannot move it.
+struct ShapePos { float ox = 0.f, oy = 0.f, depth = 0.f; };
+
+ShapePos ShapePoint(int shape, float angle, float frac, float rx, float ry, float stack) {
+    float r = 1.f, lift = 0.f;
+    if (shape == kOrbitFunnel) {
+        // A filter: wide at the top, narrowing to the neck at the bottom, each icon on its own
+        // perspective ellipse at its own height.
+        r = 1.f + (kFunnelNeck - 1.f) * frac;
+        lift = stack * (2.f * frac - 1.f);
+    } else if (shape == kOrbitStar) {
+        // Ten vertices 36 degrees apart, alternating outer and inner: the five-pointed star. 0.382 is
+        // 1/phi^2, the inner radius of the regular pentagram, so the arms are the straight edges of
+        // the figure rather than the rounded lobes a cosine modulation would give.
+        float u = angle / kTau;
+        u -= std::floor(u);
+        const float t = u * 10.f;
+        const int i = int(t);
+        const float f = t - float(i);
+        const float r0 = (i % 2 == 0) ? 1.f : 0.382f;
+        const float r1 = (i % 2 == 0) ? 0.382f : 1.f;
+        r = r0 + (r1 - r0) * f;
+    }
+    const float se = std::sin(angle);
+    const float oy = lift + ry * r * se;
+    return { rx * r * std::cos(angle), oy, oy / (ry + stack) };
+}
+}  // namespace
+
 void Application::DrawSlot(Slot& s, double nowSeconds) {
     std::string err;
     if (!s.window.EnsureSize(dev_.dev.Get(), dev_.comp.Get(), err)) {
@@ -1074,12 +1167,26 @@ void Application::DrawSlot(Slot& s, double nowSeconds) {
         f.orbitRows = float(icons_.rows());
         f.orbitFadeBack = 0.25f;
         f.orbitHover = float(clickable ? orbitHover_ : -1);
+        const int shape = wpm_.settings().orbitShape;
+        const bool funnel = shape == kOrbitFunnel;
         std::vector<IconHitRect> rects;
+        const int perRing = std::max(1, int(orbitCount_));
+        const float turns = funnel ? kFunnelTurns : 1.f;
         for (int k = 0; k < n; ++k) {
-            const float a = orbitPhase_ + float(k) / float(n) * 6.28318530718f;
-            const float se = std::sin(a), co = std::cos(a);
-            const float depth = se;                        // > 0 in front of the centre, < 0 behind
-            const float px = sh.cx + sh.rx * co, py = sh.cy + sh.ry * se;
+            // Which ring this slot is on and which place along it. The rings fill from the inside out,
+            // so the last one is the short one when the selection does not divide evenly.
+            const int g = k / perRing;
+            const int inRing = std::min(perRing, n - g * perRing);
+            const int j = k - g * perRing;
+            const float step = kTau / float(inRing);
+            // Turned by half a step of its own ring: two rings whose icons line up angle for angle
+            // read as the spokes of one wheel, and the point of a second ring is to be seen as one.
+            const float a = orbitPhase_ + float(j) * step * turns + float(g) * step * 0.5f;
+            const float rs = 1.f + float(g) * kOrbitRingStep;
+            const float rxr = sh.rx * rs, ryr = sh.ry * rs, rstack = sh.stack * rs;
+            const ShapePos p = ShapePoint(shape, a, float(j) / float(inRing), rxr, ryr, rstack);
+            const float px = sh.cx + p.ox, py = sh.cy + p.oy;
+            const float depth = p.depth;                  // > 0 in front of the centre, < 0 behind
             // Nothing is culled: every slot is drawn, the back ones faded to a ghost by the shader, and
             // every drawn slot gets a click rectangle.
             // The artwork inside an atlas cell stops short of the cell edge (ShellIcons::kCellPad), so
@@ -1309,15 +1416,24 @@ void Application::UpdateSnapshot() {
     r.set("orbit_ready", Json::Of(renderer_.orbitReady()));
     r.set("orbit_clickable", Json::Of(iconHit_.active()));
     r.set("orbit_period_s", Json::Of(int(orbitPeriodS_)));
-    r.set("orbit_count", Json::Of(int(orbitCount_)));
+    // Per ring and in total, because they are different numbers as soon as there is more than one
+    // ring: `orbit_per_ring` is what the slider holds, `orbit_shown` is how many the desktop actually
+    // filled after the selection and the constant buffer's 64 rows had their say.
+    r.set("orbit_per_ring", Json::Of(int(orbitCount_)));
+    r.set("orbit_shown", Json::Of(OrbitSlotsShown()));
+    r.set("orbit_rings", Json::Of(wpm_.settings().orbitRings));
+    r.set("orbit_shape", Json::Of(std::string(OrbitShapeName(wpm_.settings().orbitShape))));
     r.set("orbit_slots", Json::Of(int(icons_.countFound())));
     // Percentages of the reference layout, so the settings window can put the number it shows back
     // onto a slider instead of guessing at a default.
     r.set("orbit_scale", Json::Of(wpm_.settings().orbitScalePct));
     r.set("orbit_icon_scale", Json::Of(wpm_.settings().orbitIconPct));
     // What the picker needs. `orbit_pickable` is the honest ceiling for 环上数量 once a subset
-    // exists - it is the size of the selection, not of the desktop. `orbit_icons` is the desktop's own
-    // list with each name marked picked or not, in the order the ring would walk it.
+    // exists - it is the size of the selection, not of the desktop. `orbit_icon_list` is the desktop's
+    // own list with each name marked picked or not, in the order the ring would walk it, under its own
+    // key: it is an array and `orbit_icons` above is the bool "the atlas was built", and the two
+    // cannot share a name because the object keeps one value per key - sharing one silently deleted
+    // the bool, and the settings window then read "the icons are not there" on a working ring (2026-10-11).
     r.set("orbit_pickable", Json::Of(int(orbitOrder_.size())));
     // False means "nobody picked": the ring is showing the whole desktop and the picker's title says
     // so, which is a different sentence from "you picked all 43 of them" even though the ring looks
@@ -1337,7 +1453,7 @@ void Application::UpdateSnapshot() {
                                      s.orbitPicks.end()));
             list.push(std::move(e));
         }
-        r.set("orbit_icons", std::move(list));
+        r.set("orbit_icon_list", std::move(list));
     }
     r.set("orbit_drag", Json::Of(orbitDrag_.monitor >= 0));
     if (wpm_.settings().orbitX >= 0.f && wpm_.settings().orbitY >= 0.f) {
@@ -2463,10 +2579,33 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
     } else if (action == "orbitcount") {
         // Clamped rather than refused: the ring's cost is the per-pixel loop over this many icons, so
         // the ceiling is a performance decision and belongs here, not with the caller. It is also
-        // kMaxOrbitIcons, because that is how many rows the constant buffer and the shader's loop have.
+        // kMaxOrbitIcons divided by the rings, because that many per ring is all the constant buffer
+        // and the shader's loop have rows for - and because a per-ring count the drawn total cannot
+        // reach would leave the slider able to ask for something the ring never shows.
         const int n = std::atoi(arg.c_str());
-        orbitCount_ = (UINT)std::max(1, std::min(kMaxOrbitIcons, n));
-        result = std::format(R"({{"ok":true,"orbit_count":{}}})", orbitCount_);
+        const int cap = kMaxOrbitIcons / std::max(1, wpm_.settings().orbitRings);
+        orbitCount_ = (UINT)std::max(1, std::min(cap, n));
+        result = std::format(R"({{"ok":true,"orbit_per_ring":{},"orbit_shown":{}}})",
+                             orbitCount_, OrbitSlotsShown());
+    } else if (action == "orbitrings") {
+        // Saved, unlike the period and the count: how many rings the shortcuts are spread over is how
+        // the user wants the ring to look next time. Taking the rings up also pulls the per-ring count
+        // down when the two together would not fit, so the number the slider shows is the number drawn.
+        wpm_.SetOrbitRings(std::atoi(arg.c_str()));
+        const int cap = kMaxOrbitIcons / wpm_.settings().orbitRings;
+        if (int(orbitCount_) > cap) orbitCount_ = (UINT)cap;
+        std::string e;
+        wpm_.Save(e);
+        result = std::format(R"({{"ok":true,"orbit_rings":{},"orbit_per_ring":{},"orbit_shown":{}}})",
+                             wpm_.settings().orbitRings, orbitCount_, OrbitSlotsShown());
+    } else if (action == "orbitshape") {
+        // By name: `star`, `funnel`, `ellipse`. Saved with the rings for the same reason, and the
+        // reply carries the name now in force so a misspelling echoes what is on the screen.
+        const int idx = wpm_.SetOrbitShape(arg);
+        std::string e;
+        wpm_.Save(e);
+        result = std::format(R"({{"ok":true,"orbit_shape":"{}","orbit_shown":{}}})",
+                             OrbitShapeName(idx), OrbitSlotsShown());
     } else if (action == "orbitscale" || action == "orbiticonscale") {
         // Saved, unlike the period and the count: these two are how the user wants the ring to look
         // next time, not a knob to try out.

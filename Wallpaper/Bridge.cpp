@@ -106,6 +106,7 @@ const Entry kStrings[] = {
     {"tab_general", "通用", "General"},
     {"tab_power", "省电", "Power saving"},
     {"tab_tools", "工具", "Tools"},
+    {"tab_shortcuts", "快捷键", "Shortcuts"},
     {"current", "正在显示", "showing"},
     {"resolution", "分辨率", "Resolution"},
     {"refresh", "刷新率", "Refresh"},
@@ -176,7 +177,19 @@ const Entry kStrings[] = {
      "Puts the desktop's shortcuts in a ring on the wallpaper. One click starts one."},
     {"orbit_period", "转一圈", "Revolution"},
     {"orbit_stopped", "停住", "Stopped"},
-    {"orbit_count", "环上数量", "Icons on the ring"},
+    {"orbit_count", "每环数量", "Icons per ring"},
+    {"orbit_rings", "环数", "Rings"},
+    // The two knobs together decide what is on the desktop, so the number drawn is stated rather than
+    // left to arithmetic: with 43 shortcuts and 17 per ring it is not 17 times anything.
+    {"orbit_shown", "环上共", "On the rings"},
+    {"orbit_shown_unit", "个", "icons"},
+    {"orbit_shape", "形状", "Shape"},
+    {"orbit_shape_ellipse", "椭圆", "Ellipse"},
+    {"orbit_shape_funnel", "漏斗", "Funnel"},
+    {"orbit_shape_star", "五角星", "Star"},
+    {"orbit_shape_desc", "椭圆和五角星绕同一个环心；漏斗一层层往下收，口大颈小。",
+     "The ellipse and the star share one centre; the funnel steps downward, wide at the mouth and "
+     "narrow at the neck."},
     {"orbit_size", "圆环大小", "Ring size"},
     {"orbit_icon_size", "图标大小", "Icon size"},
     {"orbit_pick", "选择图标", "Icons on the ring"},
@@ -383,6 +396,10 @@ QStringList Bridge::hudCornerLevels() const { return {"top-right", "top-left", "
 // indexed - a picker showing "3" tells nobody what it draws.
 QStringList Bridge::chartTypeLevels() const { return {"bar", "donut", "line"}; }
 
+// The three trajectories, by the names the renderer stores and answers with, so the label the row
+// shows is looked up from the value that is actually in force rather than from the row's position.
+QStringList Bridge::orbitShapeLevels() const { return {"ellipse", "funnel", "star"}; }
+
 QStringList Bridge::chartCornerLevels() const {
     return {"top-right", "top-left", "bottom-right", "bottom-left"};
 }
@@ -530,14 +547,17 @@ void Bridge::ingest(const Json& status, const Json& list) {
     orbitReady_ = status.boolOr("orbit_ready");
     orbitClickable_ = status.boolOr("orbit_clickable");
     orbitPeriod_ = status.intOr("orbit_period_s", 45);
-    orbitCount_ = status.intOr("orbit_count", 12);
+    orbitPerRing_ = status.intOr("orbit_per_ring", 12);
+    orbitRings_ = status.intOr("orbit_rings", 1);
+    orbitShown_ = status.intOr("orbit_shown", 0);
+    orbitShape_ = QString::fromStdString(status.strOr("orbit_shape", "ellipse"));
     orbitSlots_ = status.intOr("orbit_slots", 0);
     orbitScale_ = status.intOr("orbit_scale", 100);
     orbitIconScale_ = status.intOr("orbit_icon_scale", 100);
     orbitPickable_ = status.intOr("orbit_pickable", 0);
     orbitPicked_ = status.boolOr("orbit_picked");
     orbitIconList_.clear();
-    if (const Json* p = status.find("orbit_icons"); p && p->isArray())
+    if (const Json* p = status.find("orbit_icon_list"); p && p->isArray())
         for (auto& e : p->items()) {
             QVariantMap row;
             row.insert("index", e.intOr("i"));
@@ -871,6 +891,25 @@ void Bridge::setOrbitPeriod(int seconds) {
 void Bridge::setOrbitCount(int n) {
     Json out;
     std::string body = std::format(R"({{"cmd":"orbitcount","arg":"{}"}})", n);
+    request(body.c_str(), 1500, &out);
+    emit stateChanged();
+    refresh();
+}
+
+// Both saved on the renderer's side, and neither echoed locally: the ring clamps the per-ring count
+// when the ring count makes the two together exceed what it has rows for, so the number that comes
+// back is the one that is drawn and the slider has to read it rather than keep its own guess.
+void Bridge::setOrbitRings(int n) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"orbitrings","arg":"{}"}})", n);
+    request(body.c_str(), 1500, &out);
+    emit stateChanged();
+    refresh();
+}
+
+void Bridge::setOrbitShape(const QString& name) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"orbitshape","arg":"{}"}})", name.toStdString());
     request(body.c_str(), 1500, &out);
     emit stateChanged();
     refresh();

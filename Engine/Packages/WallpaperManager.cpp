@@ -94,6 +94,8 @@ bool WallpaperManager::Load(const std::wstring& exeDir, std::string& error) {
     // the config on disk and the number on screen cannot disagree about what the ring is doing.
     SetOrbitScale(r.find("orbit_scale") ? r.find("orbit_scale")->asInt(100) : 100);
     SetOrbitIconScale(r.find("orbit_icon_scale") ? r.find("orbit_icon_scale")->asInt(100) : 100);
+    SetOrbitRings(r.find("orbit_rings") ? r.find("orbit_rings")->asInt(1) : 1);
+    s_.orbitShape = r.find("orbit_shape") ? ParseOrbitShape(r.find("orbit_shape")->asString(), 0) : 0;
     if (const Json* p = r.find("orbit_picks"); p && p->isArray()) {
         s_.orbitPicked = true;
         s_.orbitPicks.clear();
@@ -160,6 +162,8 @@ std::string WallpaperManager::ConfigText() const {
     }
     r.set("orbit_scale", Json::Of(s_.orbitScalePct));
     r.set("orbit_icon_scale", Json::Of(s_.orbitIconPct));
+    r.set("orbit_rings", Json::Of(s_.orbitRings));
+    r.set("orbit_shape", Json::Of(std::string(OrbitShapeName(s_.orbitShape))));
     if (s_.orbitPicked) {
         Json picks = Json::Array();
         for (const auto& n : s_.orbitPicks) picks.push(Json::Of(n));
@@ -324,6 +328,16 @@ void WallpaperManager::SetOrbitPicks(std::vector<std::string> names) {
 
 void WallpaperManager::ClearOrbitPicks() { s_.orbitPicked = false; s_.orbitPicks.clear(); }
 
+// 1..4, clamped for the same reason the sizes are: the slider's ends are a UI fact. Four is the
+// ceiling because at five the outermost ring's own radius reaches past this 4K work area's half
+// height, and a ring the user cannot see all of is not a layout choice.
+void WallpaperManager::SetOrbitRings(int n) { s_.orbitRings = n < 1 ? 1 : (n > 4 ? 4 : n); }
+
+int WallpaperManager::SetOrbitShape(const std::string& name) {
+    s_.orbitShape = ParseOrbitShape(name, s_.orbitShape);
+    return s_.orbitShape;
+}
+
 void WallpaperManager::ClearOrbitPos() { s_.orbitX = s_.orbitY = -1.f; }
 
 void WallpaperManager::SetHudPos(float x, float y) { s_.hudX = x, s_.hudY = y; }
@@ -416,6 +430,24 @@ int ChartTypeCount() { return 3; }
 int ParseChartType(std::string_view s, int def) {
     for (int i = 0; i < ChartTypeCount(); ++i)
         if (s == ChartTypeName(i)) return i;
+    return def;
+}
+
+const char* OrbitShapeName(int index) {
+    // "ellipse" is the perspective circle the ring has drawn since it existed, and the one the depth
+    // fade was measured against: the further half of it is smaller and fainter. "funnel" is a stack of
+    // those circles, wide at the mouth and narrowing to the neck, each one at its own height. "star"
+    // is the ten-vertex five-pointed figure. An unrecognised stored name falls back to the ellipse
+    // rather than to whatever index it happens to land on.
+    static const char* const kNames[] = { "ellipse", "funnel", "star" };
+    return kNames[index >= 0 && index < OrbitShapeCount() ? index : 0];
+}
+
+int OrbitShapeCount() { return 3; }
+
+int ParseOrbitShape(std::string_view s, int def) {
+    for (int i = 0; i < OrbitShapeCount(); ++i)
+        if (s == OrbitShapeName(i)) return i;
     return def;
 }
 
