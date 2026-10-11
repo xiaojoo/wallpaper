@@ -7,6 +7,7 @@
 #include <commctrl.h>   // the full IImageList definition; shobjidl.h only forward-declares it
 
 #include <algorithm>
+#include <cmath>
 
 namespace sw {
 static constexpr const char* MOD = "icons";
@@ -170,9 +171,34 @@ bool ShellIcons::Blit(HICON icon, UINT cell, UINT cols, std::vector<BYTE>& atlas
     const UINT atlasStride = cols * C * 4;
     const UINT col = cell % cols, row = cell / cols;
     if (atlas.size() < (size_t)atlasStride * C * (row + 1)) return false;
+    // Copy the finished cell with a transparent gutter, by sampling rather than by drawing smaller:
+    // the alpha decision above (real alpha vs a colour+mask icon) is made against this buffer's full
+    // extent, and insetting here is the one place that cannot disagree with it.
+    const UINT inner = C - 2 * kCellPad;
     for (UINT y = 0; y < C; ++y)
-        memcpy(atlas.data() + (size_t)(row * C + y) * atlasStride + (size_t)col * C * 4,
-               px.data() + (size_t)y * stride, (size_t)stride);
+        for (UINT x = 0; x < C; ++x) {
+            BYTE* d = atlas.data() + (size_t)(row * C + y) * atlasStride + (size_t)(col * C + x) * 4;
+            const int sx = (int)x - (int)kCellPad, sy = (int)y - (int)kCellPad;
+            if (sx < 0 || sy < 0 || sx >= (int)inner || sy >= (int)inner) {
+                d[0] = d[1] = d[2] = d[3] = 0;
+                continue;
+            }
+            // Bilinear, on the premultiplied buffer - which is the only space where interpolating the
+            // colour channels is legal.
+            const float fx = (sx + 0.5f) * C / (float)inner - 0.5f;
+            const float fy = (sy + 0.5f) * C / (float)inner - 0.5f;
+            const int x0 = (int)std::clamp(std::floor(fx), 0.f, (float)(C - 1));
+            const int y0 = (int)std::clamp(std::floor(fy), 0.f, (float)(C - 1));
+            const int x1 = std::min(x0 + 1, (int)C - 1), y1 = std::min(y0 + 1, (int)C - 1);
+            const float ax = fx - x0, ay = fy - y0;
+            for (int c = 0; c < 4; ++c) {
+                const float v0 = px[(size_t)y0 * stride + (size_t)x0 * 4 + c] * (1 - ax) +
+                                 px[(size_t)y0 * stride + (size_t)x1 * 4 + c] * ax;
+                const float v1 = px[(size_t)y1 * stride + (size_t)x0 * 4 + c] * (1 - ax) +
+                                 px[(size_t)y1 * stride + (size_t)x1 * 4 + c] * ax;
+                d[c] = (BYTE)std::min<float>(255.f, v0 * (1 - ay) + v1 * ay + 0.5f);
+            }
+        }
     return true;
 }
 

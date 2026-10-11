@@ -25,11 +25,12 @@ cbuffer Frame : register(b0) {
     // uOrbit.x - the ring draws 12 of the 43 icons the grid holds, and deriving rows from that read
     // every cell three rows too far down, which came out as multicoloured horizontal stripes.
     float4 uOrbit2;
-    // z: how far a back icon dims. w: which slot the pointer is over, -1 for none.
+    // z: the opacity of the icon at the very back of the ring (1.0 means no fade). w: which slot the
+    // pointer is over, -1 for none.
     float4 uOrbit3;
     float4 uOrbit4;
-    // The icon boxes, in this surface's device pixels: xy = centre, z = half width (a hidden slot
-    // carries 0 and draws nothing), w = depth, +1 at the front of the ring and -1 at the back.
+    // The icon boxes, in this surface's device pixels: xy = centre, z = half width, w = depth, +1 at
+    // the front of the ring and -1 at the back.
     //
     // Placed by Application.cpp rather than from an angle here, because making the ring clickable put
     // a second reader on the same geometry - the invisible window that turns a pixel into a program -

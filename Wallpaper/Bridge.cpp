@@ -177,6 +177,8 @@ const Entry kStrings[] = {
     {"orbit_period", "转一圈", "Revolution"},
     {"orbit_stopped", "停住", "Stopped"},
     {"orbit_count", "环上数量", "Icons on the ring"},
+    {"orbit_size", "圆环大小", "Ring size"},
+    {"orbit_icon_size", "图标大小", "Icon size"},
     {"orbit_unavailable", "快捷键环不可用", "Shortcut ring unavailable"},
     {"orbit_pos", "环心位置", "Ring centre"},
     {"orbit_pos_desc", "按住出现的虚线框拖到想要的位置，松手即生效。",
@@ -521,6 +523,8 @@ void Bridge::ingest(const Json& status, const Json& list) {
     orbitPeriod_ = status.intOr("orbit_period_s", 45);
     orbitCount_ = status.intOr("orbit_count", 12);
     orbitSlots_ = status.intOr("orbit_slots", 0);
+    orbitScale_ = status.intOr("orbit_scale", 100);
+    orbitIconScale_ = status.intOr("orbit_icon_scale", 100);
     orbitError_ = QString::fromStdString(status.strOr("orbit_error", ""));
     iconsHidden_ = status.boolOr("icons_hidden");
     orbitDrag_ = status.boolOr("orbit_drag");
@@ -847,6 +851,24 @@ void Bridge::setOrbitPeriod(int seconds) {
 void Bridge::setOrbitCount(int n) {
     Json out;
     std::string body = std::format(R"({{"cmd":"orbitcount","arg":"{}"}})", n);
+    request(body.c_str(), 1500, &out);
+    emit stateChanged();
+    refresh();
+}
+
+// No local echo, unlike the switches: these two are read back from the renderer, which is the side
+// that clamps, so the slider shows the size the desktop actually got rather than the number typed in.
+void Bridge::setOrbitScale(int pct) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"orbitscale","arg":"{}"}})", pct);
+    request(body.c_str(), 1500, &out);
+    emit stateChanged();
+    refresh();
+}
+
+void Bridge::setOrbitIconScale(int pct) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"orbiticonscale","arg":"{}"}})", pct);
     request(body.c_str(), 1500, &out);
     emit stateChanged();
     refresh();

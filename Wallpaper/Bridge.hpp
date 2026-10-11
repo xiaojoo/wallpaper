@@ -54,6 +54,10 @@ class Bridge final : public QObject {
     Q_PROPERTY(int orbitPeriod READ orbitPeriod NOTIFY stateChanged)
     Q_PROPERTY(int orbitCount READ orbitCount NOTIFY stateChanged)
     Q_PROPERTY(int orbitSlots READ orbitSlots NOTIFY stateChanged)
+    // The ring's two sizes, as percentages of the layout it was measured at - the same convention the
+    // card's and chart's scale properties are on, so a slider can show them without a conversion.
+    Q_PROPERTY(int orbitScale READ orbitScale NOTIFY stateChanged)
+    Q_PROPERTY(int orbitIconScale READ orbitIconScale NOTIFY stateChanged)
     Q_PROPERTY(QString orbitError READ orbitError NOTIFY stateChanged)
     Q_PROPERTY(bool iconsHidden READ iconsHidden NOTIFY stateChanged)
     Q_PROPERTY(bool orbitDrag READ orbitDrag NOTIFY stateChanged)
@@ -146,6 +150,8 @@ public:
     int orbitPeriod() const { return orbitPeriod_; }
     int orbitCount() const { return orbitCount_; }
     int orbitSlots() const { return orbitSlots_; }
+    int orbitScale() const { return orbitScale_; }
+    int orbitIconScale() const { return orbitIconScale_; }
     QString orbitError() const { return orbitError_; }
     bool iconsHidden() const { return iconsHidden_; }
     bool orbitDrag() const { return orbitDrag_; }
@@ -219,6 +225,8 @@ public:
     Q_INVOKABLE void setOrbit(bool on);
     Q_INVOKABLE void setOrbitPeriod(int seconds);
     Q_INVOKABLE void setOrbitCount(int n);
+    Q_INVOKABLE void setOrbitScale(int pct);
+    Q_INVOKABLE void setOrbitIconScale(int pct);
     Q_INVOKABLE void setIconsHidden(bool hide);
     Q_INVOKABLE void setOrbitDrag(bool on);
     Q_INVOKABLE void resetOrbitPos();
@@ -320,6 +328,8 @@ private:
     int orbitPeriod_ = 45;
     int orbitCount_ = 12;
     int orbitSlots_ = 0;
+    int orbitScale_ = 100;
+    int orbitIconScale_ = 100;
     QString orbitError_;
     bool iconsHidden_ = false;
     bool orbitDrag_ = false;
