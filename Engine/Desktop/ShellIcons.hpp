@@ -33,6 +33,13 @@ public:
     //
     // 8 columns x 6 rows of 256 = 2048x1536 BGRA = 12.6 MB, ~16.7 MB with the mip chain.
     static constexpr UINT kCell = 256;
+    // Transparent border left inside every cell, so the artwork never touches the cell edge. The ring
+    // draws a square box per icon and antialiases its outermost pixel; with the artwork reaching the
+    // cell edge that one pixel is composited against the wallpaper rather than against the icon
+    // behind, and what the user sees is a dark outline wherever two icons overlap.
+    static constexpr UINT kCellPad = 8;
+    // The fraction of the cell the artwork actually covers, in the same units the shader maps with.
+    static constexpr float kCellArt = 1.f - 2.f * kCellPad / (float)kCell;
 
     // Enumerate both Desktop folders and pull each shortcut's icon and target. Returns false only if
     // nothing at all could be read; individual failures are counted and reported.

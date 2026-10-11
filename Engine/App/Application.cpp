@@ -753,13 +753,14 @@ Application::RingShape Application::RingFor(const MonitorInfo& m) const {
     RingShape s;
     // Radii and sizes are fractions of the work-area height, which is the unit the ring was laid out
     // in from the start: it keeps the ellipse the same shape on a 1080p laptop and on this 4K panel.
-    s.rx = 0.30f * wh;
-    s.ry = 0.16f * wh;      // flat, but not flatter: at 0.11 the icons at each extreme merged into one blob
-    s.iconPx = 0.085f * wh;
-    // The middle object's half-height has to clear ry or nothing is ever hidden behind it - the bug
-    // stage 1 measured (a 184 px disc against a 238 px ring gave the back icon back fully intact).
-    s.occX = 0.10f * wh;
-    s.occY = 0.26f * wh;
+    // The two settings ride on top of those fractions as percentages of this same reference layout
+    // (100 = what is written here), the way the status card's own scale does.
+    const float ring = wpm_.settings().orbitScalePct / 100.f;
+    const float icon = wpm_.settings().orbitIconPct / 100.f;
+    s.rx = 0.30f * wh * ring;
+    s.ry = 0.16f * wh * ring;    // flat, but not flatter: at 0.11 the icons at each extreme merged into
+                                 // one blob. Scaled with rx so a bigger ring is the same view, further.
+    s.iconPx = 0.085f * wh * icon;
     // Unset means the middle of the work area, which is where the reference's figure stands. Set means
     // wherever the user dragged it, in monitor heights from this monitor's top-left - the same units
     // and the same "negative means nobody said" convention as the two panels.
@@ -1028,7 +1029,7 @@ void Application::DrawSlot(Slot& s, double nowSeconds) {
         f.orbitCount = float(n);
         f.orbitCols = float(icons_.cols());
         f.orbitRows = float(icons_.rows());
-        f.orbitDimBack = 0.45f;
+        f.orbitFadeBack = 0.25f;
         f.orbitHover = float(clickable ? orbitHover_ : -1);
         std::vector<IconHitRect> rects;
         for (int k = 0; k < n; ++k) {
@@ -1036,18 +1037,18 @@ void Application::DrawSlot(Slot& s, double nowSeconds) {
             const float se = std::sin(a), co = std::cos(a);
             const float depth = se;                        // > 0 in front of the centre, < 0 behind
             const float px = sh.cx + sh.rx * co, py = sh.cy + sh.ry * se;
-            float half = sh.iconPx * 0.5f * (0.55f + 0.45f * (depth + 1.f) * 0.5f);
-            // Behind, and inside the middle object: hidden. Written as size 0 rather than dropped,
-            // because the atlas cell is the slot number - packing the array would slide every remaining
-            // icon onto somebody else's picture. A hidden slot draws nothing and is not clickable, so
-            // nothing that is on screen can fail to be.
-            const float ex = (px - sh.cx) / sh.occX, ey = (py - sh.cy) / sh.occY;
-            if (depth < 0.f && ex * ex + ey * ey < 1.f) half = 0.f;
+            // Nothing is culled: every slot is drawn, the back ones faded to a ghost by the shader, and
+            // every drawn slot gets a click rectangle.
+            // The artwork inside an atlas cell stops short of the cell edge (ShellIcons::kCellPad), so
+            // the square the shader cuts on is that fraction larger than the icon the user sees. `half`
+            // stays the visible size: it is what the click rectangle is made of, and a hit target that
+            // reaches past the picture is the same dead-control bug pointing the other way.
+            const float half = sh.iconPx * 0.5f * (0.55f + 0.45f * (depth + 1.f) * 0.5f);
             f.orbitIcon[k][0] = px * scale;
             f.orbitIcon[k][1] = py * scale;
-            f.orbitIcon[k][2] = half * scale;
+            f.orbitIcon[k][2] = half / ShellIcons::kCellArt * scale;
             f.orbitIcon[k][3] = depth;
-            if (half > 0.f && clickable)
+            if (clickable)
                 rects.push_back({ { m.px.x + int(px - half), m.px.y + int(py - half),
                                     m.px.x + int(px + half), m.px.y + int(py + half) }, k });
         }
@@ -1263,6 +1264,10 @@ void Application::UpdateSnapshot() {
     r.set("orbit_period_s", Json::Of(int(orbitPeriodS_)));
     r.set("orbit_count", Json::Of(int(orbitCount_)));
     r.set("orbit_slots", Json::Of(int(icons_.countFound())));
+    // Percentages of the reference layout, so the settings window can put the number it shows back
+    // onto a slider instead of guessing at a default.
+    r.set("orbit_scale", Json::Of(wpm_.settings().orbitScalePct));
+    r.set("orbit_icon_scale", Json::Of(wpm_.settings().orbitIconPct));
     r.set("orbit_drag", Json::Of(orbitDrag_.monitor >= 0));
     if (wpm_.settings().orbitX >= 0.f && wpm_.settings().orbitY >= 0.f) {
         Json pos = Json::Array();
@@ -2329,6 +2334,24 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
             Warn(MOD, "orbit asked for but no icon atlas: {}", orbitError_);
         if (orbitOn_ && !iconHit_.active())
             Warn(MOD, "orbit drawn but not clickable: {}", herr);
+    } else if (action == "orbitdump") {
+        // The atlas as the GPU actually holds it. Every icon-atlas bug so far - the rainbow stripes
+        // from a flat copy into a 2D image, the 32 px ceiling, the ghost outlines that bleed in from
+        // the neighbouring cell - was guessable from a screenshot and obvious from this file, and
+        // reading it back costs one build rather than one build per hypothesis.
+        std::string derr;
+        if (!iconsBuilt_) {
+            derr = orbitError_.empty() ? "no atlas built" : orbitError_;
+        } else {
+            std::vector<BYTE> px = icons_.pixels();
+            const std::wstring out = wpm_.settings().root + L"\\cache\\orbit-atlas.png";
+            if (!WriteImage(dev_.wic.Get(), out, icons_.atlasWidth(), icons_.atlasHeight(), px, derr))
+                Warn(MOD, "atlas dump failed: {}", derr);
+            else
+                Info(MOD, "atlas dumped: {} ({}x{}, {} icons, {} px cells)", ToUtf8(out),
+                     icons_.atlasWidth(), icons_.atlasHeight(), icons_.countFound(), ShellIcons::kCell);
+        }
+        result = std::format(R"({{"ok":{},"error":"{}"}})", derr.empty() ? "true" : "false", derr);
     } else if (action == "orbitlayer") {
         // The click layer on its own, for the case where it was refused at switch-on (the desktop host
         // is found a few seconds after startup, and arming is otherwise only reachable from `orbit`).
@@ -2351,6 +2374,16 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         const int n = std::atoi(arg.c_str());
         orbitCount_ = (UINT)std::max(1, std::min(kMaxOrbitIcons, n));
         result = std::format(R"({{"ok":true,"orbit_count":{}}})", orbitCount_);
+    } else if (action == "orbitscale" || action == "orbiticonscale") {
+        // Saved, unlike the period and the count: these two are how the user wants the ring to look
+        // next time, not a knob to try out.
+        const bool ring = action == "orbitscale";
+        if (ring) wpm_.SetOrbitScale(std::atoi(arg.c_str()));
+        else wpm_.SetOrbitIconScale(std::atoi(arg.c_str()));
+        std::string e;
+        wpm_.Save(e);
+        result = std::format(R"({{"ok":true,"{}":{}}})", ring ? "orbit_scale" : "orbit_icon_scale",
+                             ring ? wpm_.settings().orbitScalePct : wpm_.settings().orbitIconPct);
     } else if (action == "powercap") {
         const int value = std::atoi(arg2.c_str());
         if (!power_.SetCap(arg, value)) {

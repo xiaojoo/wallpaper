@@ -65,6 +65,12 @@ struct Settings {
     // gets - it is "nobody has said where", which is the difference that lets a wallpaper change
     // re-centre the ring instead of leaving it where it happened to land.
     float orbitX = -1.f, orbitY = -1.f;
+    // The ring's two sizes, on the same terms as `hudScalePct`: a percentage of the layout the ring
+    // was measured at, so 100 is what the reference gives and the number the slider shows.
+    // `orbitScalePct` moves both ellipse radii together - a ring that only got wider would stop being
+    // the same perspective view - and `orbitIconPct` sizes one icon at the front of the ring.
+    int orbitScalePct = 100;
+    int orbitIconPct = 100;
     std::vector<Assignment> assignments;
     Json power = Json::Object();
 };
@@ -125,6 +131,9 @@ public:
     void SetHudScale(int pct);
     // Returns the style now in force, so an unrecognised name echoes what is on the screen.
     int SetHudFrame(const std::string& name);
+    // The shortcut ring's two sizes, in the same percentage-of-reference units as the card's scale.
+    void SetOrbitScale(int pct);
+    void SetOrbitIconScale(int pct);
     // The chart panel's six, mirroring the card's: the same corner/dragged-position rule, the same
     // "echo what is on the screen" contract on the name-taking ones.
     void SetChart(bool on);

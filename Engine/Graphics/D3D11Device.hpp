@@ -79,10 +79,11 @@ struct FrameCB {
     // on exactly the pixels the shader paints; what is left here is the count and two atlas numbers.
     float orbitCount = 0.f, orbitPad0 = 0.f, orbitPad1 = 0.f, orbitPad2 = 0.f;
     float orbitPad3 = 0.f, orbitPad4 = 0.f, orbitCols = 8.f, orbitRows = 1.f;
-    float orbitPad5 = 0.f, orbitPad6 = 0.f, orbitDimBack = 0.45f, orbitHover = -1.f;
+    float orbitPad5 = 0.f, orbitPad6 = 0.f, orbitFadeBack = 0.25f, orbitHover = -1.f;
     float orbitPad7 = 0.f, orbitPad8 = 0.f, orbitPad9 = 0.f, orbitPad10 = 0.f;
     // uOrbitIcon: one row per ring slot, xy the centre in this surface's device pixels, z the half
-    // size (0 for a slot the centre object hides), w the depth. `kMaxOrbitIcons` is the same number
+    // size, w the depth. `orbitFadeBack` is the opacity an icon has at the very back of the ring; it
+    // rises to 1 at the front. `kMaxOrbitIcons` is the same number
     // as `kMaxIcons` in Shaders/IconOrbit.hlsl and the `16` in the contract's array declaration; the
     // static_assert below catches the two drifting apart on this side.
     float orbitIcon[kMaxOrbitIcons][4];

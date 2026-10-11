@@ -1973,6 +1973,46 @@ ApplicationWindow {
                                     onCommitted: function (v) { Bridge.setOrbitCount(v) }
                                 }
                             }
+                            // The two sizes, on the same percentage-of-reference terms as the status
+                            // card's own 大小 slider: 100% is the layout the ring was measured at.
+                            // Separate knobs because a wide ring with small icons and a tight ring with
+                            // big icons are two different requests.
+                            RowLayout {
+                                visible: Bridge.orbit
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("orbit_size")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Range {
+                                    label: trs("orbit_size")
+                                    from: 20
+                                    to: 200
+                                    value: Bridge.orbitScale
+                                    enabled: Bridge.connected
+                                    onCommitted: function (v) { Bridge.setOrbitScale(v) }
+                                }
+                            }
+                            RowLayout {
+                                visible: Bridge.orbit
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("orbit_icon_size")
+                                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Range {
+                                    label: trs("orbit_icon_size")
+                                    from: 20
+                                    to: 200
+                                    value: Bridge.orbitIconScale
+                                    enabled: Bridge.connected
+                                    onCommitted: function (v) { Bridge.setOrbitIconScale(v) }
+                                }
+                            }
                             // The ring's centre, on the same terms the status card's position is on:
                             // a switch that puts a grab layer on the desktop only while it is held,
                             // and once it has been dragged the row stops offering presets it no
