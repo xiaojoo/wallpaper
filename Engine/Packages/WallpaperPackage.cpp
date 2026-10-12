@@ -67,6 +67,7 @@ std::optional<WallpaperPackage> WallpaperPackage::LoadFromDir(const std::wstring
     p.id_ = j.strOr("id", folderName);
     p.name_ = j.strOr("name", p.id_);
     p.category_ = j.strOr("category", "未分类");
+    p.origin_ = j.strOr("origin", "");
     p.srcW_ = j.intOr("width", 0);
     p.srcH_ = j.intOr("height", 0);
     const bool wantsParticles = j.strOr("renderer", "") == "particles";

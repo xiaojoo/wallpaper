@@ -1,0 +1,47 @@
+{
+  "_comment": "One wallpaper site, described as data. name/search are required; everything else has a default. 'search' is the endpoint, 'params' the query string, where {query} is what he typed, {page} the page number and {<option>} the current value of an option below (a param whose expanded value comes out empty is left off the request, so an empty search box sends no q at all). 'list'/'page'/'last_page'/'total' are dotted paths into the reply; 'fields' says which path each column of a card comes from. Facts this file rests on, measured 2026-10-12 from this machine: GET /api/v1/search answers 200 with no key, X-RateLimit-Limit: 45 per minute, and https://wallhaven.cc/robots.txt is 'User-agent: * / Disallow:' with nothing after it. min_interval_ms is the local half of obeying that 45: a page of 24 cards is one request, and only 入库 asks the CDN for anything.",
+  "name": "wallhaven",
+  "label": "wallhaven.cc",
+  "homepage": "https://wallhaven.cc",
+  "user_agent": "Wallpaper/1.0 (desktop wallpaper client, single user)",
+  "min_interval_ms": 2000,
+  "search": "https://wallhaven.cc/api/v1/search",
+  "params": {
+    "q": "{query}",
+    "atleast": "{resolution}",
+    "purity": "{purity}",
+    "categories": "111",
+    "sorting": "{sort}",
+    "page": "{page}"
+  },
+  "options": {
+    "resolution": {
+      "default": "1920x1080",
+      "values": ["1366x768", "1920x1080", "2560x1440", "3840x2160"]
+    },
+    "purity": {
+      "default": "100",
+      "values": ["100", "110", "111"]
+    },
+    "sort": {
+      "default": "relevance",
+      "values": ["relevance", "newest", "top"]
+    }
+  },
+  "list": "data",
+  "page": "meta.current_page",
+  "last_page": "meta.last_page",
+  "total": "meta.total",
+  "fields": {
+    "key": "id",
+    "title": "resolution",
+    "thumb": "thumbs.large",
+    "image": "path",
+    "page": "url",
+    "width": "dimension_x",
+    "height": "dimension_y",
+    "bytes": "file_size",
+    "mime": "file_type"
+  },
+  "ext": "jpg"
+}

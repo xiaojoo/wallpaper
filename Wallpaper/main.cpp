@@ -2,6 +2,7 @@
 // shows and changes goes through the renderer's control pipe.
 #include "Wallpaper/Bridge.hpp"
 #include "Wallpaper/LivePreview.hpp"
+#include "Wallpaper/OnlineSelfTest.hpp"
 #include "Wallpaper/TrayMenu.hpp"
 
 #include <QDir>
@@ -29,6 +30,15 @@ void logMessage(QtMsgType, const QMessageLogContext& ctx, const QString& msg) {
 } // namespace
 
 int main(int argc, char* argv[]) {
+    // A GUI-subsystem exe has no console, so the online self-test writes its report to a file next to
+    // the exe and takes the exit code. Scanned here, before anything is built, so the run opens no
+    // window, no tray icon and no second poller on the pipe while he is using the real one.
+    QString selfTest, selfSource;
+    for (int i = 1; i + 1 < argc; ++i)
+        if (QString::fromLocal8Bit(argv[i]) == QLatin1String("--online-selftest")) {
+            selfTest = QString::fromLocal8Bit(argv[i + 1]);
+            if (i + 2 < argc) selfSource = QString::fromLocal8Bit(argv[i + 2]);
+        }
     // QApplication, not QGuiApplication: the import button opens QFileDialog, which is a QWidget, and
     // creating one with only a QGuiApplication kills the process on the click
     // ("QWidget: Cannot create a QWidget without QApplication").
@@ -36,6 +46,16 @@ int main(int argc, char* argv[]) {
     qInstallMessageHandler(logMessage);
     app.setOrganizationName(QStringLiteral("SmartWallpaper"));
     app.setApplicationName(QStringLiteral("SmartWallpaper"));
+    if (!selfTest.isEmpty()) {
+        sw::Bridge probe;
+        const QString out = QDir(QCoreApplication::applicationDirPath())
+                                .absoluteFilePath(QStringLiteral("online-selftest.txt"));
+        const int rc = sw::RunOnlineSelfTest(probe, selfTest, out, selfSource);
+        QFile f(out);
+        if (f.open(QIODevice::Append | QIODevice::Text))
+            QTextStream(&f) << "exit " << rc << '\n';
+        return rc;
+    }
     // The taskbar and alt-tab take this one; Explorer takes the icon embedded in the exe
     // (resources/app.rc). Both come from the same generated Wallpaper.ico.
     app.setWindowIcon(QIcon(QDir(QCoreApplication::applicationDirPath())
@@ -56,6 +76,12 @@ int main(int argc, char* argv[]) {
         else if (a == "--settings") bridge.setSettingsAtStart(true);
         else if (a == "--settings-tab" && i + 1 < argc) { bridge.setSettingsAtStart(true);
             bridge.setSettingsTabAtStart(QString::fromLocal8Bit(argv[++i])); }
+        // The online browse's search word, for the click harness and for himself: self-drawn QML
+        // controls are not reachable through UIA on this build, so the state a screenshot should show
+        // is passed in here. Setting the word is all this does - Main.qml is what puts the window in
+        // 在线 mode and asks the site, and nothing here imports, which stays the one click.
+        else if (a == "--online-search" && i + 1 < argc)
+            bridge.setOnlineQuery(QString::fromLocal8Bit(argv[++i]));
     }
 
     QQmlApplicationEngine engine;

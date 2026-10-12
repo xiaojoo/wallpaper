@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <atomic>
 #include <thread>
+#include <vector>
 #include <wincodec.h>
 #include <sstream>
 
@@ -323,8 +324,10 @@ bool Application::SetAutostart(bool on, std::string& error) {
 namespace {
 // Adds a user picture as a wallpaper package: a folder with wallpaper.json pointing at the shared
 // Image.hlsl preset, so nothing has to be recompiled to show someone's own photo.
+// `origin`, when the settings window says where the file came from, is written into the manifest and
+// is what separates a picture he took from one this app fetched off a site.
 std::string AddImagePackage(const std::wstring& root, const std::wstring& srcFile, IWICImagingFactory* wic,
-                            std::string& error) {
+                            std::string& error, const std::string& origin = {}) {
     namespace fs = std::filesystem;
     if (!fs::exists(srcFile)) { error = "file does not exist"; return {}; }
     UINT w = 0, h = 0;
@@ -358,7 +361,11 @@ std::string AddImagePackage(const std::wstring& root, const std::wstring& srcFil
     Json j = Json::Object();
     j.set("id", Json::Of(id));
     j.set("name", Json::Of(ToUtf8(fs::path(srcFile).filename().wstring())));
-    j.set("category", Json::Of(std::string("本地图片")));
+    // An imported picture is not 本地图片: the browser groups by category, and a label that names the
+    // wrong thing is worse than no label. `origin` is the page it came from, kept with the package
+    // rather than in the settings window's own state, so the folder alone says where it came from.
+    j.set("category", Json::Of(origin.empty() ? std::string("本地图片") : std::string("在线图片")));
+    if (!origin.empty()) j.set("origin", Json::Of(origin));
     j.set("renderer", Json::Of(std::string("d3d11")));
     j.set("width", Json::Of((long long)w));
     j.set("height", Json::Of((long long)h));
@@ -385,8 +392,10 @@ std::string AddImagePackage(const std::wstring& root, const std::wstring& srcFil
 }
 
 // Adds a video as a wallpaper package. The id keeps the images' local_NN shape on purpose: the delete
-// guard only accepts that form, and the settings window's import list is built from it.
-std::string AddVideoPackage(const std::wstring& root, const std::wstring& srcFile, std::string& error) {
+// guard only accepts that form, and the settings window's import list is built from it. `origin` is the
+// page it came from, exactly as in AddImagePackage.
+std::string AddVideoPackage(const std::wstring& root, const std::wstring& srcFile, std::string& error,
+                            const std::string& origin = {}) {
     namespace fs = std::filesystem;
     if (!fs::exists(srcFile)) { error = "file does not exist"; return {}; }
 
@@ -424,7 +433,8 @@ std::string AddVideoPackage(const std::wstring& root, const std::wstring& srcFil
     Json j = Json::Object();
     j.set("id", Json::Of(id));
     j.set("name", Json::Of(ToUtf8(fs::path(srcFile).filename().wstring())));
-    j.set("category", Json::Of(std::string("本地视频")));
+    j.set("category", Json::Of(origin.empty() ? std::string("本地视频") : std::string("在线视频")));
+    if (!origin.empty()) j.set("origin", Json::Of(origin));
     j.set("renderer", Json::Of(std::string("video")));
     j.set("video", Json::Of(std::string("video") + ToUtf8(ext)));
     j.set("loop", Json::Of(true));
@@ -1523,6 +1533,23 @@ void Application::UpdateSnapshot() {
         pv.set("drew", Json::Of((long long)preview_.drew));
         pv.set("dropped", Json::Of((long long)preview_.dropped));
         pv.set("shm_frames", Json::Of((long long)preview_.writer.frames()));
+        // ---- 临时探针（方案 1 代价实测）：每帧回读的分布 + 这一帧到底有多大 ----
+        {
+            std::vector<double> win;
+            const unsigned n = std::min(preview_.copyIdx, Preview::kCopyWin);
+            win.reserve(n);
+            for (unsigned i = 0; i < n; ++i) win.push_back(preview_.copyWin[i]);
+            std::sort(win.begin(), win.end());
+            if (!win.empty()) {
+                pv.set("copy_ms_p50", Json::Of(win[n / 2]));
+                pv.set("copy_ms_p95", Json::Of(win[(n * 95) / 100]));
+            }
+            pv.set("copy_ms_max", Json::Of(preview_.copyMaxMs));
+            pv.set("copy_ms_mean", Json::Of(preview_.copyIdx ? preview_.copySumMs / double(preview_.copyIdx)
+                                                             : 0.0));
+            pv.set("copy_n", Json::Of((long long)preview_.copyIdx));
+            pv.set("frame_mb", Json::Of(double(preview_.w) * double(preview_.h) * 4.0 / 1048576.0));
+        }
         r.set("preview", std::move(pv));
     }
     r.set("uptime_s", Json::Of(double(GetTickCount64() - startedMs_) / 1000.0));
@@ -1535,6 +1562,10 @@ void Application::UpdateSnapshot() {
             m.set("fps", Json::Of(p.baseFps()));
             m.set("quality", Json::Of(std::string(QualityName(p.defaultQuality()))));
             m.set("category", Json::Of(p.category()));
+            // The page an imported picture came from, empty for a file he picked. The online page reads
+            // this back instead of keeping its own ledger: "已经在库里" has to mean what the catalog
+            // says it means - after a restart, and after he deletes the package by hand.
+            m.set("origin", Json::Of(p.origin()));
             m.set("resolution", p.srcWidth() > 0 && p.srcHeight() > 0
                                      ? Json::Of(std::format("{} x {}", p.srcWidth(), p.srcHeight()))
                                      : Json::Of(std::string("generated")));
@@ -1546,6 +1577,13 @@ void Application::UpdateSnapshot() {
             m.set("type", Json::Of(std::string(p.isVideo() ? "video"
                                               : p.hasParticles() ? "particles"
                                               : p.isImage() ? "image" : "shader")));
+            // A still picture's own file. The hero used to show it through the preview pass, which is
+            // a 1920x1080 stream - so in a window wider than that the photo was softer than the file
+            // sitting next to the manifest. He asked for the file instead (2026-10-12); the live pass
+            // stays for the packages that actually move.
+            if (p.isImage() && !p.isVideo() && !p.textures().empty())
+                m.set("file", Json::Of(ToUtf8((std::filesystem::path(p.dir())
+                                               / p.textures()[0].file).wstring())));
             if (p.isVideo()) {
                 m.set("duration_s", Json::Of(p.srcDuration()));
                 m.set("loop", Json::Of(p.videoLoop()));
@@ -1553,8 +1591,7 @@ void Application::UpdateSnapshot() {
             auto it = thumbs_.find(p.id());
             if (it != thumbs_.end() && it->second.ok) {
                 m.set("thumb", Json::Of(ToUtf8(it->second.still)));
-                m.set("thumb_large", Json::Of(ToUtf8(it->second.large)));
-                // The picture on disk is replaced whenever the renderer rebuilds it, but a window that
+                m.set("thumb_large", Json::Of(ToUtf8(it->second.large)));                // The picture on disk is replaced whenever the renderer rebuilds it, but a window that
                 // already loaded the old bytes keeps them. The stamp is what lets the window notice.
                 std::error_code ec;
                 long long stampMs = 0;
@@ -1795,7 +1832,7 @@ namespace {
 // 640x360 is what the saved strip already was, so the big picture loses nothing it had before; the
 // cost scales with the bytes, and at 960x540 (2 MB a frame) the settings window could only finish
 // 17-19 of the 30 produced frames per second.
-constexpr UINT kPreviewW = 1280, kPreviewH = 720;
+constexpr UINT kPreviewW = 3840, kPreviewH = 2160;
 constexpr int kPreviewFps = 30;
 // The settings window sends a beat once a second while it shows the preview. If it dies, closes or
 // crashes, the second render pass has to stop by itself rather than burn GPU forever.
@@ -1962,6 +1999,10 @@ void Application::DrawPreview(double nowSeconds) {
         const HRESULT hr = dev_.ctx->GetData(p.q[i].Get(), &done, sizeof(done), 0);
         if (FAILED(hr) || !done) continue;
         D3D11_MAPPED_SUBRESOURCE mp{};
+        // ---- 临时探针：一次回读的真实毫秒（Map 会等 GPU，所以这段不是纯 memcpy）----
+        static const LARGE_INTEGER pf = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f; }();
+        LARGE_INTEGER t0{};
+        QueryPerformanceCounter(&t0);
         if (SUCCEEDED(dev_.ctx->Map(p.stg[i].Get(), 0, D3D11_MAP_READ, 0, &mp))) {
             // The slot's own hash, not p.idHash: this frame was rendered by whichever instance was
             // current when the copy was issued, which after a switch is the wallpaper the reader is
@@ -1970,6 +2011,15 @@ void Application::DrawPreview(double nowSeconds) {
                            p.slotHash[i]);
             if (p.slotHash[i] != p.idHash) ++p.draining;
             dev_.ctx->Unmap(p.stg[i].Get(), 0);
+        }
+        LARGE_INTEGER t1{};
+        QueryPerformanceCounter(&t1);
+        {
+            const double ms = double(t1.QuadPart - t0.QuadPart) * 1000.0 / double(pf.QuadPart);
+            p.copyWin[p.copyIdx % Preview::kCopyWin] = ms;
+            ++p.copyIdx;
+            p.copySumMs += ms;
+            if (ms > p.copyMaxMs) p.copyMaxMs = ms;
         }
         p.slotState[i] = Preview::Free;
         freeSlot = i;
@@ -2736,7 +2786,9 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         }
     } else if (action == "addimage") {
         std::string err;
-        const std::string id = AddImagePackage(wpm_.settings().root, ToWide(arg), dev_.wic.Get(), err);
+        // `arg2` is the page the picture came from, empty for a file he picked himself. See
+        // AddImagePackage: it is what makes the imported package say where it came from.
+        const std::string id = AddImagePackage(wpm_.settings().root, ToWide(arg), dev_.wic.Get(), err, arg2);
         if (id.empty()) {
             result = std::format(R"({{"ok":false,"error":"{}"}})", err);
         } else {
@@ -2747,7 +2799,7 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         }
     } else if (action == "addvideo") {
         std::string err;
-        const std::string id = AddVideoPackage(wpm_.settings().root, ToWide(arg), err);
+        const std::string id = AddVideoPackage(wpm_.settings().root, ToWide(arg), err, arg2);
         if (id.empty()) {
             result = std::format(R"({{"ok":false,"error":"{}"}})", err);
         } else {

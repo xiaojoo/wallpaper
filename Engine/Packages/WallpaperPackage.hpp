@@ -37,6 +37,9 @@ public:
     Quality defaultQuality() const { return quality_; }
     bool additiveBlend() const { return additive_; }
     const std::string& category() const { return category_; }
+    // The page an imported picture came from, empty for anything he put here himself. It is in the
+    // manifest rather than in the settings window's state so the folder is a complete record.
+    const std::string& origin() const { return origin_; }
     // Source resolution of an image wallpaper; 0 for generated shaders, which have none.
     int srcWidth() const { return srcW_; }
     int srcHeight() const { return srcH_; }
@@ -57,6 +60,7 @@ public:
 
 private:
     std::string id_, name_, category_;
+    std::string origin_;
     int srcW_ = 0, srcH_ = 0;
     std::wstring dir_, shaderFile_;
     std::wstring videoFile_;

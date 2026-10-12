@@ -28,7 +28,7 @@ import time
 from ctypes import wintypes
 
 MAP = "Local\\SmartWallpaper.Preview"
-MAGIC, VERSION = 0x56535057, 2
+MAGIC, VERSION = 0x56535057, 4
 HDR_BYTES = 64
 # PreviewHeader: magic 0, version 4, w 8, h 12, stride 16, seq 20, stampMs 24, frames 32, idHash 40
 SEQ_OFF = 20
@@ -62,7 +62,10 @@ def open_section():
     h = k32.OpenFileMappingW(0x0004, False, MAP)
     if not h:
         return None, None, k32.GetLastError()
-    v = k32.MapViewOfFile(h, 0x0004, 0, 0, HDR_BYTES + 1280 * 720 * 4)
+    # Size 0 maps the whole section: a ruler that hardcodes a payload size goes stale the moment the
+    # ceiling moves (it read nothing at all after 1280 -> 1920 -> 3840), and the writer's own
+    # kPreviewBytes is the only authority on how big it is.
+    v = k32.MapViewOfFile(h, 0x0004, 0, 0, 0)
     if not v:
         return h, None, k32.GetLastError()
     return h, v, 0

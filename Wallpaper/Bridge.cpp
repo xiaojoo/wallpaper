@@ -21,6 +21,24 @@
 namespace sw {
 namespace {
 
+// What the bytes actually are, not what the site claimed. 4kwallpapers answers a JPEG with
+// `Content-Type: binary/data` plus `X-Content-Type-Options: nosniff` (measured 2026-10-12: the file
+// begins ff d8 ff e0 "JFIF", 444130 bytes), so on that site the header is a download policy and the
+// signature is the only fact available before the engine opens the file.
+QString sniffMedia(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    const QByteArray h = f.read(16);
+    f.close();
+    if (h.startsWith("\xFF\xD8\xFF")) return QStringLiteral("image/jpeg");
+    if (h.startsWith("\x89PNG\x0D\x0A\x1A\x0A")) return QStringLiteral("image/png");
+    if (h.startsWith("GIF87a") || h.startsWith("GIF89a")) return QStringLiteral("image/gif");
+    if (h.startsWith("RIFF") && h.mid(8, 4) == "WEBP") return QStringLiteral("image/webp");
+    if (h.size() >= 12 && h.mid(4, 4) == "ftyp") return QStringLiteral("video/mp4");
+    if (h.startsWith("\x1A\x45\xDF\xA3")) return QStringLiteral("video/webm");
+    return QStringLiteral("unknown");
+}
+
 struct Entry {
     const char* key;
     const char* zh;
@@ -281,6 +299,51 @@ const Entry kStrings[] = {
     // ring's turning. Named 暂停 rather than 停止 because neither stops anything for good.
     {"tray_pause_wallpaper", "暂停壁纸", "Pause the wallpaper"},
     {"tray_pause_ring", "暂停图标", "Pause the icons"},
+    // 在线：一个站 = sources 目录里的一个 json。标签写在这里而不是写在那份描述里，是为了"中文默认 +
+    // 英文开关"这条约定只有一处要维护；那份文件只描述端点和字段。
+    {"tab_online", "在线", "Online"},
+    {"online_query", "搜索词", "Search"},
+    {"online_search", "搜索", "Search"},
+    {"online_results", "结果", "Results"},
+    {"online_empty", "还没有结果：输入一个词，按回车", "Nothing yet - type a word and press Enter"},
+    {"online_page", "第", "Page"},
+    {"online_items", "条", "items"},
+    {"online_total", "共", "of"},
+    {"online_prev", "上一页", "Previous"},
+    {"online_next", "下一页", "Next"},
+    {"online_resolution", "分辨率下限", "Resolution floor"},
+    // The same word means two different things on two sites: a floor to search from on wallhaven, an
+    // exact file to take here. 4kwallpapers names its row through the site-qualified key.
+    {"online_4kwallpapers_resolution", "分辨率", "Resolution"},
+    {"online_category", "分类", "Category"},
+    {"online_hero_fetching", "正在取原图…", "fetching the original…"},
+    {"online_hero_failed", "原图没取到，现在是站点预览", "original not fetched - this is the site preview"},
+    {"online_hero_retry", "重试", "Retry"},
+    {"online_sort", "排序", "Sort by"},
+    {"online_purity", "内容分级", "Content rating"},
+    {"opt_wallhaven_sort_relevance", "相关", "Relevance"},
+    {"opt_wallhaven_sort_newest", "最新", "Newest"},
+    {"opt_wallhaven_sort_top", "最热", "Most favourited"},
+    {"opt_wallhaven_purity_100", "只收安全", "Safe only"},
+    {"opt_wallhaven_purity_110", "安全加暧昧", "Safe plus sketchy"},
+    {"opt_wallhaven_purity_111", "全部（含成人）", "Everything, adults included"},
+    {"online_import", "入库", "Import"},
+    {"online_downloading", "下载中", "Downloading"},
+    {"online_importing", "入库中", "Importing"},
+    {"online_imported", "已入库", "Imported"},
+    {"online_already", "这张已经在库里", "Already in the library"},
+    {"online_download_failed", "下载失败", "Download failed"},
+    {"online_not_image", "站点回的不是图片", "The site answered with something that is not a picture"},
+    {"online_gif", "动图只会取第一帧，不入库", "An animated gif would be imported as its first frame"},
+    {"online_unsupported", "这个类型进不了库", "This file type cannot be imported"},
+    {"online_need_renderer", "入库要连着渲染器", "Importing needs the renderer running"},
+    {"online_no_answer", "渲染器没有回音，看它的日志", "The renderer never answered; check its log"},
+    {"online_no_sources", "没有读到任何在线源描述", "No online source description was loaded"},
+    {"online_offsite", "源描述的地址不在它自己的站上", "The source points outside its own site"},
+    {"online_busy", "正在请求", "Asking the site"},
+    // A delete the renderer never completed. Not "it failed because X" - what was measured is that the
+    // package is still in the catalog.
+    {"delete_still_there", "问了几次还在库里", "Still in the library after several asks"},
     {"tray_hint", "已退到托盘，壁纸继续在放；点托盘图标就能再打开", "Hidden to the tray - the wallpaper keeps playing. Click the tray icon to open this window again."},
 };
 
@@ -380,6 +443,58 @@ Bridge::Bridge(QObject* parent) : QObject(parent) {
     // every ~700 ms.
     previewTimer_ = new QTimer(this);
     connect(previewTimer_, &QTimer::timeout, this, &Bridge::previewBeat);
+    // The online page's replies land here. Both handlers ignore a source the page has already left,
+    // which is what a switched-away search would otherwise do: paint the other site's pictures.
+    connect(&online_, &OnlineFetcher::searched, this,
+            [this](const QString& name, const QVariantList& rows, const QVariantMap& meta,
+                   const QString& error) {
+                if (name != onlineSource_) return;
+                onlineBusy_ = false;
+                if (!error.isEmpty()) {
+                    onlineError_ = error;
+                    emit onlineChanged();
+                    return;
+                }
+                onlinePage_ = meta.value("page").toInt();
+                onlineLastPage_ = meta.value("lastPage").toInt();
+                onlineTotal_ = meta.value("total").toLongLong();
+                onlineRows_.clear();
+                for (const auto& v : rows) {
+                    QVariantMap row = v.toMap();
+                    const QString have = libraryIdFor(row.value("page").toString());
+                    // What the renderer can actually take: a still goes to WIC, a clip to FFmpeg. A gif
+                    // would come in as its first frame and sit there motionless, which is not the
+                    // picture the tile just showed - so it is refused on the card, not after a press.
+                    const QString mime = row.value("mime").toString().toLower();
+                    static const QStringList accept { "image/jpeg", "image/png", "image/webp",
+                                                      "image/bmp", "image/tiff", "video/mp4", "video/webm" };
+                    const bool can = accept.contains(mime);
+                    const QString why = mime == QLatin1String("image/gif") ? t("online_gif")
+                                  : can ? QString() : t("online_unsupported") + QStringLiteral(": ") + mime;
+                    row.insert("state", !have.isEmpty() ? QStringLiteral("imported")
+                                 : can ? QStringLiteral("new") : QStringLiteral("unsupported"));
+                    row.insert("detail", have.isEmpty() ? why : have);
+                    onlineRows_.push_back(row);
+                }
+                emit onlineChanged();
+            });
+    connect(&online_, &OnlineFetcher::progress, this,
+            [this](const QString& url, double fraction, qint64, qint64) {
+                for (const auto& v : onlineRows_)
+                    if (v.toMap().value("image").toString() == url) {
+                        // Only the card this download belongs to reads it, and nothing else rebuilds.
+                        // The pending key has to match too: the hero fetches the picture he is looking
+                        // at without being pressed, and its bytes must not start a progress bar on
+                        // whichever card happens to hold the one import he did press.
+                        const QString rowKey = v.toMap().value("key").toString();
+                        if (pendingState_ == QLatin1String("downloading") && pendingKey_ == rowKey) {
+                            progress_ = fraction;
+                            emit onlineProgressChanged();
+                        }
+                        return;
+                    }
+            });
+    loadOnlineSources();
     refresh();
 }
 
@@ -431,6 +546,11 @@ void Bridge::setLang(const QString& code) {
     s.setValue("lang", lang_);
     emit langChanged();
     emit stateChanged(); // labels derived from t() refresh too
+    // The online page's option labels were built through t() when the source was picked, so they are
+    // rebuilt here too - otherwise the page keeps the language it was opened in. The results themselves
+    // stay: a language switch is not a new search.
+    rebuildOnlineOptions();
+    emit onlineChanged();
 }
 
 void Bridge::setTargetMonitor(const QString& tag) {
@@ -499,6 +619,13 @@ void Bridge::refresh() {
             // `showPreview` only speaks when the id changes - leaving the id set would mean the
             // second pass never returns until he clicks a different wallpaper.
             previewId_.clear();
+            // An import that was in flight cannot land: the renderer is the one that copies the file
+            // into the library, so the card is told now rather than left spinning until the wait times
+            // out on a poll that no longer runs at the connected rate.
+            if (importRow_ >= 0) {
+                setPending(pendingKey_, QStringLiteral("failed"), t("online_need_renderer"));
+                importRow_ = -1;
+            }
             emit stateChanged();
             engineDied();
         }
@@ -669,6 +796,13 @@ void Bridge::ingest(const Json& status, const Json& list) {
                     QString url = QUrl::fromLocalFile(QDir::fromNativeSeparators(v.toString())).toString();
                     if (stamp > 0) url += QStringLiteral("?v=%1").arg(stamp);
                     row.insert(QString::fromStdString(kv.first), url);
+                } else if (kv.first == "file") {
+                    // The engine gives a native path; Qt reads "H:\dir\image.jpg" as a url whose
+                    // scheme is "h", and the image silently never loads ("协议"h"未知). The stamp is
+                    // deliberately not appended here - it is the thumbnail's write time, and this is
+                    // the package's own file, which the renderer never rebuilds.
+                    row.insert(QStringLiteral("file"),
+                               QUrl::fromLocalFile(QDir::fromNativeSeparators(v.toString())).toString());
                 } else
                     row.insert(QString::fromStdString(kv.first), v);
             }
@@ -696,6 +830,49 @@ void Bridge::ingest(const Json& status, const Json& list) {
         }
     }
     logPath_ = root_.isEmpty() ? QString() : QDir(root_ + "/logs").absolutePath();
+
+    // Which site pages the library already holds, read off the packages themselves. The online page's
+    // 「已入库」 says what the catalog says, so it stays true across a restart and turns itself off
+    // when he deletes the package by hand - a note this window kept about its own imports could not.
+    originIds_.clear();
+    for (const auto& v : catalog_) {
+        const QVariantMap row = v.toMap();
+        const QString origin = row.value("origin").toString();
+        if (!origin.isEmpty()) originIds_.insert(origin, row.value("id").toString());
+    }
+    bool rowsChanged = false;
+    for (int i = 0; i < onlineRows_.size(); ++i) {
+        QVariantMap row = onlineRows_[i].toMap();
+        // Only the two states that are about the library itself. A card refused because of its file
+        // type, or one whose download failed, keeps the reason it carries.
+        const QString was = row.value("state").toString();
+        if (was != QLatin1String("new") && was != QLatin1String("imported")) continue;
+        const QString have = libraryIdFor(row.value("page").toString());
+        const bool nowIn = !have.isEmpty();
+        const bool saidIn = was == QLatin1String("imported");
+        if (nowIn == saidIn && row.value("detail").toString() == have) continue;
+        row.insert("state", nowIn ? QStringLiteral("imported") : QStringLiteral("new"));
+        row.insert("detail", have);
+        onlineRows_[i] = row;
+        rowsChanged = true;
+    }
+    if (rowsChanged) emit onlineChanged();   // once, not once per card
+    // The command answering "queued" only means the renderer took it. The import is finished when a
+    // package carrying that page is in the catalog, and not before.
+    if (importRow_ >= 0) {
+        const QString have = libraryIdFor(importOrigin_);
+        if (!have.isEmpty()) {
+            setPending(QString(), QString(), QString());
+            importRow_ = -1;
+            say(t("online_imported") + QStringLiteral(": ") + have, false);
+        } else if (QDateTime::currentMSecsSinceEpoch() - importAtMs_ > 20000) {
+            // The renderer's own answer went to its log, which is the only place a refused import is.
+            const QString why = t("online_no_answer") + QStringLiteral(": ") + logPath_;
+            setPending(pendingKey_, QStringLiteral("failed"), why);
+            importRow_ = -1;
+            say(why, true);
+        }
+    }
 }
 
 void Bridge::say(const QString& msg, bool isError) {
@@ -1228,22 +1405,410 @@ void Bridge::addImageFolder() {
     refresh();
 }
 
-void Bridge::deleteImage(const QString& id) {
+void Bridge::deleteImage(const QString& id) { deleteImageTry(id, 0); }
+
+// The pipe's answer to a queued command is only "we took it", so it is not evidence the package is
+// gone. Success is read back out of the catalog; while the id is still in it, this asks again. A file
+// another process still has open is refused with a sharing violation and clears within seconds - the
+// first no is not a no. (The case that put this here was my own probe: it read the package's
+// wallpaper.json, left the handle open, and asked for the delete. The renderer was right to refuse.)
+void Bridge::deleteImageTry(const QString& id, int round) {
     Json out;
-    std::string body = std::format(R"({{"cmd":"delimage","arg":"{}"}})", id.toStdString());
-    if (!request(body.c_str(), 4000, &out) || !out.boolOr("ok")) {
-        // The renderer names the screen that still holds the copy, so the message can say where.
-        const std::string code = out.strOr("code");
-        if (code == "in_use")
-            say(t("delete_in_use") + QStringLiteral(" (") + QString::fromStdString(out.strOr("monitor"))
-                    + QStringLiteral(")"), true);
-        else
-            say(t("delete_failed") + QStringLiteral(": ")
-                    + QString::fromStdString(code.empty() ? out.strOr("error") : code), true);
+    const std::string body = std::format(R"({{"cmd":"delimage","arg":"{}"}})", id.toStdString());
+    const bool taken = request(body.c_str(), 4000, &out) && out.boolOr("ok");
+    if (!taken) {
+        say(t("delete_failed") + QStringLiteral(": ")
+                + QString::fromStdString(out.strOr("error").empty() ? out.strOr("code") : out.strOr("error")),
+            true);
         return;
     }
     refresh();
-    say(t("deleted_image") + QStringLiteral(": ") + id, false);
+    if (!catalogHasId(id)) { say(t("deleted_image") + QStringLiteral(": ") + id, false); return; }
+    if (round >= 3) {
+        // Still there after four asks. The one reason this window can name without guessing is a
+        // package a screen is showing - the renderer refuses that one and says which monitor.
+        for (const auto& v : monitors_) {
+            const QVariantMap m = v.toMap();
+            if (m.value("wallpaper").toString() == id) {
+                say(t("delete_in_use") + QStringLiteral(" (") + m.value("tag").toString()
+                        + QStringLiteral(")"), true);
+                return;
+            }
+        }
+        say(t("delete_still_there") + QStringLiteral(": ") + id, true);
+        return;
+    }
+    QTimer::singleShot(1500, this, [this, id, round] { deleteImageTry(id, round + 1); });
+}
+
+bool Bridge::catalogHasId(const QString& id) const {
+    for (const auto& v : catalog_)
+        if (v.toMap().value("id").toString() == id) return true;
+    return false;
+}
+
+// ------------------------------------------------------------------ 在线源
+//
+// A site is a file in `sources`, so its endpoint, its field names and its politeness interval are
+// data rather than something compiled in here. What is deliberately not data is the accepting side:
+// only the site's own hosts get requests, so a hand-written description cannot turn this window into
+// a general fetcher.
+void Bridge::loadOnlineSources() {
+    const QString dir = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("sources"));
+    std::vector<std::string> skipped;
+    online_.setSources(OnlineSource::LoadAll(dir.toStdWString(), skipped));
+    for (const auto& s : skipped) qWarning("online source skipped: %s", s.c_str());
+    onlineSourceItems_.clear();
+    for (const auto& s : online_.sources()) {
+        QVariantMap row;
+        row.insert("value", QString::fromStdString(s.name()));
+        row.insert("label", QString::fromStdString(s.label()));
+        onlineSourceItems_.push_back(row);
+    }
+    if (onlineSourceItems_.isEmpty()) {
+        onlineError_ = t("online_no_sources") + QStringLiteral(": ") + dir;
+        return;
+    }
+    setOnlineSource(onlineSourceItems_.first().toMap().value("value").toString());
+}
+
+void Bridge::setOnlineSource(const QString& name) {
+    OnlineSource* s = online_.source(name);
+    if (!s) return;
+    onlineSource_ = QString::fromStdString(s->name());
+    onlineSite_ = QString::fromStdString(s->homepage());
+    onlineIntervalMs_ = s->minIntervalMs();
+    onlineAsk_ = s->acceptsQuery();
+    onlineRows_.clear();
+    onlinePage_ = onlineLastPage_ = 1;
+    onlineTotal_ = 0;
+    onlineError_.clear();
+    importRow_ = -1;
+    heroKey_.clear();
+    heroInFlight_.clear();
+    if (!heroFile_.isEmpty()) { heroFile_.clear(); emit onlineHeroFileChanged(); }
+    rebuildOnlineOptions();
+    emit onlineChanged();
+}
+
+// The option rows the page draws come out of the site's own description: a source that offers no sort
+// order gets no sort control, instead of a picker that does nothing. Labels go through t(), which is
+// why the language switch rebuilds them - see setLang.
+void Bridge::rebuildOnlineOptions() {
+    OnlineSource* s = online_.source(onlineSource_);
+    onlineOptions_.clear();
+    if (!s) return;
+    for (const auto& o : s->options()) {
+        QVariantList vals;
+        for (const auto& v : o.values) {
+            const QString raw = QString::fromStdString(v);
+            const QString key = QStringLiteral("opt_") + onlineSource_ + QLatin1Char('_')
+                              + QString::fromStdString(o.key) + QLatin1Char('_') + raw;
+            // t() hands back the key when the table has no entry, so an option nobody translated shows
+            // the name the site gives it (4kwallpapers' own "CGI", "Black/Dark") and only failing that
+            // its raw url slug.
+            const QString tr = t(key);
+            const QString siteLabel = QString::fromStdString(o.labelFor(v));
+            QVariantMap one;
+            one.insert("value", raw);
+            one.insert("label", tr == key ? siteLabel : tr);
+            vals.push_back(one);
+        }
+        // A row's own name can differ per site: `resolution` is a floor on wallhaven and an exact size
+        // here, and the two read differently in Chinese. The site-qualified key wins when it exists.
+        const QString siteKey = QStringLiteral("online_") + onlineSource_ + QLatin1Char('_')
+                              + QString::fromStdString(o.key);
+        const QString rowKey = QStringLiteral("online_") + QString::fromStdString(o.key);
+        QString rowLabel = t(siteKey);
+        if (rowLabel == siteKey) rowLabel = t(rowKey);
+        if (rowLabel == rowKey) rowLabel = QString::fromStdString(o.key);
+        QVariantMap row;
+        row.insert("key", QString::fromStdString(o.key));
+        row.insert("label", rowLabel);
+        row.insert("values", vals);
+        row.insert("current", QString::fromStdString(s->optionValue(o.key)));
+        onlineOptions_.push_back(row);
+    }
+}
+
+void Bridge::onlineSearch() {
+    OnlineSource* s = online_.source(onlineSource_);
+    if (!s) {
+        onlineError_ = t("online_no_sources");
+        emit onlineChanged();
+        return;
+    }
+    if (!OnlineFetcher::sameHost(QString::fromStdString(s->BuildSearch({}, 1).url), onlineSite_)) {
+        onlineError_ = t("online_offsite") + QStringLiteral(": ") + onlineSite_;
+        emit onlineChanged();
+        return;
+    }
+    onlineBusy_ = true;
+    onlineError_.clear();
+    emit onlineChanged();
+    online_.search(*s, onlineQuery_, onlinePage_);
+}
+
+void Bridge::onlinePageStep(int delta) {
+    const int next = onlinePage_ + delta;
+    if (next < 1 || next > onlineLastPage_) return;
+    onlinePage_ = next;
+    onlineSearch();
+}
+
+void Bridge::onlineSetOption(const QString& key, const QString& value) {
+    OnlineSource* s = online_.source(onlineSource_);
+    if (!s || !s->setOption(key.toStdString(), value.toStdString())) return;
+    // A changed filter is a different search, not a re-sort of what is already on the screen - so the
+    // page goes back to the first page of the new one, which is what the site's own paging means.
+    setOnlineSource(onlineSource_);
+    onlineSearch();
+}
+
+QString Bridge::onlineSize(int bytes) const {
+    if (bytes <= 0) return {};
+    const double mb = bytes / 1048576.0;
+    // The unit is in the string because the card says nothing else about what the number measures.
+    return QString::number(mb, 'f', mb >= 10 ? 0 : 1) + QStringLiteral(" MB");
+}
+
+QString Bridge::libraryIdFor(const QString& origin) const {
+    return origin.isEmpty() ? QString() : originIds_.value(origin);
+}
+
+void Bridge::markOnlineRow(int index, const QString& state, const QString& detail) {
+    if (index < 0 || index >= onlineRows_.size()) return;
+    QVariantMap row = onlineRows_[index].toMap();
+    row.insert("state", state);
+    row.insert("detail", detail);
+    onlineRows_[index] = row;
+    emit onlineChanged();
+}
+
+QString Bridge::onlineCacheDir() const {
+    // Next to the engine's own thumb cache, inside the tree the renderer reads: addimage copies the
+    // file into the library, so this is scratch space and never the store.
+    const QString base = root_.isEmpty() ? QCoreApplication::applicationDirPath() : root_;
+    const QString dir = QDir(base).absoluteFilePath(QStringLiteral("cache/online"));
+    QDir().mkpath(dir);
+    return dir;
+}
+
+QString Bridge::onlineDest(const QVariantMap& row) {
+    const QString image = row.value("image").toString();
+    OnlineSource* s = online_.source(onlineSource_);
+    const QString ext = QString::fromStdString(
+        s ? s->ExtensionFor(image.toStdString()) : std::string());
+    return QDir(onlineCacheDir())
+        .absoluteFilePath(onlineSource_ + QLatin1Char('-')
+                          + row.value("key").toString() + QLatin1Char('.') + ext);
+}
+
+namespace {
+// The site answers 429 to a run of originals, so a failed one gets two more rounds and each waits
+// twice as long: 6 s, then 12 s. More than that is the site saying no for this visit.
+constexpr int kHeroRetries = 2;
+constexpr qint64 kHeroBackoffMs = 3000;
+} // namespace
+
+void Bridge::onlineHeroPreview(int index) {
+    // The key travels with the file: the hero keeps moving on its own, and a binding that only looked
+    // at `onlineHeroFile` would paint the previous card's full-size picture under the new card's
+    // caption. QML compares the two and falls back to the site's preview when they differ.
+    const QString key = (index >= 0 && index < onlineRows_.size())
+                            ? onlineRows_[index].toMap().value("key").toString() : QString();
+    heroKey_ = key;
+    heroFile_.clear();
+    heroError_.clear();
+    heroTries_ = 0;
+    emit onlineHeroFileChanged();
+    if (key.isEmpty()) { setHeroState(QString()); return; }
+    requestHero(key);
+}
+
+void Bridge::onlineHeroRetry() {
+    if (heroKey_.isEmpty()) return;
+    heroTries_ = 0;
+    heroStartMs_ = 0;      // he asked for it; the interval between two cards does not apply to a retry
+    requestHero(heroKey_);
+}
+
+void Bridge::requestHero(const QString& key) {
+    // By key, not by the index the caller had: a page landing in the meantime moves the card.
+    int index = -1;
+    for (int i = 0; i < onlineRows_.size(); ++i)
+        if (onlineRows_[i].toMap().value("key").toString() == key) { index = i; break; }
+    if (index < 0) { setHeroState(QString()); return; }   // this list no longer holds that card
+    const QVariantMap row = onlineRows_[index].toMap();
+    const QString image = row.value("image").toString();
+    // A video's "original" is the whole clip. Its hero is the preview frame, same as a local package's,
+    // so pulling tens of megabytes for that buys nothing and this stays with pictures.
+    const QString mime = row.value("mime").toString();
+    if (image.isEmpty() || !mime.startsWith(QLatin1String("image/"))) { setHeroState("none"); return; }
+    if (row.value("state").toString() == QLatin1String("unsupported")) { setHeroState("none"); return; }
+    if (!OnlineFetcher::sameHost(image, onlineSite_)) { setHeroState("none"); return; }
+
+    const QString dest = onlineDest(row);
+    if (QFileInfo::exists(dest) && QFileInfo(dest).size() > 0) {
+        heroFile_ = QUrl::fromLocalFile(dest).toString();
+        emit onlineHeroFileChanged();
+        setHeroState("ready");
+        return;
+    }
+    if (heroInFlight_ == key) return;   // this one is already on its way
+    OnlineSource* s = online_.source(onlineSource_);
+    if (!s) return;
+    // The site's own interval covers originals too, not just the listing: one of these is 1-4 MB, and
+    // clicking through five cards in ten seconds is what came back as 429 forty times on 2026-10-12.
+    const qint64 since = QDateTime::currentMSecsSinceEpoch() - heroStartMs_;
+    if (heroStartMs_ != 0 && since < s->minIntervalMs()) {
+        setHeroState("queued");
+        QTimer::singleShot(int(s->minIntervalMs() - since), this, [this, key] {
+            if (key == heroKey_) requestHero(key);
+        });
+        return;
+    }
+    heroInFlight_ = key;
+    heroStartMs_ = QDateTime::currentMSecsSinceEpoch();
+    // Which card, which attempt. A page of 24 that all asked for a picture without being touched is
+    // the failure the log line exists to catch.
+    qWarning("online: hero asks key=%s (try %d of %d)", key.toUtf8().constData(), heroTries_ + 1,
+             kHeroRetries + 1);
+    setHeroState("fetching");
+    // Deliberately not through setPending: that one belongs to the press on 入库, and its progress
+    // would otherwise start on a card he only looked at.
+    online_.download(*s, image, dest, [this, key, dest](const QString& error, const QString& type) {
+        if (heroInFlight_ == key) heroInFlight_.clear();
+        if (!error.isEmpty()) {
+            // The file stays on disk whichever way this went - 入库 would have wanted it too. The whole
+            // sentence goes to the log; the screen gets the code and the fact that it is retrying,
+            // because "why is this one still soft" has to be answerable without opening a file.
+            qWarning("online: hero preview %s: %s", key.toUtf8().constData(), error.toUtf8().constData());
+            if (key != heroKey_) return;      // he moved on; nothing retries for a card nobody is looking at
+            heroError_ = heroErrorOf(error);
+            if (heroTries_ < kHeroRetries) {
+                ++heroTries_;
+                setHeroState("retrying");
+                QTimer::singleShot(int(kHeroBackoffMs * (1 << heroTries_)), this, [this, key] {
+                    if (key == heroKey_) requestHero(key);
+                });
+            } else {
+                setHeroState("failed");
+            }
+            emit onlineHeroStateChanged();    // the error text changed with the state's payload
+            return;
+        }
+        const QString real = sniffMedia(dest);
+        if (!real.startsWith(QLatin1String("image/"))) {
+            qWarning("online: hero preview %s is %s (%s), not a picture", key.toUtf8().constData(),
+                     real.toUtf8().constData(), type.toUtf8().constData());
+            if (key == heroKey_) { heroError_ = real; setHeroState("failed"); }
+            return;
+        }
+        if (heroKey_ != key) return;   // he moved on; the next look finds it already there
+        heroFile_ = QUrl::fromLocalFile(dest).toString();
+        emit onlineHeroFileChanged();
+        setHeroState("ready");
+    });
+}
+
+void Bridge::setHeroState(const QString& state) {
+    if (heroState_ == state) return;
+    heroState_ = state;
+    // ---- 临时探针（2026-10-12）：每个状态的时刻，用来量"正在取原图"这一态在界面上停留多久 ----
+    qWarning("hero state %s at %lld", state.toUtf8().constData(), QDateTime::currentMSecsSinceEpoch());
+    emit onlineHeroStateChanged();
+}
+
+QString Bridge::heroErrorOf(const QString& error) {
+    // Only the number goes on screen: it is language-neutral, and Qt's own sentences ("the site sent
+    // an empty body") would put English inside a Chinese page. The full sentence is in the log.
+    if (const int at = error.indexOf(QStringLiteral("status code")); at >= 0)
+        return error.mid(at + 11).trimmed().left(3);
+    return QString();
+}
+
+void Bridge::onlineImport(int index) {
+    if (index < 0 || index >= onlineRows_.size()) return;
+    const QVariantMap row = onlineRows_[index].toMap();
+    const QString page = row.value("page").toString();
+    if (const QString have = libraryIdFor(page); !have.isEmpty()) {
+        markOnlineRow(index, QStringLiteral("imported"), have);
+        say(t("online_already") + QStringLiteral(": ") + have, false);
+        return;
+    }
+    // The library is the renderer's, so this is the one online action that cannot be done offline.
+    if (!connected_) { say(t("online_need_renderer"), true); return; }
+    OnlineSource* s = online_.source(onlineSource_);
+    const QString image = row.value("image").toString();
+    if (!s || image.isEmpty()) return;
+    // The card already says why; a press on it does nothing.
+    if (row.value("state").toString() == QLatin1String("unsupported")) return;
+    if (!OnlineFetcher::sameHost(image, onlineSite_)) {
+        say(t("online_offsite") + QStringLiteral(": ") + image, true);
+        return;
+    }
+    const QString dest = onlineDest(row);
+    const QString key = row.value("key").toString();
+    setPending(key, QStringLiteral("downloading"), QString());
+    // The key travels with the callback: a new search can replace the grid while this is in flight,
+    // and writing to whatever sits at the old index would land a picture's result on another card.
+    if (QFileInfo::exists(dest) && QFileInfo(dest).size() > 0) {
+        importDownloaded(index, key, dest, page);
+        return;
+    }
+    online_.download(*s, image, dest, [this, index, key, dest, page](const QString& error, const QString& type) {
+        if (key != pendingKey_) return;   // another card was asked for in the meantime
+        if (!error.isEmpty()) {
+            setPending(key, QStringLiteral("failed"), error);
+            say(t("online_download_failed") + QStringLiteral(": ") + error, true);
+            return;
+        }
+        const QString real = sniffMedia(dest);
+        if (!real.startsWith(QLatin1String("image/")) && !real.startsWith(QLatin1String("video/"))) {
+            // Both names, because on at least one site they disagree, and the card has to say
+            // something true about why this file will not enter the library.
+            const QString why = t("online_not_image") + QStringLiteral(": ") + real
+                              + QStringLiteral(" (")
+                              + (type.isEmpty() ? QStringLiteral("no type given") : type) + QLatin1Char(')');
+            QFile::remove(dest);
+            setPending(key, QStringLiteral("failed"), why);
+            say(why, true);
+            return;
+        }
+        importDownloaded(index, key, dest, page);
+    });
+}
+
+void Bridge::setPending(const QString& key, const QString& state, const QString& detail) {
+    pendingKey_ = key;
+    pendingState_ = state;
+    pendingDetail_ = detail;
+    if (state != QLatin1String("downloading")) progress_ = 0.0;
+    emit onlineProgressChanged();
+}
+
+void Bridge::importDownloaded(int index, const QString& key, const QString& path, const QString& page) {
+    const bool video = kVideoExt.contains(QFileInfo(path).suffix(), Qt::CaseInsensitive);
+    // Built with the JSON writer rather than a format string: the file path and the site's own url are
+    // data, and `Json::Parse` refuses a bare backslash as an unknown escape - so a path that came from
+    // a dialog has to be escaped, not pasted between quotes.
+    Json cmd = Json::Object();
+    cmd.set("cmd", Json::Of(video ? "addvideo" : "addimage"));
+    cmd.set("arg", Json::Of(QDir::fromNativeSeparators(path).toStdString()));
+    cmd.set("arg2", Json::Of(page.toStdString()));
+    Json out;
+    if (!request(cmd.dump().c_str(), 8000, &out) || !out.boolOr("ok")) {
+        const QString why = QString::fromStdString(out.strOr("error"));
+        setPending(key, QStringLiteral("failed"), why.isEmpty() ? t("failed") : why);
+        say(t("failed") + QStringLiteral(": ") + why, true);
+        return;
+    }
+    setPending(key, QStringLiteral("importing"), QString());
+    importRow_ = index;
+    importOrigin_ = page;
+    importAtMs_ = QDateTime::currentMSecsSinceEpoch();
+    refresh();
 }
 
 void Bridge::toggleFavorite(const QString& id) {    const bool wasFavorite = favorites_.removeAll(id) > 0;

@@ -72,6 +72,11 @@ private:
     quint64 wantedHash_ = 0, frameHash_ = 0;
     bool matching_ = false;
     bool paused_ = false;
+    // ---- 临时探针（2026-10-12，方案 1 的代价实测），交完数字就删 ----
+    // read* = 共享段 -> QImage 的整帧 memcpy；paint* = 把那一帧缩放到屏上那块框的光栅耗时。
+    // 后者不随流的尺寸线性增长（输出框大小没变），所以这两笔要分开看。
+    double readSum_ = 0, readMax_ = 0, paintSum_ = 0, paintMax_ = 0;
+    int probeReads_ = 0, probeFrames_ = 0;
 };
 
 } // namespace sw

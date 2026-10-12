@@ -126,7 +126,7 @@ endif()
 # ---------------------------------------------------------------- Qt settings window
 # Optional: the renderer must still build on a machine without Qt.
 list(APPEND CMAKE_PREFIX_PATH "$ENV{QT_DIR}")
-find_package(Qt6 QUIET COMPONENTS Quick Qml Gui Widgets ShaderTools)
+find_package(Qt6 QUIET COMPONENTS Quick Qml Gui Widgets Network ShaderTools)
 if(Qt6_FOUND)
   set(CMAKE_AUTOMOC ON)
   qt_add_executable(Wallpaper WIN32
@@ -135,6 +135,9 @@ if(Qt6_FOUND)
     Wallpaper/Bridge.cpp
     Wallpaper/LivePreview.cpp
     Wallpaper/TrayMenu.cpp
+    Wallpaper/OnlineSelfTest.cpp
+    Online/OnlineSource.cpp
+    Online/OnlineFetcher.cpp
     Engine/Core/Json.cpp
     Engine/Core/Log.cpp
     Engine/App/IPCClient.cpp
@@ -142,7 +145,7 @@ if(Qt6_FOUND)
   target_include_directories(Wallpaper PRIVATE "${CMAKE_SOURCE_DIR}")
   target_compile_definitions(Wallpaper PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(Wallpaper PRIVATE /utf-8 /W4 /permissive- /Zc:__cplusplus /EHsc)
-  target_link_libraries(Wallpaper PRIVATE Qt6::Quick Qt6::Qml Qt6::Gui Qt6::Widgets)
+  target_link_libraries(Wallpaper PRIVATE Qt6::Quick Qt6::Qml Qt6::Gui Qt6::Widgets Qt6::Network)
   # The hero transition's fragment shader. Qt's own baker is the only thing that knows which
   # shader versions the scene graph asks for, so it is invoked through qt_add_shaders rather than
   # by hand - and the result is copied next to the QML instead of being embedded, because Main.qml
@@ -154,6 +157,10 @@ if(Qt6_FOUND)
   add_custom_command(TARGET Wallpaper POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
       "${CMAKE_SOURCE_DIR}/Wallpaper/qml" "$<TARGET_FILE_DIR:Wallpaper>/qml"
+    # The online page's site descriptions, next to the exe like qml/: adding a site is a file here,
+    # not a rebuild. The renderer never sees any of this - it gets no network code at all.
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${CMAKE_SOURCE_DIR}/Online/sources" "$<TARGET_FILE_DIR:Wallpaper>/sources"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${CMAKE_BINARY_DIR}/.qsb/Wallpaper/shaders/HeroLiquid.frag.qsb"
       "$<TARGET_FILE_DIR:Wallpaper>/qml/HeroLiquid.frag.qsb"

@@ -366,7 +366,14 @@ ApplicationWindow {
                                      ? hero.frame_ms : 42
     // Delivered frames, not a flag from the pipe: if the renderer is older than this build or the
     // section is gone, running stays false and the saved strip keeps playing.
-    readonly property bool liveWanted: useLivePreview && previewMotion
+    readonly property bool liveWanted: useLivePreview && previewMotion && !heroIsStill
+    // A still photo has nothing for the second pass to animate that its own file does not show better:
+    // the stream is a fixed 1920x1080 grab, the file is the resolution the package was imported at.
+    // So the hero reads the file and the pass is not asked for - which also stops the window paying
+    // 249 MB/s of frame copies to redraw a picture that is not moving.
+    readonly property bool heroIsStill: hero !== null && hero.online !== true
+                                        && hero.type === "image"
+                                        && hero.file !== undefined && hero.file.length > 0
     // The feed is alive as long as frames keep arriving, even if the newest one still belongs to
     // the wallpaper just left: gating on that would tear down and rebuild the 24 strip images on
     // every switch. When the renderer dies the feed goes stale, running falls to false, and the
@@ -417,6 +424,13 @@ ApplicationWindow {
         for (var i = 0; i < root.settingsTabs.length; ++i)
             if (root.settingsTabs[i].key === root.settingsTab) return trs(root.settingsTabs[i].label)
         return trs("settings")
+    }
+
+    // The keys only, for the "is this tab real" test in Component.onCompleted.
+    readonly property var settingsTabsKeys: {
+        const out = []
+        for (var i = 0; i < settingsTabs.length; ++i) out.push(settingsTabs[i].key)
+        return out
     }
 
     readonly property var qualityItems: {
@@ -535,10 +549,69 @@ ApplicationWindow {
     function particleCount(w) { return w && w.particles !== undefined ? w.particles : 0 }
     function intervalText(m) { return m < 60 ? (m + " min") : (m === 60 ? "1 h" : (m / 60) + " h") }
 
+    // 在线不是设置窗里的一页：入口和浏览都在主窗口顶栏这排 chip 上（2026-10-12 他推翻了我第一版的
+    // 位置）。选中「在线」之后，卡片条、大图、说明行和那颗主按钮全是同一套东西，只是数据来自站点：
+    // 一张远端结果被摊成和壁纸包同形的卡片，所以 strip / hero / caption 三处消费者一行都不用改分支。
+    readonly property string onlineCat: "在线"
+    readonly property bool onlineMode: category === onlineCat
+    function onlineCard(r) {
+        return { id: "wh:" + r.key, name: String(r.title).length > 0 ? r.title : r.key,
+                 category: onlineCat, type: "image", online: true,
+                 thumb: r.thumb, thumb_large: r.thumb,
+                 pxW: r.width, pxH: r.height,
+                 resolution: r.width > 0 ? r.width + " x " + r.height : "",
+                 bytes: r.bytes, mime: r.mime, origin: r.page, key: r.key,
+                 state: r.state, detail: r.detail }
+    }
+    // The small line under the big picture, for a card that came from a site. Built as parts because a
+    // site that names no file size (4kwallpapers publishes 35 sizes and says nothing about their bytes)
+    // would otherwise start the line with a separator leading nowhere.
+    function onlineMeta(w) {
+        const out = []
+        const sz = Bridge.onlineSize(Number(w.bytes))
+        if (sz.length > 0) out.push(sz)
+        if (String(w.mime).length > 0) out.push(w.mime)
+        if (w.state === "unsupported" && String(w.detail).length > 0) out.push(w.detail)
+        return out.join(" · ")
+    }
+    // The row's index is what `onlineImport` takes, and a new search can replace the grid under us -
+    // so the index is looked up from the site's own key at the moment of the press, not remembered
+    // from whenever this card was built.
+    function onlineIndexOf(id) {
+        const key = String(id).slice(3)
+        for (var i = 0; i < Bridge.onlineRows.length; ++i)
+            if (Bridge.onlineRows[i].key === key) return i
+        return -1
+    }
+    // Every card that becomes the picture he is looking at has to ask for its original. Only a press
+    // used to ask, so the card that landed under him after a page change never did - measured on
+    // 2026-10-12: the hero on screen was key 25813 and the log held zero asks for it, while the caption
+    // went on claiming 3840 x 2160 over the site's 1920 file. The rotation is off in 在线 for other
+    // reasons, so this cannot turn into one original every 4 s; the debounce below is what stops a
+    // fast click-through from becoming five 1-4 MB requests in ten seconds, which is what the site
+    // answered with 429.
+    property int heroAskIndex: -1
+    function askHeroFull(id) {
+        if (!(onlineMode && String(id).indexOf("wh:") === 0)) return
+        heroAskIndex = onlineIndexOf(id)
+        heroAsk.restart()
+    }
+    Timer {
+        id: heroAsk
+        interval: 350
+        onTriggered: if (root.heroAskIndex >= 0) Bridge.onlineHeroPreview(root.heroAskIndex)
+    }
+    onHeroChanged: root.askHeroFull(root.hero ? root.hero.id : "")
     // Reading Bridge.lang / .catalog / .favorites inside the binding is what keeps the
     // grid live and makes every label re-evaluate when the language switch flips.
     readonly property var shown: {
         const _lang = Bridge.lang
+        if (onlineMode) {
+            const rows = Bridge.onlineRows
+            const out = []
+            for (let i = 0; i < rows.length; ++i) out.push(onlineCard(rows[i]))
+            return out
+        }
         const favs = Bridge.favorites
         let out = []
         for (let i = 0; i < Bridge.catalog.length; ++i) {
@@ -583,7 +656,18 @@ ApplicationWindow {
         console.log("window geometry " + root.x + "," + root.y + " " + root.width + "x" + root.height)
         if (Bridge.selectAtStart.length > 0) root.selectedId = Bridge.selectAtStart
         if (Bridge.settingsAtStart) root.settingsOpen = true
-        if (Bridge.settingsTabAtStart.length > 0) root.settingsTab = Bridge.settingsTabAtStart
+        // Only a tab that exists. Every page is `visible: settingsTab === "<key>"`, so an unknown key
+        // opens the dialog with nothing in it - which is what a mistyped --settings-tab used to leave
+        // on screen: a 660 px empty card with a rail of tabs and no way to tell why.
+        if (settingsTabsKeys.indexOf(Bridge.settingsTabAtStart) >= 0)
+            root.settingsTab = Bridge.settingsTabAtStart
+        // The deep link's query is a search, and a search belongs to the 在线 chip: putting the window
+        // in that mode is what makes `--online-search mountain` show something instead of filtering the
+        // library for a word no local file carries.
+        if (Bridge.onlineQuery.length > 0) {
+            root.category = root.onlineCat
+            Bridge.onlineSearch()
+        }
         // `hero` follows `pendingHero` with a deliberate delay while a switch is fading; the first
         // picture must be there at once, not after the first dip.
         root.hero = root.pendingHero
@@ -652,7 +736,11 @@ ApplicationWindow {
                     // with the old behaviour: `opened ... local_05\video.mp4 via FFmpeg`, then
                     // `live players in this process: 2`, then `closed a player: 1 still live, process
                     // ws 946 MB` (against ~320 MB while one player serves both passes).
+                    // An online card is not in the renderer's library, so there is no second pass of it
+                    // to ask for - and asking would leave this window beating a heartbeat for a pass the
+                    // engine refused to start.
                     const want = root.hero !== null && root.useLivePreview
+                                 && root.hero.online !== true && !root.heroIsStill
                     if (want)
                         Bridge.showPreview(root.hero.id)
                     else
@@ -706,7 +794,12 @@ ApplicationWindow {
 
                 Timer {
                     interval: 4000
+                    // Not in 在线: the rotation is there to keep the desktop alive while nobody is at
+                    // the window, and over search results it does the opposite of what it is for - the
+                    // big picture walks away from the card he is reading, and every step of it would be
+                    // a new original pulled from the site for a picture nobody is looking at.
                     running: root.carouselPlaying && root.shown.length > 1 && root.active
+                             && !root.onlineMode
                     repeat: true
                     onTriggered: strip.step()
                 }
@@ -747,8 +840,81 @@ ApplicationWindow {
                             fillMode: Image.PreserveAspectCrop
                             asynchronous: true
                             visible: !root.heroMotion && !root.heroLive
+                            // Always the small layer: the site's preview for a remote card, the
+                            // 1280x720 `*_large.png` for a local one. The full-size picture is a second
+                            // image on top of this one, never a re-aim of this one - changing `source`
+                            // on an asynchronous Image drops the frame it is holding, so the switch
+                            // showed the box's base colour for as long as the big file took to decode.
+                            // That blank beat is the 闪 he reported on 2026-10-12, and it was introduced
+                            // by pointing this item at a 3840x2160 jpeg.
                             source: root.hero ? (root.hero.thumb_large !== undefined ? root.hero.thumb_large
-                                                                                     : root.hero.thumb) : ""
+                                                                                      : root.hero.thumb) : ""
+                        }
+
+                        // The full-size picture, painted only once its own bytes are on hand.
+                        Image {
+                            id: heroBig
+                            anchors.fill: parent
+                            anchors.margins: 0
+                            fillMode: Image.PreserveAspectCrop
+                            asynchronous: true
+                            // Two cases where the box should be filled from a real file rather than from
+                            // a small stand-in:
+                            //  - a remote card whose original has been fetched (the site's own preview
+                            //    tops out at 432x243 - measured: small 300x200, orig 300x145, lg 432x243
+                            //    - which in a 1360 px box is a 3.1x upscale, and that is the 模糊);
+                            //  - a local still package, whose own image file is already on disk next to
+                            //    the manifest. The hero used to reach it only through the preview pass,
+                            //    which is a fixed-size stream, so maximised on a 4K screen a photo was
+                            //    softer than the file the library holds.
+                            // The remote key is compared because the rotation can move the hero: without
+                            // it the previous card's full picture would paint under the new caption.
+                            readonly property bool fullUp: root.hero !== null
+                                                           && root.hero.online === true
+                                                           && Bridge.onlineHeroKey === root.hero.key
+                                                           && Bridge.onlineHeroFile.length > 0
+                            readonly property bool stillFile: root.hero !== null
+                                                              && root.hero.online !== true
+                                                              && root.hero.type === "image"
+                                                              && root.hero.file !== undefined
+                                                              && root.hero.file.length > 0
+                            // The picture's own pixel size, from whichever place this build keeps it.
+                            readonly property var bigSize: {
+                                if (fullUp) return Qt.size(root.hero.pxW, root.hero.pxH)
+                                if (stillFile) {
+                                    const m = /(\d+)\s*x\s*(\d+)/.exec(String(root.hero.resolution))
+                                    return m ? Qt.size(parseInt(m[1]), parseInt(m[2])) : Qt.size(0, 0)
+                                }
+                                return Qt.size(0, 0)
+                            }
+                            visible: !root.heroMotion && !root.heroLive
+                                     && (fullUp || stillFile) && status === Image.Ready
+                            source: root.hero ? (fullUp ? Bridge.onlineHeroFile
+                                             : stillFile ? root.hero.file : "") : ""
+                            // Decoded at least as large as this window could ever be asked to show -
+                            // not a constant. The first version pinned the long edge to 1280 because
+                            // that is what a local card's `*_large.png` is and the window is 1360 px
+                            // wide; maximised on a 4K screen the box is ~3840 px wide, so that cap
+                            // became a 3x upscale and the picture went soft again (measured 2026-10-12:
+                            // 1.752 on screen against 1.983 for a 1280 source and 4.754 for the full
+                            // file, same crop, same ruler).
+                            // It deliberately does NOT read `heroBox`'s own size. That version worked
+                            // arithmetically and failed in front of him: sourceSize also sets this
+                            // Image's implicit size, which feeds back into the layout that decides the
+                            // box, and the loop moved the hero through the page on its own (logged:
+                            // idx 0, 11, 12, 10, 9, 8 ... 1 with no input; with the handler body
+                            // disabled the picture stayed on card 0 for 75 s). The screen's long edge
+                            // is one number per run and cannot move under the binding.
+                            readonly property real capPx: Math.max(Screen.width, Screen.height)
+                                                          * Screen.devicePixelRatio
+                            sourceSize: {
+                                const iw = bigSize.width, ih = bigSize.height
+                                if (!fullUp && !stillFile) return Qt.size(0, 0)
+                                if (iw <= 0 || ih <= 0) return Qt.size(0, 0)
+                                if (Math.max(iw, ih) <= capPx) return Qt.size(iw, ih)
+                                return iw >= ih ? Qt.size(Math.round(capPx), Math.round(capPx * ih / iw))
+                                                : Qt.size(Math.round(capPx * iw / ih), Math.round(capPx))
+                            }
                         }
 
                         // Every frame of the strip is loaded once and kept, so playing it back is a
@@ -929,15 +1095,43 @@ ApplicationWindow {
                                 Layout.maximumWidth: 300
                             }
                             Text {
+                                // An online card has no quality, no base fps and no shader params - it is
+                                // a file that is not on this machine yet. Saying so with the two numbers
+                                // it does have beats printing three zeros under labels that ask about a
+                                // wallpaper package. Not the resolution: that is the card's name already.
                                 text: root.hero
-                                      ? (root.resText(root.hero) + " · " + trs("quality") + ": " + root.hero.quality
-                                         + " · " + trs("base_fps") + ": " + root.hero.fps
-                                         + " · " + trs("params") + ": "
-                                         + (root.hero.params === undefined ? 0 : root.hero.params)
-                                         + (root.particleCount(root.hero) > 0
-                                            ? " · " + trs("particles") + ": " + root.particleCount(root.hero) : ""))
+                                      ? (root.hero.online === true
+                                            ? root.onlineMeta(root.hero)
+                                            : root.resText(root.hero) + " · " + trs("quality") + ": " + root.hero.quality
+                                              + " · " + trs("base_fps") + ": " + root.hero.fps
+                                              + " · " + trs("params") + ": "
+                                              + (root.hero.params === undefined ? 0 : root.hero.params)
+                                              + (root.particleCount(root.hero) > 0
+                                                 ? " · " + trs("particles") + ": " + root.particleCount(root.hero) : ""))
                                       : ""
                                 color: "#C6CEDA"; font.family: root.fontFamily; font.pixelSize: 12
+                            }
+                            // A hero that could not be fetched has to say so in this line. Falling back
+                            // to the site's smaller file in silence is what reads as "还是没原图清楚"
+                            // with nothing to point at: the caption above still names the real size.
+                            Text {
+                                id: heroFetch
+                                readonly property string st: Bridge.onlineHeroState
+                                readonly property bool card: root.hero !== null && root.hero.online === true
+                                visible: card && (st === "queued" || st === "fetching" || st === "retrying"
+                                                  || st === "failed")
+                                text: st === "failed"
+                                        ? trs("online_hero_failed")
+                                          + (Bridge.onlineHeroError.length > 0 ? " (" + Bridge.onlineHeroError + ")" : "")
+                                        : trs("online_hero_fetching")
+                                color: st === "failed" ? "#F2A33C" : "#9FB0C6"
+                                font.family: root.fontFamily; font.pixelSize: 12
+                            }
+                            Btn {
+                                visible: heroFetch.visible && Bridge.onlineHeroState === "failed"
+                                compact: true
+                                text: trs("online_hero_retry")
+                                onClicked: Bridge.onlineHeroRetry()
                             }
                             Item { Layout.fillWidth: true }
                             // On-state is the icon's own colour, like the favourite - not a border.
@@ -994,7 +1188,10 @@ ApplicationWindow {
                                     id: favHover
                                     anchors.fill: parent
                                     hoverEnabled: true
-                                    enabled: root.hero !== null
+                                    // A picture that is not in the library cannot be a favourite: the
+                                    // list is a set of ids the renderer owns, and a remote key in it
+                                    // would sit there forever pointing at nothing.
+                                    enabled: root.hero !== null && root.hero.online !== true
                                     // A clickable place has to say so under the pointer, and taking the
                                     // press also drops the caret out of whichever field still holds it.
                                     cursorShape: Qt.PointingHandCursor
@@ -1037,10 +1234,32 @@ ApplicationWindow {
                             // one of the two.
                             Btn {
                                 readonly property bool up: root.hero !== null && root.inUse(root.hero)
-                                text: up ? trs("current") : trs("set_as_wallpaper")
+                                // The same plate, two actions. A picture that is not in the library yet
+                                // cannot be applied - the renderer has nothing to draw - so the button
+                                // that means 设为壁纸 becomes 入库 when the 在线 chip is up, and that one
+                                // press is the only thing that puts a file on disk.
+                                readonly property bool online: root.hero !== null && root.hero.online === true
+                                readonly property int row: online ? root.onlineIndexOf(root.hero.id) : -1
+                                readonly property var card: row >= 0 ? Bridge.onlineRows[row] : null
+                                readonly property string st: card !== null ? String(card.state) : ""
+                                text: online
+                                      ? (st === "imported" ? trs("online_imported") + " " + card.detail
+                                         : st === "downloading"
+                                              ? trs("online_downloading") + " "
+                                                + Math.round(Bridge.onlineProgress * 100) + "%"
+                                         : st === "importing" ? trs("online_importing")
+                                         : trs("online_import"))
+                                      : up ? trs("current") : trs("set_as_wallpaper")
                                 accent: true
                                 enabled: Bridge.connected && root.hero !== null && !up
-                                onClicked: { if (root.hero) Bridge.apply(root.hero.id) }
+                                         && (online ? row >= 0 : true)
+                                         && st !== "imported" && st !== "downloading"
+                                         && st !== "importing" && st !== "unsupported"
+                                onClicked: {
+                                    if (!root.hero) return
+                                    if (online) { if (row >= 0) Bridge.onlineImport(row) }
+                                    else Bridge.apply(root.hero.id)
+                                }
                             }
 
                             Repeater {
@@ -1220,15 +1439,31 @@ ApplicationWindow {
                                                        function (k) { return k !== "本地图片" && k !== "本地视频" }))
                                                .concat(["fav", "本地图片"])
                                                .concat(root.categoryCounts["本地视频"] ? ["本地视频"] : [])
+                                               .concat([root.onlineCat])
                                         delegate: Btn {
                                             required property var modelData
                                             readonly property string cat: modelData === "all" ? "" : modelData
-                                            text: cat === "" ? trs("all") : (cat === "fav" ? trs("favorites") : cat)
+                                            // Every other chip is a category that exists in the library;
+                                            // this one is a place the pictures come from, so its label is
+                                            // in the translation table and the imported packages keep
+                                            // saying 在线图片 / 在线视频 - the two answer different
+                                            // questions and must not read as the same chip twice.
+                                            text: cat === "" ? trs("all")
+                                                : cat === "fav" ? trs("favorites")
+                                                : cat === root.onlineCat ? trs("tab_online") : cat
                                             compact: true
                                             frame: true
                                             alpha: root.plateAlpha
                                             checked: root.category === cat
-                                            onClicked: root.category = cat
+                                            onClicked: {
+                                                root.category = cat
+                                                // One press to see something: the site's newest page is a
+                                                // valid answer to an empty box. Coming back later keeps
+                                                // the results that are already there rather than asking
+                                                // the site again.
+                                                if (cat === root.onlineCat && Bridge.onlineRows.length === 0)
+                                                    Bridge.onlineSearch()
+                                            }
                                         }
                                     }
                                 }
@@ -1236,6 +1471,10 @@ ApplicationWindow {
                                 Rectangle {
                                     Layout.preferredWidth: 260
                                     Layout.preferredHeight: 28
+                                    // 4kwallpapers puts its search under /search/, which its own
+                                    // robots.txt closes to programs, so there is no box to show for it
+                                    // here - the category picker in the row below takes the question.
+                                    visible: !(root.onlineMode && !Bridge.onlineAsk)
                                     radius: 6   // same corner as the chips beside it
                                     color: Qt.alpha(search.activeFocus ? th.surfaceAlt : th.surface,
                                                     root.plateAlpha)
@@ -1248,7 +1487,11 @@ ApplicationWindow {
                                         TextField {
                                             id: search
                                             Layout.fillWidth: true
-                                            placeholderText: trs("search_placeholder")
+                                            // The same box, two different questions: filtering what is on
+                                            // disk, or asking the site. Enter is only a search while the
+                                            // 在线 chip is up; otherwise it stays a no-op like before.
+                                            placeholderText: root.onlineMode ? trs("online_query")
+                                                                             : trs("search_placeholder")
                                             color: th.text
                                             placeholderTextColor: th.muted
                                             background: null
@@ -1259,7 +1502,11 @@ ApplicationWindow {
                                             leftPadding: 0
                                             font.family: root.fontFamily
                                             font.pixelSize: 12
-                                            onTextChanged: root.query = text
+                                            onTextChanged: {
+                                                root.query = text
+                                                if (root.onlineMode) Bridge.onlineQuery = text
+                                            }
+                                            onAccepted: if (root.onlineMode) Bridge.onlineSearch()
                                         }
                                         IconBtn {
                                             visible: search.text.length > 0
@@ -1268,6 +1515,98 @@ ApplicationWindow {
                                             onClicked: search.text = ""
                                         }
                                     }
+                                }
+                            }
+                            // 在线才出现的一行：来源、这个站自己的筛选项、翻页，以及"这一页是什么"的
+                            // 读数。放在 chip 下面而不是设置窗里，因为它属于"正在看哪一批图"这个状态，
+                            // 不属于配置。
+                            RowLayout {
+                                visible: root.onlineMode
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 28
+                                spacing: 8
+
+                                Choice {
+                                    items: Bridge.onlineSourceItems
+                                    value: Bridge.onlineSource
+                                    Layout.preferredWidth: 120
+                                    enabled: Bridge.onlineSourceItems.length > 1
+                                    onPicked: function (v) { Bridge.onlineSource = v }
+                                }
+                                Repeater {
+                                    model: Bridge.onlineOptions
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        spacing: 6
+                                        ScrimText {
+                                            text: modelData.label
+                                            color: "#C6CEDA"; font.pixelSize: 11
+                                            // Never squeezed: the first version let RowLayout take the
+                                            // labels down when the row ran out of width, and 分辨率下限
+                                            // arrived on screen as 分辨率下. The pickers shrink instead.
+                                            Layout.minimumWidth: implicitWidth
+                                        }
+                                        Choice {
+                                            items: modelData.values
+                                            value: modelData.current
+                                            Layout.preferredWidth: 120
+                                            onPicked: function (v) { Bridge.onlineSetOption(modelData.key, v) }
+                                        }
+                                    }
+                                }
+                                Item { Layout.fillWidth: true }
+                                ScrimText {
+                                    visible: Bridge.onlineBusy || Bridge.onlineError.length > 0
+                                             || Bridge.onlinePendingState.length > 0
+                                    text: Bridge.onlineBusy ? trs("online_busy")
+                                          : Bridge.onlinePendingState === "downloading"
+                                                ? trs("online_downloading") + " "
+                                                  + Math.round(Bridge.onlineProgress * 100) + "%"
+                                          : Bridge.onlinePendingState === "importing"
+                                                ? trs("online_importing")
+                                          : Bridge.onlinePendingState === "failed"
+                                                ? trs("online_download_failed") + ": " + Bridge.onlinePendingDetail
+                                          : Bridge.onlineError
+                                    color: Bridge.onlineError.length > 0
+                                           || Bridge.onlinePendingState === "failed" ? th.err : "#C6CEDA"
+                                    font.pixelSize: 11
+                                }
+                                ScrimText {
+                                    // Nothing asked for yet, or nothing came back: the strip is empty and
+                                    // the only thing that explains it is this line.
+                                    visible: !Bridge.onlineBusy && Bridge.onlineError.length === 0
+                                             && Bridge.onlineRows.length === 0
+                                    text: trs("online_empty")
+                                    color: "#C6CEDA"; font.pixelSize: 11
+                                }
+                                ScrimText {
+                                    visible: !Bridge.onlineBusy && Bridge.onlineRows.length > 0
+                                    text: trs("online_results") + " " + Bridge.onlineRows.length + " · "
+                                          + trs("online_page") + " " + Bridge.onlinePage + "/"
+                                          + Bridge.onlineLastPage
+                                          + (Bridge.onlineTotal > 0
+                                             ? " · " + trs("online_total") + " " + Bridge.onlineTotal
+                                               + " " + trs("online_items") : "")
+                                    color: "#C6CEDA"; font.pixelSize: 11
+                                }
+                                Btn {
+                                    // Enter in the box does the same thing; this is the part of the
+                                    // affordance that does not require knowing the shortcut.
+                                    text: trs("online_search")
+                                    compact: true
+                                    raised: true
+                                    enabled: !Bridge.onlineBusy && Bridge.onlineSourceItems.length > 0
+                                    onClicked: Bridge.onlineSearch()
+                                }
+                                IconBtn {
+                                    icon: "chevL"; tip: trs("online_prev"); flat: true; tint: th.text
+                                    enabled: Bridge.onlinePage > 1 && !Bridge.onlineBusy
+                                    onClicked: Bridge.onlinePageStep(-1)
+                                }
+                                IconBtn {
+                                    icon: "chevR"; tip: trs("online_next"); flat: true; tint: th.text
+                                    enabled: Bridge.onlinePage < Bridge.onlineLastPage && !Bridge.onlineBusy
+                                    onClicked: Bridge.onlinePageStep(1)
                                 }
                             }
                         }
@@ -1350,6 +1689,7 @@ ApplicationWindow {
                         function go(i) {
                             if (i < 0 || i >= root.shown.length) return
                             root.selectedId = root.shown[i].id
+                            root.askHeroFull(root.shown[i].id)
                             root.motionT0 = Date.now()
                             root.carouselPlaying = false   // a manual pick outranks the rotation
                         }
@@ -2950,52 +3290,98 @@ ApplicationWindow {
     Rectangle {
         id: dropList
         readonly property Item field: root.openField
-        readonly property int listHeight: dropCol.implicitHeight + 8
-        readonly property int belowY: field ? field.mapToItem(dropList.parent, 0, field.height + 4).y : 0
-        readonly property bool flipUp: field !== null && belowY + listHeight > root.height - 12
-        visible: field !== null && root.settingsOpen
+        readonly property int needed: dropCol.implicitHeight + 8
+        readonly property int fieldTop: field ? field.mapToItem(dropList.parent, 0, 0).y : 0
+        readonly property int belowY: field ? fieldTop + field.height + 4 : 0
+        // How much window is left on each side of the field. 4kwallpapers has 30 categories, which is
+        // 848 px of list in an 860 px window: the old `height: needed` plus a flip-up put most of it
+        // off the top of the screen and only the last two rows were reachable - which is what he
+        // screenshotted. So the list is capped to whichever side has more room and scrolls.
+        readonly property int belowRoom: root.height - belowY - 12
+        readonly property int aboveRoom: fieldTop - 12
+        readonly property bool flipUp: field !== null && needed > belowRoom && aboveRoom > belowRoom
+        readonly property int room: flipUp ? aboveRoom : belowRoom
+        // Not gated on settingsOpen: the main window's own online filter row uses Choice too, and the
+        // transparent dismiss layer above already shows for any openField - with the list gated to the
+        // dialog, a click out there set openField, raised that layer and drew nothing, so the first
+        // press seemed to do nothing and the second one only hid it again.
+        visible: field !== null
         x: field ? field.mapToItem(dropList.parent, 0, 0).x : 0
-        y: flipUp ? field.mapToItem(dropList.parent, 0, 0).y - listHeight - 4 : belowY
+        y: flipUp ? fieldTop - height - 4 : belowY
         width: field ? Math.max(field.width, 150) : 150
-        height: listHeight
+        height: field ? Math.max(Math.min(needed, room), 120) : needed
         z: 1000
         radius: 6
         color: th.surfaceAlt
         border.color: th.hover
+        clip: true
 
-        Column {
-            id: dropCol
-            x: 4
-            y: 4
-            width: dropList.width - 8
-            Repeater {
-                model: dropList.field ? dropList.field.items : []
-                delegate: Rectangle {
-                    required property var modelData
-                    width: dropCol.width
-                    height: 28
-                    radius: 4
-                    color: optHover.containsMouse ? th.hover
-                         : (dropList.field && modelData.value === dropList.field.value ? th.surface : "transparent")
-                    Text {
-                        anchors.left: parent.left
-                        anchors.leftMargin: 8
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: modelData.label
-                        color: th.text; font.family: root.fontFamily; font.pixelSize: 12
-                    }
-                    MouseArea {
-                            // A clickable place has to say so under the pointer, and taking the press also
-                            // drops the caret out of whichever field still holds it.
-                            cursorShape: Qt.PointingHandCursor
-                            onPressed: forceActiveFocus()   // takes the caret out of any field
-                        id: optHover
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        onClicked: { if (dropList.field) dropList.field.choose(modelData.value); root.openField = null }
+        // The current value is what he is looking to confirm, and in a 30-row list it can be off the
+        // visible part - so the list opens with it in view rather than at its top.
+        function scrollToCurrent() {
+            if (!field || height <= 0) return
+            var idx = 0
+            for (var i = 0; i < field.items.length; ++i)
+                if (field.items[i].value === field.value) { idx = i; break }
+            dropFlick.contentY = Math.max(0, Math.min(idx * 28, dropFlick.contentHeight - height + 8))
+        }
+        onVisibleChanged: if (visible) Qt.callLater(scrollToCurrent)
+        onFieldChanged: if (visible) Qt.callLater(scrollToCurrent)
+
+        Flickable {
+            id: dropFlick
+            anchors.fill: parent
+            anchors.margins: 4
+            boundsBehavior: Flickable.StopAtBounds
+            clip: true
+            interactive: dropCol.implicitHeight > height
+            // The wheel and the drag move the list; nothing is drawn for it. (An attempt to silence a
+            // "default" ScrollBar here by assigning `ScrollBar.vertical.policy` broke the whole file:
+            // on a bare Flickable that attached property is null, so the assignment fails at load and
+            // the window never appears - measured, twice.)
+
+            Column {
+                id: dropCol
+                width: dropFlick.width
+                Repeater {
+                    model: dropList.field ? dropList.field.items : []
+                    delegate: Rectangle {
+                        required property var modelData
+                        width: dropCol.width
+                        height: 28
+                        radius: 4
+                        color: optHover.containsMouse ? th.hover
+                             : (dropList.field && modelData.value === dropList.field.value ? th.surface : "transparent")
+                        Text {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: modelData.label
+                            color: th.text; font.family: root.fontFamily; font.pixelSize: 12
+                        }
+                        MouseArea {
+                                // A clickable place has to say so under the pointer, and taking the press also
+                                // drops the caret out of whichever field still holds it.
+                                cursorShape: Qt.PointingHandCursor
+                                onPressed: forceActiveFocus()   // takes the caret out of any field
+                            id: optHover
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onClicked: { if (dropList.field) dropList.field.choose(modelData.value); root.openField = null }
+                        }
                     }
                 }
             }
+        }
+    }
+
+    Connections {
+        // The other "this one": a page arriving is not a click, but the hero is already showing its
+        // first card. callLater because `hero` is assigned by the swap machinery a beat after the rows
+        // land - read in the handler itself it is still the previous page's card.
+        target: Bridge
+        function onOnlineChanged() {
+            Qt.callLater(function () { root.askHeroFull(root.hero ? root.hero.id : "") })
         }
     }
 
@@ -3745,6 +4131,17 @@ ApplicationWindow {
             enabled: choice.enabled
             onClicked: root.openField = root.openField === choice ? null : choice
         }
+    }
+
+    // The online filter row sits directly on the picture - its own dark band was taken away on purpose
+    // so the wallpaper reaches the tabs - and a light grey label over bright sky simply is not there
+    // (分辨率下限 and 内容分级 vanished against the snow in the screenshot he sent round). The outline is
+    // on the glyphs, so the same words read on white snow and on black rock and nothing is painted
+    // back over the picture.
+    component ScrimText: Text {
+        style: Text.Outline
+        styleColor: "#B0000000"
+        font.family: root.fontFamily
     }
 
     component SectionTitle: Text {
