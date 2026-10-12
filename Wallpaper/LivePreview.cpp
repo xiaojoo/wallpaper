@@ -2,6 +2,7 @@
 #include "Wallpaper/LivePreview.hpp"
 
 #include <QDateTime>
+#include <QDebug>
 #include <QPainter>
 
 #include <algorithm>
@@ -80,7 +81,20 @@ void LivePreview::poll() {
     // Only the header is looked at first: pulling the same frame again would copy 0.9 MB and
     // repaint the item for nothing, and the 15 ms poll would then report 66 "frames" a second.
     if (reader_.frames() == lastSeq_) return;
-    if (!reader_.Newest(frame_.bits(), size_t(frame_.sizeInBytes()), rw, rh, seq, stamp, &hash)) return;
+    // ---- 临时探针：这一帧从共享段拷进 QImage 用了多久 ----
+    static const LARGE_INTEGER pf = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f; }();
+    LARGE_INTEGER t0{};
+    QueryPerformanceCounter(&t0);
+    const bool copied = reader_.Newest(frame_.bits(), size_t(frame_.sizeInBytes()), rw, rh, seq, stamp, &hash);
+    LARGE_INTEGER t1{};
+    QueryPerformanceCounter(&t1);
+    if (!copied) return;
+    {
+        const double ms = double(t1.QuadPart - t0.QuadPart) * 1000.0 / double(pf.QuadPart);
+        readSum_ += ms;
+        ++probeReads_;
+        if (ms > readMax_) readMax_ = ms;
+    }
     if (rw != w || rh != h) return;
     lastSeq_ = seq;
     frameHash_ = hash;
@@ -138,8 +152,28 @@ void LivePreview::paint(QPainter* painter) {
     // Source, not SourceOver: this item is opaque, and blending would let the dark card behind it
     // show through the semi-transparent snow edges.
     painter->setCompositionMode(QPainter::CompositionMode_Source);
+    // ---- 临时探针：把这一帧缩放到屏上那块框的光栅耗时（QQuickPaintedItem 是在 CPU 上画的）----
+    static const LARGE_INTEGER pf = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f; }();
+    LARGE_INTEGER t0{};
+    QueryPerformanceCounter(&t0);
     painter->drawImage(target, frame_);
+    LARGE_INTEGER t1{};
+    QueryPerformanceCounter(&t1);
     painter->setCompositionMode(QPainter::CompositionMode_SourceOver);
+    {
+        const double ms = double(t1.QuadPart - t0.QuadPart) * 1000.0 / double(pf.QuadPart);
+        paintSum_ += ms;
+        if (ms > paintMax_) paintMax_ = ms;
+        if (++probeFrames_ >= 100) {
+            qWarning("preview probe: read %5.2f ms avg (max %5.2f) over %d copies | paint %5.2f ms avg "
+                     "(max %5.2f) over %d frames | source %dx%d item %dx%d scale %.2f",
+                     readSum_ / double(probeReads_ ? probeReads_ : 1), readMax_, probeReads_,
+                     paintSum_ / double(probeFrames_), paintMax_, probeFrames_,
+                     frame_.width(), frame_.height(), int(width()), int(height()), s);
+            readSum_ = paintSum_ = readMax_ = paintMax_ = 0;
+            probeReads_ = probeFrames_ = 0;
+        }
+    }
 }
 
 } // namespace sw

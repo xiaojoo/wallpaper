@@ -15,8 +15,15 @@
 namespace sw {
 
 constexpr UINT32 kPreviewMagic = 0x56535057;   // 'WPSV'
-constexpr UINT32 kPreviewVersion = 2;   // 2: the header says which wallpaper the frame is
-constexpr UINT32 kPreviewMaxW = 1280, kPreviewMaxH = 720;
+constexpr UINT32 kPreviewVersion = 4;   // 2: the header says which wallpaper the frame is
+                                        // 3: the ceiling moved to 1920x1080 (see kPreviewMaxW)
+                                        // 4: 方案 1 的实测构型，见下
+constexpr UINT32 kPreviewMaxW = 3840, kPreviewMaxH = 2160;
+// Was 1280x720 since the pass existed. That is smaller than the settings window when it is maximised
+// on this 3840-wide screen, so a photo's hero came out softer than the file already on disk - which
+// is what he reported on 2026-10-12. The price is the per-frame copy: 3.7 MB -> 8.3 MB, so a 30 fps
+// pass moves 111 MB/s -> 249 MB/s. Going as far as the window (3840x2160) would be 995 MB/s, which
+// is why the still-image case reads the file instead of this stream.
 inline constexpr wchar_t kPreviewMapName[] = L"Local\\SmartWallpaper.Preview";
 inline constexpr size_t kPreviewHeaderBytes = 64;
 inline constexpr size_t kPreviewBytes = kPreviewHeaderBytes + size_t(kPreviewMaxW) * kPreviewMaxH * 4;

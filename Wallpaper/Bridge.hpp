@@ -1,9 +1,12 @@
 #pragma once
 // Wallpaper/Bridge.hpp - the settings window's view of the renderer, over the control pipe.
 #include "Engine/Core/Json.hpp"
+#include "Online/OnlineFetcher.hpp"
 
+#include <QHash>
 #include <QObject>
 #include <QVariantList>
+#include <QVariantMap>
 #include <QString>
 
 namespace sw {
@@ -123,6 +126,48 @@ class Bridge final : public QObject {
     Q_PROPERTY(QString lastMessage READ lastMessage NOTIFY messageChanged)
     Q_PROPERTY(bool lastMessageIsError READ lastMessageIsError NOTIFY messageChanged)
 
+    // ------------------------------------------------------------------ 在线源
+    // A wallpaper site described by a file in `sources`, not by code compiled in here. Every network
+    // call is asynchronous on this thread's event loop: the settings window answering is the thing
+    // the no-renderer stall was about, and a blocked GUI thread reads as the whole app being slow.
+    // Importing is the only part that needs the renderer, because the renderer owns the library.
+    Q_PROPERTY(QVariantList onlineSourceItems READ onlineSourceItems NOTIFY onlineChanged)
+    Q_PROPERTY(QString onlineSource READ onlineSource WRITE setOnlineSource NOTIFY onlineChanged)
+    Q_PROPERTY(QString onlineSite READ onlineSite NOTIFY onlineChanged)
+    Q_PROPERTY(QString onlineQuery READ onlineQuery WRITE setOnlineQuery NOTIFY onlineChanged)
+    Q_PROPERTY(QVariantList onlineOptions READ onlineOptions NOTIFY onlineChanged)
+    Q_PROPERTY(QVariantList onlineRows READ onlineRows NOTIFY onlineChanged)
+    Q_PROPERTY(bool onlineBusy READ onlineBusy NOTIFY onlineChanged)
+    Q_PROPERTY(QString onlineError READ onlineError NOTIFY onlineChanged)
+    Q_PROPERTY(int onlinePage READ onlinePage NOTIFY onlineChanged)
+    Q_PROPERTY(int onlineLastPage READ onlineLastPage NOTIFY onlineChanged)
+    Q_PROPERTY(qint64 onlineTotal READ onlineTotal NOTIFY onlineChanged)
+    // The one import in flight, kept out of the row list on purpose. A progress tick written into a
+    // row would change the model and rebuild all 24 tiles, and every one of them would re-decode its
+    // picture - which reads as the grid blinking while a single card is being fetched.
+    Q_PROPERTY(QString onlinePendingKey READ onlinePendingKey NOTIFY onlineProgressChanged)
+    Q_PROPERTY(QString onlinePendingState READ onlinePendingState NOTIFY onlineProgressChanged)
+    Q_PROPERTY(QString onlinePendingDetail READ onlinePendingDetail NOTIFY onlineProgressChanged)
+    Q_PROPERTY(double onlineProgress READ onlineProgress NOTIFY onlineProgressChanged)
+    // The shortest gap this site is asked twice for, straight out of its description: the page quotes
+    // it next to the site's own published budget, so the number on screen is the one in force.
+    Q_PROPERTY(int onlineIntervalMs READ onlineIntervalMs NOTIFY onlineChanged)
+    // False when the site has no text query its own robots rules let a program use. The page hides the
+    // search box on this rather than greying it: a dead box promises a thing that will never answer.
+    Q_PROPERTY(bool onlineAsk READ onlineAsk NOTIFY onlineChanged)
+    // The full-size file for the picture the hero is showing, as a url QML can point an Image at, and
+    // empty while there is not one yet. Its own NOTIFY because it is not part of the row list: writing
+    // it into a row would rebuild all 24 tiles for the one card that just got sharper.
+    Q_PROPERTY(QString onlineHeroFile READ onlineHeroFile NOTIFY onlineHeroFileChanged)
+    // Which card that file belongs to, so the hero can refuse to paint another card's picture.
+    Q_PROPERTY(QString onlineHeroKey READ onlineHeroKey NOTIFY onlineHeroFileChanged)
+    // And how that fetch is going: queued, fetching, retrying, ready, failed, none. A silent failure
+    // is the expensive kind - the caption kept claiming 3840 x 2160 while the hero painted the site's
+    // 1920 file, which is 0.36 of its high-pass energy at that box and reads as "还是没原图清楚".
+    Q_PROPERTY(QString onlineHeroState READ onlineHeroState NOTIFY onlineHeroStateChanged)
+    // Only the code (429, closed) - the whole sentence goes to the log.
+    Q_PROPERTY(QString onlineHeroError READ onlineHeroError NOTIFY onlineHeroStateChanged)
+
 public:
     explicit Bridge(QObject* parent = nullptr);
     ~Bridge() override;
@@ -221,6 +266,30 @@ public:
     QString lastMessage() const { return lastMessage_; }
     bool lastMessageIsError() const { return lastIsError_; }
 
+    QVariantList onlineSourceItems() const { return onlineSourceItems_; }
+    QString onlineSource() const { return onlineSource_; }
+    QString onlineSite() const { return onlineSite_; }
+    QString onlineQuery() const { return onlineQuery_; }
+    QVariantList onlineOptions() const { return onlineOptions_; }
+    QVariantList onlineRows() const { return onlineRows_; }
+    bool onlineBusy() const { return onlineBusy_; }
+    QString onlineError() const { return onlineError_; }
+    int onlinePage() const { return onlinePage_; }
+    int onlineLastPage() const { return onlineLastPage_; }
+    qint64 onlineTotal() const { return onlineTotal_; }
+    int onlineIntervalMs() const { return onlineIntervalMs_; }
+    bool onlineAsk() const { return onlineAsk_; }
+    QString onlinePendingKey() const { return pendingKey_; }
+    QString onlinePendingState() const { return pendingState_; }
+    QString onlinePendingDetail() const { return pendingDetail_; }
+    double onlineProgress() const { return progress_; }
+    QString onlineHeroFile() const { return heroFile_; }
+    QString onlineHeroKey() const { return heroKey_; }
+    QString onlineHeroState() const { return heroState_; }
+    QString onlineHeroError() const { return heroError_; }
+    void setOnlineSource(const QString& name);
+    void setOnlineQuery(const QString& q) { onlineQuery_ = q; }
+
     void setTargetMonitor(const QString& tag);
     void setLang(const QString& code);
 
@@ -295,8 +364,28 @@ public:
     Q_INVOKABLE void openLogFolder();
     Q_INVOKABLE QString arg(const QString& name) const;
 
+    // The online page. `search` is the current query at the current page with the current option
+    // values; `import` fetches the original file and hands it to the renderer's own import command,
+    // so an online picture becomes a package exactly the way one picked from disk does.
+    Q_INVOKABLE void onlineSearch();
+    Q_INVOKABLE void onlinePageStep(int delta);
+    Q_INVOKABLE void onlineSetOption(const QString& key, const QString& value);
+    Q_INVOKABLE void onlineImport(int index);
+    // Bring the full-size file in for the picture the hero is showing. Every local card reaches the
+    // hero as a 1280x720 `*_large.png`; a remote one had only the site's 432x243 preview, which in a
+    // 1360 px box is a 3.1x upscale. Only a deliberate selection asks - the 4 s rotation does not.
+    Q_INVOKABLE void onlineHeroPreview(int index);
+    // The caption's 重试: the backoff gave up on this card, and he is asking for another round.
+    Q_INVOKABLE void onlineHeroRetry();
+    // MB with the unit named, for a card that has to say how big the file is before it is taken.
+    Q_INVOKABLE QString onlineSize(int bytes) const;
+
 signals:
     void stateChanged();
+    void onlineChanged();
+    void onlineProgressChanged();
+    void onlineHeroFileChanged();
+    void onlineHeroStateChanged();
     void langChanged();
     void targetChanged();
     void messageChanged();
@@ -316,6 +405,30 @@ private:
     bool launchRenderer(bool announce);
     void engineDied();
     bool engineStoppedItself() const;
+    void loadOnlineSources();
+    void rebuildOnlineOptions();
+    QString onlineCacheDir() const;
+    // Where a row's original file lives on this disk: the hero preview and 入库 name it the same way,
+    // so the picture he looked at first is the file the import then registers.
+    QString onlineDest(const QVariantMap& row);
+    // The hero's original, in three parts: find the card by its key (the rows shift under a page
+    // change, an index does not survive it), then the one state transition every caller reports.
+    void requestHero(const QString& key);
+    void setHeroState(const QString& state);
+    // "429" / "closed" - what fits in the caption. The full sentence goes to the log.
+    static QString heroErrorOf(const QString& error);
+    // The renderer's answer to addimage is "queued", so the package this window is waiting for has to
+    // be recognised by what it carries - the origin page - and not by a guess at the next id.
+    void importDownloaded(int index, const QString& key, const QString& path, const QString& page);
+    void setPending(const QString& key, const QString& state, const QString& detail);
+    void markOnlineRow(int index, const QString& state, const QString& detail);
+    // delimage answers `busy` while something still holds the file this window just wrote; the retry
+    // rides the event loop instead of freezing this thread.
+    void deleteImageTry(const QString& id, int attempt);
+    bool catalogHasId(const QString& id) const;
+    // A package's origin, read back out of the catalog: the id of the local package that came from
+    // this page, empty when nothing did.
+    QString libraryIdFor(const QString& origin) const;
 public:
     void setSelectAtStart(const QString& id) { selectAtStart_ = id; }
     void setSettingsAtStart(bool on) { settingsAtStart_ = on; }
@@ -405,6 +518,37 @@ private:
     qint64 previewBeatMs_ = 0;   // wall clock of the last heartbeat; see Bridge::previewBeat
     // The preview player's own transport state, read back from the engine rather than remembered.
     bool previewPaused_ = false;
+
+    // ------------------------------------------------------------------ 在线源
+    OnlineFetcher online_;
+    QVariantList onlineRows_, onlineSourceItems_, onlineOptions_;
+    QString onlineSource_, onlineQuery_, onlineError_, onlineSite_;
+    int onlinePage_ = 1, onlineLastPage_ = 1;
+    qint64 onlineTotal_ = 0;
+    int onlineIntervalMs_ = 0;
+    bool onlineAsk_ = true;
+    bool onlineBusy_ = false;
+    // Every page already in the library, read out of the catalog on each poll: the site's page is the
+    // key, because that is what the imported package itself carries.
+    QHash<QString, QString> originIds_;
+    // The card whose package has not appeared in the catalog yet: its index, the origin it was
+    // imported under, and the moment waiting stops being believable. -1 when nothing is waiting.
+    int importRow_ = -1;
+    QString importOrigin_;
+    qint64 importAtMs_ = 0;
+    // The download/import the page is showing on a tile, by the site's own key so it survives a new
+    // search replacing the grid underneath it.
+    QString pendingKey_, pendingState_, pendingDetail_;
+    double progress_ = 0.0;
+    // The hero's own download: which card it is for, and the file once it is on disk. Kept apart from
+    // the pending import because the hero moves without being pressed, and a card he never clicked
+    // must not start showing 下载中 on its button.
+    QString heroKey_, heroFile_, heroState_, heroError_;
+    // The card whose file is on its way right now, and when the last one started: the site answers 429
+    // to a run of 1-4 MB originals, so this side keeps its own interval as well as the search's.
+    QString heroInFlight_;
+    qint64 heroStartMs_ = 0;
+    int heroTries_ = 0;
 
     quintptr chromeHwnd_ = 0;   // the settings window, for showCommand
 };
