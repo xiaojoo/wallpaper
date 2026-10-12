@@ -1689,7 +1689,7 @@ void Bridge::requestHero(const QString& key) {
             if (heroTries_ < kHeroRetries) {
                 ++heroTries_;
                 setHeroState("retrying");
-                QTimer::singleShot(int(kHeroBackoffMs * (1 << heroTries_)), this, [this, key] {
+                QTimer::singleShot(int(kHeroBackoffMs << heroTries_), this, [this, key] {
                     if (key == heroKey_) requestHero(key);
                 });
             } else {
@@ -1715,8 +1715,6 @@ void Bridge::requestHero(const QString& key) {
 void Bridge::setHeroState(const QString& state) {
     if (heroState_ == state) return;
     heroState_ = state;
-    // ---- 临时探针（2026-10-12）：每个状态的时刻，用来量"正在取原图"这一态在界面上停留多久 ----
-    qWarning("hero state %s at %lld", state.toUtf8().constData(), QDateTime::currentMSecsSinceEpoch());
     emit onlineHeroStateChanged();
 }
 

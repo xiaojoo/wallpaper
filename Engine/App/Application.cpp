@@ -1533,23 +1533,6 @@ void Application::UpdateSnapshot() {
         pv.set("drew", Json::Of((long long)preview_.drew));
         pv.set("dropped", Json::Of((long long)preview_.dropped));
         pv.set("shm_frames", Json::Of((long long)preview_.writer.frames()));
-        // ---- 临时探针（方案 1 代价实测）：每帧回读的分布 + 这一帧到底有多大 ----
-        {
-            std::vector<double> win;
-            const unsigned n = std::min(preview_.copyIdx, Preview::kCopyWin);
-            win.reserve(n);
-            for (unsigned i = 0; i < n; ++i) win.push_back(preview_.copyWin[i]);
-            std::sort(win.begin(), win.end());
-            if (!win.empty()) {
-                pv.set("copy_ms_p50", Json::Of(win[n / 2]));
-                pv.set("copy_ms_p95", Json::Of(win[(n * 95) / 100]));
-            }
-            pv.set("copy_ms_max", Json::Of(preview_.copyMaxMs));
-            pv.set("copy_ms_mean", Json::Of(preview_.copyIdx ? preview_.copySumMs / double(preview_.copyIdx)
-                                                             : 0.0));
-            pv.set("copy_n", Json::Of((long long)preview_.copyIdx));
-            pv.set("frame_mb", Json::Of(double(preview_.w) * double(preview_.h) * 4.0 / 1048576.0));
-        }
         r.set("preview", std::move(pv));
     }
     r.set("uptime_s", Json::Of(double(GetTickCount64() - startedMs_) / 1000.0));
@@ -1999,10 +1982,6 @@ void Application::DrawPreview(double nowSeconds) {
         const HRESULT hr = dev_.ctx->GetData(p.q[i].Get(), &done, sizeof(done), 0);
         if (FAILED(hr) || !done) continue;
         D3D11_MAPPED_SUBRESOURCE mp{};
-        // ---- 临时探针：一次回读的真实毫秒（Map 会等 GPU，所以这段不是纯 memcpy）----
-        static const LARGE_INTEGER pf = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f; }();
-        LARGE_INTEGER t0{};
-        QueryPerformanceCounter(&t0);
         if (SUCCEEDED(dev_.ctx->Map(p.stg[i].Get(), 0, D3D11_MAP_READ, 0, &mp))) {
             // The slot's own hash, not p.idHash: this frame was rendered by whichever instance was
             // current when the copy was issued, which after a switch is the wallpaper the reader is
@@ -2011,15 +1990,6 @@ void Application::DrawPreview(double nowSeconds) {
                            p.slotHash[i]);
             if (p.slotHash[i] != p.idHash) ++p.draining;
             dev_.ctx->Unmap(p.stg[i].Get(), 0);
-        }
-        LARGE_INTEGER t1{};
-        QueryPerformanceCounter(&t1);
-        {
-            const double ms = double(t1.QuadPart - t0.QuadPart) * 1000.0 / double(pf.QuadPart);
-            p.copyWin[p.copyIdx % Preview::kCopyWin] = ms;
-            ++p.copyIdx;
-            p.copySumMs += ms;
-            if (ms > p.copyMaxMs) p.copyMaxMs = ms;
         }
         p.slotState[i] = Preview::Free;
         freeSlot = i;

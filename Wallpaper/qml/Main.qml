@@ -406,8 +406,14 @@ ApplicationWindow {
     property bool liveHeld: false
     property string liveHeldFor: ""
     readonly property bool heroLive: liveFed && (liveView.matching || liveHeld)
+    // The saved strip is 1280x720 whatever the package was imported at, so for a still photo the
+    // frames have nothing to show that its own file does not show better: measured on 2026-10-12,
+    // a 3840-wide hero playing those frames carries 0.21 of the original file's high-pass energy
+    // (37% of its pixels differ by more than 8 codes). The strip stays the navigator under the hero;
+    // it just stops covering the picture it is navigating. Packages with no file on disk (a shader,
+    // a clip) keep playing frames exactly as before.
     readonly property bool heroMotion: !liveFed && previewMotion && motionWanted && hero !== null
-                                       && framesOf(hero).length > 1
+                                       && framesOf(hero).length > 1 && !heroIsStill
 
     readonly property var settingsTabs: [
         { key: "general", icon: "gear", label: "tab_general" },

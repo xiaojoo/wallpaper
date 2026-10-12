@@ -156,13 +156,6 @@ private:
         ULONGLONG reportAtMs = 0;
         double reportedFps = 0;
         unsigned drew = 0, dropped = 0;
-        // ---- 临时探针（2026-10-12，方案 1 的代价实测），交完数字就删 ----
-        // 每帧 Map->Write->Unmap 的毫秒数：这是把 GPU 上的画面搬到 CPU 侧的全部代价，
-        // 也是把流从 1920x1080 提到 3840x2160 时唯一会变大的那段。
-        static constexpr unsigned kCopyWin = 256;
-        double copyWin[kCopyWin] = { 0 };
-        unsigned copyIdx = 0;
-        double copySumMs = 0, copyMaxMs = 0;
         PreviewStream writer;
     };
 
