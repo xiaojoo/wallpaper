@@ -237,10 +237,20 @@ ApplicationWindow {
     property bool snapBusy: false
     function heroIdOf(v) { return v && v.id !== undefined ? v.id : "" }
     function heroOutItem() {
-        // Whichever layer really is the picture on screen right now - that is the frame to keep.
-        if (heroLive) return liveView
-        if (heroMotion) return frameStack
-        return heroImg
+        // The whole picture stack, not whichever layer happens to be up.
+        //  - The stack's rect IS the box (`heroContent` is anchors.fill over `heroBox`), so the capture
+        //    carries the box's own aspect and `heroSnap` paints it 1:1 at any window size. Grabbing a
+        //    picture layer instead hands over that layer's rect, and for heroBig that is the picture's
+        //    crop rect - 1529x860 here, 3840x2160 maximised, both 1.7778 - which PreserveAspectCrop
+        //    then trims back to the box: horizontally at 1360x860 (box 1.5814) and vertically at
+        //    3840x2112 (box 1.8182). The axis of the step is the axis of that trim, which is exactly
+        //    the "小屏横向移动、大屏纵向移动" he reported on 2026-10-13 - it flips with the window
+        //    because the box's aspect crosses the picture's aspect between the two sizes.
+        //  - It also cannot pick the wrong layer, which is how the 400x225 stand-in got captured over
+        //    the sharp original (edge energy 0.732 against the screen's 1.796).
+        // The overlays are siblings of this Item inside heroBox, so they are not in what gets grabbed,
+        // and a hidden layer contributes nothing to the composite.
+        return heroContent
     }
     function heroFxStop() {
         heroOutFade.stop()
@@ -364,9 +374,23 @@ ApplicationWindow {
         snapBusy = true
         heroSnapWatch.start()
         const it = heroOutItem()
-        // Half size: the grab is a 250 ms dissolve of the same picture, and encoding 1360x860 measured
-        // 300-350 ms on the particle wallpapers (long enough that the old picture visibly holds), while
-        // 680x430 costs a quarter of the bytes.
+        // The capture has to carry the detail it is about to replace. Measured from his own recording
+        // on 2026-10-13: the 680x430 this used to ask for holds 1.154 of edge energy against the
+        // 4.418 on screen at that moment - a 74% loss - so the picture visibly defocused in the single
+        // frame it took to raise the overlay. That is the "点下去的瞬间立刻" he pointed at, and it is
+        // why no geometry measurement could find it: the capture is aligned (scale 1.000, dx 0, dy 0),
+        // it is just soft.
+        // Grabbing at the box's own width is not more expensive, because the wait is the async render
+        // round trip and not the encoder: 5-17 ms at 1360x860 against 5-19 ms at 680x430 (median 7.5
+        // against 11). The cap exists only for the maximised window, where the full 3840x2112 measures
+        // 21-44 ms; 1920 wide brings that back to 7-18 ms and is still 2.8x finer than the old number.
+        // The height is derived, never a constant: a capture whose aspect differs from the box's gets
+        // cropped by PreserveAspectCrop, which at 3840x2112 against 680x430 cost 158.1 px off the top
+        // and bottom of the frame - a 1.15x zoom step at the press, invisible at 1360x860 because that
+        // box's aspect happens to equal 680/430, which is where every measurement before today sat.
+        const gw = Math.max(1, Math.min(1920, Math.round(it ? it.width : 680)))
+        const gh = it && it.width > 0 && it.height > 0
+                   ? Math.max(1, Math.round(gw * it.height / it.width)) : 430
         if (!it || !it.grabToImage(function (res) {
                 snapBusy = false
                 heroSnapWatch.stop()
@@ -374,7 +398,7 @@ ApplicationWindow {
                 const u = root.snapUrlFor(snapFlip)
                 snapUrl = res.saveToFile(u) ? u : ""
                 commitHeroSwap()
-            }, Qt.size(680, 430))) {
+            }, Qt.size(gw, gh))) {
             snapBusy = false
             heroSnapWatch.stop()
             snapUrl = ""
@@ -401,9 +425,14 @@ ApplicationWindow {
     // the stream is a fixed 1920x1080 grab, the file is the resolution the package was imported at.
     // So the hero reads the file and the pass is not asked for - which also stops the window paying
     // 249 MB/s of frame copies to redraw a picture that is not moving.
-    readonly property bool heroIsStill: hero !== null && hero.online !== true
-                                        && hero.type === "image"
-                                        && hero.file !== undefined && hero.file.length > 0
+    // An online card is the same case for a different reason: the engine has no second pass of a
+    // picture that is not in its library, so whatever the live layer paints over an online card is the
+    // *previous* wallpaper. That is not a stand-in for the new one, it is a foreign picture, and the
+    // switch spent 303 ms of its 330 ms grace showing it under a caption that already named the new
+    // card (logged 2026-10-13, heroLive true from t+29 to t+332 of a wallhaven switch).
+    readonly property bool heroIsStill: hero !== null && hero.type === "image"
+                                        && (hero.online === true
+                                            || (hero.file !== undefined && hero.file.length > 0))
     // The feed is alive as long as frames keep arriving, even if the newest one still belongs to
     // the wallpaper just left: gating on that would tear down and rebuild the 24 strip images on
     // every switch. When the renderer dies the feed goes stale, running falls to false, and the
@@ -444,6 +473,7 @@ ApplicationWindow {
     // a clip) keep playing frames exactly as before.
     readonly property bool heroMotion: !liveFed && previewMotion && motionWanted && hero !== null
                                        && framesOf(hero).length > 1 && !heroIsStill
+
 
     readonly property var settingsTabs: [
         { key: "general", icon: "gear", label: "tab_general" },
@@ -902,9 +932,33 @@ ApplicationWindow {
                         // The full-size picture, painted only once its own bytes are on hand.
                         Image {
                             id: heroBig
-                            anchors.fill: parent
-                            anchors.margins: 0
-                            fillMode: Image.PreserveAspectCrop
+                            // NOT anchors.fill: the engine's 铺展 rule (Image.hlsl: 拉伸 is win=(1,1),
+                            // the whole picture distorted to the screen) maps a file differently from
+                            // PreserveAspectCrop, so painting into the box moved the picture by
+                            // 84.5 px across and 23.5 px down (logged 2026-10-13: img painted
+                            // 1529x860, big 1360x907) - the "切换时壁纸会移动" he kept seeing, which no
+                            // transition curve can hide. The picture has to be painted into the same
+                            // framing the screen gets, and mapped the way the shader maps it for the
+                            // current 铺展 mode. 居中/平铺 are measured in picture pixels, so a rect
+                            // cannot reproduce them; they keep the crop.
+                            anchors.centerIn: parent
+                            // That framing is the MONITOR's rect, so its aspect is the monitor's -
+                            // not the preview's painted size. 拉伸 and 适应 distort relative to
+                            // whatever rect the picture lands in, and taking the size from
+                            // heroImg.paintedWidth made that rect the preview's own aspect: measured
+                            // 2026-10-14 on one online card, the settled picture sat at
+                            // sx=0.9984 / sy=1.0188 against the preview under it, 2.04 % of
+                            // anisotropy = preview-aspect over picture-aspect, which is the 两边伸张
+                            // he reported as still being on screen after the reveal. With a 16:9
+                            // preview both formulas give the same rect, so nothing already accepted
+                            // changes shape; only cards whose site preview is cropped to another
+                            // aspect move.
+                            readonly property real frameAspect: Screen.width / Screen.height
+                            width:  Math.max(heroBox.width, heroBox.height * frameAspect)
+                            height: Math.max(heroBox.height, heroBox.width / frameAspect)
+                            fillMode: Bridge.imageFit === "stretch" ? Image.Stretch
+                                      : Bridge.imageFit === "fit"    ? Image.PreserveAspectFit
+                                      : Image.PreserveAspectCrop
                             asynchronous: true
                             // Two cases where the box should be filled from a real file rather than from
                             // a small stand-in:
@@ -954,7 +1008,7 @@ ApplicationWindow {
                             // disabled the picture stayed on card 0 for 75 s). The screen's long edge
                             // is one number per run and cannot move under the binding.
                             readonly property real capPx: Math.max(Screen.width, Screen.height)
-                                                          * Screen.devicePixelRatio
+                                                        * Screen.devicePixelRatio
                             sourceSize: {
                                 const iw = bigSize.width, ih = bigSize.height
                                 if (!fullUp && !stillFile) return Qt.size(0, 0)
@@ -963,6 +1017,77 @@ ApplicationWindow {
                                 return iw >= ih ? Qt.size(Math.round(capPx), Math.round(capPx * ih / iw))
                                                 : Qt.size(Math.round(capPx * iw / ih), Math.round(capPx))
                             }
+                            // The cover underneath carries 0.24-0.74 of this file's edge detail - on
+                            // three cached originals: 3.038 against 1.388, 3.394 against 0.819, 2.072
+                            // Against 1.538 (measured 2026-10-13, both rendered 1529 px wide). So
+                            // raising the original over the cover multiplies the structure on screen
+                            // by 1.35-4.1x in a single frame, and that step is what he still sees on
+                            // the online cards: the geometry is aligned (his own two frames correlate
+                            // at dx=0 dy=0, peak/noise 1460), the detail arrives all at once.
+                            // An opacity fade does not fix that - 200 ms and 3 s were both still
+                            // reported as movement. What fixes it is heroDevelop below.
+                            onVisibleChanged: if (visible) heroDevelopRun.start()
+                        }
+
+                        // The sharpness reveal: the original is drawn blurred and sharpened through a
+                        // mask that sweeps 0 -> 1, cell by cell. The eye gets a moving pattern to
+                        // attribute the change to, so the detail arriving reads as the photograph
+                        // developing rather than as the photograph moving.
+                        // One texture, not the two picture layers: compositing preview against
+                        // original moves the picture while it reveals it, which is measured and
+                        // explained in shaders/HeroDevelop.frag.
+                        ShaderEffectSource {
+                            id: heroSharpSrc
+                            sourceItem: heroBig
+                            live: true
+                            visible: false
+                            // heroBig's own rect is the picture's crop rect - wider than the box at
+                            // this window shape (1529x860 against 1360x860), taller than it when
+                            // maximised (3840x2160 against 3840x2112). Sampling the whole of it into
+                            // a box-sized ShaderEffect squeezed the sharp picture sideways by
+                            // 1529/1360 = 1.124 while the soft texture stayed 1:1, so the sweep ended
+                            // with the picture springing outward - the "两边伸张" he pointed at.
+                            // Take the same middle the screen actually shows instead.
+                            readonly property real ox: Math.max(0, (heroBig.width - heroBox.width) / 2)
+                            readonly property real oy: Math.max(0, (heroBig.height - heroBox.height) / 2)
+                            sourceRect: Qt.rect(ox, oy,
+                                                 Math.min(heroBig.width, heroBox.width),
+                                                 Math.min(heroBig.height, heroBox.height))
+                        }
+                        // The property order here is the uniform block's order in
+                        // shaders/HeroDevelop.frag - it is not free. Qt
+                        // binds uniforms by name, so each shader picks the subset it declares and
+                        // ignores the rest.
+                        ShaderEffect {
+                            id: heroDevelop
+                            anchors.fill: parent
+                            // Not before the texture holds something: a half-built source would
+                            // paint the box's base colour for a frame, which is the 闪 he reported
+                            // on 2026-10-12.
+                            visible: heroDevelopRun.running
+                                     && heroSharpSrc.status === ShaderEffectSource.Ready
+                            property variant sharpTex: heroSharpSrc
+                            property real prog: 0
+                            // ~3 px cells at any window size (HeroDevelop).
+                            property real gridX: heroBox.width / 3
+                            property real gridY: heroBox.height / 3
+                            // Where the sweep starts. 7 px is the softness of the site's own preview
+                            // at this box - its edge detail measures 0.68 of the original's, and the
+                            // first frame of the new sweep has to read the same or the hand-over from
+                            // the preview layer underneath is itself a step.
+                            property real blurPx: 7
+                            property real blurX: blurPx / heroBox.width
+                            property real blurY: blurPx / heroBox.height
+                            fragmentShader: "HeroDevelop.frag.qsb"
+                        }
+                        NumberAnimation {
+                            id: heroDevelopRun
+                            target: heroDevelop
+                            property: "prog"
+                            from: 0
+                            to: 1
+                            duration: 1000
+                            easing.type: Easing.InOutSine
                         }
 
                         // Every frame of the strip is loaded once and kept, so playing it back is a
