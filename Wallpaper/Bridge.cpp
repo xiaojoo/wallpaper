@@ -1645,7 +1645,19 @@ void Bridge::onlineHeroPreview(int index) {
     // caption. QML compares the two and falls back to the site's preview when they differ.
     const QString key = (index >= 0 && index < onlineRows_.size())
                             ? onlineRows_[index].toMap().value("key").toString() : QString();
+    const bool sameKey = (key == heroKey_);
     heroKey_ = key;
+    // Re-asking for the card that is already up must not tear its picture down. `hero` is reassigned
+    // with the *same* id about once a second, when Bridge::tick re-reads the renderer's status (the QML
+    // note above `liveGraceMs` documents that), and this function used to clear `heroFile_`
+    // unconditionally: the Image's `source` went to "" and Qt drops the frame an asynchronous Image is
+    // holding when its source changes, so the sharp original vanished, the on-disk fast path below
+    // handed the very same URL back a moment later, and the 1-4 MB jpeg decoded again. Measured
+    // 2026-10-13 sitting on one card without touching anything: that layer went Ready -> Null -> Ready
+    // at t+15.0 s and again at t+25.4 s, each time falling back to the site's 400x225 preview for
+    // ~400 ms. That is the "在线壁纸还在动" he still reports - a sharp/soft pump on a timer, not a
+    // movement, and it is why it looked per-card: it only happens once the file is on disk.
+    if (sameKey && !heroFile_.isEmpty()) return;
     heroFile_.clear();
     heroError_.clear();
     heroTries_ = 0;

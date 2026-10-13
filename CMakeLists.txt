@@ -152,7 +152,7 @@ if(Qt6_FOUND)
   # is loaded from disk on purpose (see main.cpp).
   qt_add_shaders(Wallpaper "wallpaper_qml_shaders"
     PREFIX "/shaders"
-    FILES Wallpaper/shaders/HeroLiquid.frag
+    FILES Wallpaper/shaders/HeroLiquid.frag Wallpaper/shaders/HeroDevelop.frag
     OUTPUT_TARGETS wallpaper_shader_resources)
   add_custom_command(TARGET Wallpaper POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -164,6 +164,9 @@ if(Qt6_FOUND)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${CMAKE_BINARY_DIR}/.qsb/Wallpaper/shaders/HeroLiquid.frag.qsb"
       "$<TARGET_FILE_DIR:Wallpaper>/qml/HeroLiquid.frag.qsb"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_BINARY_DIR}/.qsb/Wallpaper/shaders/HeroDevelop.frag.qsb"
+      "$<TARGET_FILE_DIR:Wallpaper>/qml/HeroDevelop.frag.qsb"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${CMAKE_SOURCE_DIR}/resources/Wallpaper.ico" "$<TARGET_FILE_DIR:Wallpaper>/Wallpaper.ico"
     COMMENT "staging qml/, HeroLiquid.frag.qsb and Wallpaper.ico next to the settings window")
