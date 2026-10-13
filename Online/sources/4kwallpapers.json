@@ -8,7 +8,10 @@
     "The two /thumbs/ rules are read literally, which is what robots.txt means: a Disallow path is a prefix of the URL path.",
     "So '/thumbs/' covers https://site/thumbs/... and NOT https://site/images/walls/thumbs/... . The listing page itself puts",
     "/images/walls/thumbs/<id>.jpg in every visitor's <img src> - measured 2026-10-13: 200, 31 KB, image/jpeg, and thumbs_2t",
-    "is the site's own 800w pair at 99 KB. That small file is what a card asks for.",
+    "is the site's own 800w pair at 99 KB. The card reads that url off the listing rather than building",
+    "it: the extension is the wallpaper's own, not a constant - measured 2026-10-13 on /nature/, 23 of 24",
+    "thumbs are .jpg and 'Mountain Landscape Wallpaper' (26973) is .png, so a built .jpg name 404s that",
+    "one card forever while its neighbours load. The record's 4th group is that src.",
     "The pictures are at /images/wallpapers/<slug>-<WxH>-<id>.jpg, 35 sizes per wallpaper, and that url is buildable from",
     "the listing's own detail link - measured on 5/5 slugs, 3840x2160 came back 200 at 1.4-4.2 MB. No second request per card.",
     "No api: /wp-json/ is a 404 page and the html has no /api/, fetch(, __NEXT_DATA__ or application/json - hence 'record'.",
@@ -28,7 +31,7 @@
   "homepage": "https://4kwallpapers.com",
   "url": "https://4kwallpapers.com/{category}/",
   "ask": false,
-  "record": "<a title=\"([^\"]*)\"[^>]*?href=\"(/[^\"]*?-(\\d+)\\.html)\"",
+  "record": "<a title=\"([^\"]*)\"[^>]*?href=\"(/[^\"]*?-(\\d+)\\.html)\"[\\s\\S]{0,300}?<img[^>]*?src=\"(/images/walls/thumbs/[^\"]+)\"",
   "last_page": "[?&]page=(\\d+)",
   "params": {
     "page": "{nextpage}"
@@ -38,8 +41,9 @@
     "path": "$2",
     "title": "$1",
     "page": "{homepage}{path}",
-    "thumb": "{homepage}/images/walls/thumbs/{key}.jpg",
-    "image": "{homepage}/images/wallpapers/{slug}-{resolution}-{key}.jpg"
+    "thumb": "{homepage}{thumbSrc}",
+    "image": "{homepage}/images/wallpapers/{slug}-{resolution}-{key}.jpg",
+    "thumbSrc": "$4"
   },
   "slug_from": "{path}",
   "slug_basename": true,

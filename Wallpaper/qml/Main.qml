@@ -1897,6 +1897,10 @@ ApplicationWindow {
                                 readonly property var slide: modelData
                                 readonly property bool sel: src === strip.sel
                                 readonly property bool onscreen: strip.live(src)
+                                // 封面取不到时按一次要能真的再发一次请求：同一个 URL 赋回
+                                // Image.source 是不变的，Qt 不会重取，所以重试带一个递增的 ?r=。
+                                property int retry: 0
+                                readonly property bool picFailed: picImg.status === Image.Error
                                 width: strip.cardW(src)
                                 height: sel ? strip.bigH : strip.smallH
                                 x: strip.cardX(src)
@@ -1980,8 +1984,45 @@ ApplicationWindow {
                                             maskEnabled: true
                                             maskSource: picMask
                                         }
-                                        source: thumbCell.onscreen && thumbCell.slide.thumb !== undefined
-                                                ? thumbCell.slide.thumb : ""
+                                        source: {
+                                            if (!thumbCell.onscreen || thumbCell.slide.thumb === undefined) return ""
+                                            const u = String(thumbCell.slide.thumb)
+                                            if (thumbCell.retry === 0) return u
+                                            return u + (u.indexOf("?") < 0 ? "?" : "&") + "r=" + thumbCell.retry
+                                        }
+                                    }
+                                    // 没图的格子不能只是透明 - 那和"这张图本来就是这个颜色"读出来
+                                    // 一模一样（他 2026-10-13 点的就是这个）。所以底压一档、写上
+                                    // 缺什么、并把"再发一次"摆在面上。
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        visible: thumbCell.picFailed
+                                        color: Qt.alpha(th.bg, 0.72)
+                                        Column {
+                                            anchors.centerIn: parent
+                                            spacing: 3
+                                            Text {
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                text: trs("online_thumb_failed")
+                                                color: th.err
+                                                font.family: root.fontFamily; font.pixelSize: 11
+                                            }
+                                            Text {
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                text: trs("online_thumb_retry")
+                                                color: th.text
+                                                font.family: root.fontFamily; font.pixelSize: 11
+                                            }
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            // 一次按下同时做两件事：选中这一张，和再要一次封面。
+                                            // 看不见图的时候"看这张"和"重试"是同一次意图，拆成两处
+                                            // 就得先选中再找那颗小按钮。
+                                            onClicked: { strip.go(thumbCell.src); thumbCell.retry++ }
+                                        }
                                     }
                                 }
                                 // On top of the picture: the rim, its inner echo, the broken side lines

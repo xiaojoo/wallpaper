@@ -338,6 +338,10 @@ const Entry kStrings[] = {
     {"online_category", "分类", "Category"},
     {"online_hero_failed", "原图没取到，现在是站点预览", "original not fetched - this is the site preview"},
     {"online_hero_retry", "重试", "Retry"},
+    // The strip card's own failure line. It names what is missing (the cover, not the wallpaper) so
+    // it cannot be read as the 原图 message above it.
+    {"online_thumb_failed", "封面没取到", "Cover did not arrive"},
+    {"online_thumb_retry", "点此重试", "Click to retry"},
     {"online_sort", "排序", "Sort by"},
     {"online_purity", "内容分级", "Content rating"},
     {"opt_wallhaven_sort_relevance", "相关", "Relevance"},
