@@ -369,6 +369,8 @@ public:
     // so an online picture becomes a package exactly the way one picked from disk does.
     Q_INVOKABLE void onlineSearch();
     Q_INVOKABLE void onlinePageStep(int delta);
+    // 页码药丸条：跳到第 n 页。用步长凑（点 87 要按 86 下）不是实现。
+    Q_INVOKABLE void onlineGoTo(int page);
     Q_INVOKABLE void onlineSetOption(const QString& key, const QString& value);
     Q_INVOKABLE void onlineImport(int index);
     // Bring the full-size file in for the picture the hero is showing. Every local card reaches the
@@ -377,6 +379,12 @@ public:
     Q_INVOKABLE void onlineHeroPreview(int index);
     // The caption's 重试: the backoff gave up on this card, and he is asking for another round.
     Q_INVOKABLE void onlineHeroRetry();
+    // 用户自己接一个站：抓取语言就是内置源那一份 json，所以"通配"不需要新代码，只需要一个能
+    // 写文件的入口 + 一次重新加载。三个方法都只在设置窗这一侧，引擎仍然零网络。
+    Q_INVOKABLE QString onlineSourceTemplate() const;
+    // 返回空串=成功；否则是"为什么这份描述不能用"，原样显示在界面上。
+    Q_INVOKABLE QString onlineAddSource(const QString& text);
+    Q_INVOKABLE bool onlineRemoveSource(const QString& name);
     // MB with the unit named, for a card that has to say how big the file is before it is taken.
     Q_INVOKABLE QString onlineSize(int bytes) const;
 
@@ -408,6 +416,10 @@ private:
     void loadOnlineSources();
     void rebuildOnlineOptions();
     QString onlineCacheDir() const;
+    // <exe>/sources，两份内置源和用户填的那一份都在这。
+    QString sourcesDir() const;
+    // 重新读一遍目录，尽量把他还停在那个站这件事保住（loadOnlineSources 会跳回第一个）。
+    void reloadSources();
     // Where a row's original file lives on this disk: the hero preview and 入库 name it the same way,
     // so the picture he looked at first is the file the import then registers.
     QString onlineDest(const QVariantMap& row);

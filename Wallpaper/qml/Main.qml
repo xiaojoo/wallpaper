@@ -63,6 +63,36 @@ ApplicationWindow {
     readonly property var intervalChoices: [10, 30, 60, 360, 1440]
 
     property string category: ""           // "" means every category, "fav" the favourites tab
+    // 在线筛选抽屉开不开。不持久化：它属于"正在看哪一批图"这一屏，重启后应该是关着的。
+    property bool onlineDrawer: false
+    // 地址那一组在不在"管理"态：添加和删除只在这态里出现，平时药丸就是药丸。
+    property bool onlineManage: false
+    property bool sourceEditor: false
+    property string sourceError: ""
+    // 药丸一行 28 px、间距 8 px；折叠就是 5 行。
+    readonly property int pillRowPx: 36
+    readonly property int foldedPx: 5 * pillRowPx - 8
+    // 客户端在等任何一件事：在线列表、在线那张的原图、入库的下载和导入。这三件事对他来说是
+    // 同一句话——"还没好"——所以共用正中那三个点。失败和百分比不走这里，那两样要写字。
+    readonly property bool waiting: Bridge.onlineBusy
+                                    || Bridge.onlineHeroState === "queued"
+                                    || Bridge.onlineHeroState === "fetching"
+                                    || Bridge.onlineHeroState === "retrying"
+                                    || Bridge.onlinePendingState === "downloading"
+                                    || Bridge.onlinePendingState === "importing"
+    // 页码条要显示的那几个数：首、尾、当前页左右各一，断开处填 0 当省略号。
+    function pageWindow(cur, last) {
+        const keep = []
+        for (const v of [1, cur - 1, cur, cur + 1, last])
+            if (v >= 1 && v <= last && keep.indexOf(v) < 0) keep.push(v)
+        keep.sort(function (a, b) { return a - b })
+        const out = []
+        for (let i = 0; i < keep.length; ++i) {
+            if (i > 0 && keep[i] - keep[i - 1] > 1) out.push(0)
+            out.push(keep[i])
+        }
+        return out
+    }
     property string query: ""
     property string selectedId: ""
     property bool settingsOpen: false
@@ -624,7 +654,7 @@ ApplicationWindow {
             const w = Bridge.catalog[i]
             // "fav" is a tab, not an extra axis: it replaces the category rather than narrowing it.
             if (category === "fav") { if (favs.indexOf(w.id) < 0) continue }
-            else if (category !== "" && w.category !== category) continue
+            else if (category !== "" && root.chipCategories(category).indexOf(w.category) < 0) continue
             if (query.length > 0) {
                 const hay = (w.name + " " + w.id + " " + w.category).toLowerCase()
                 if (hay.indexOf(query.toLowerCase()) < 0) continue
@@ -654,6 +684,18 @@ ApplicationWindow {
             m[c] = (m[c] || 0) + 1
         }
         return m
+    }
+
+    // A chip covers a group of categories now, not one: 在线图片 goes under 本地图片 and
+    // 粒子光斑 / 季节天气 under 本地视频 (he asked for that on 2026-10-13, so the row reads
+    // 全部壁纸 / 收藏夹 / 本地图片 / 本地视频 / 在线壁纸 instead of one chip per label the
+    // manifest happens to carry). The merged names are still what the packages say about
+    // themselves - only the row stops naming them.
+    readonly property var mergedChips: ["在线图片", "粒子光斑", "季节天气"]
+    function chipCategories(cat) {
+        if (cat === "本地图片") return ["本地图片", "在线图片"]
+        if (cat === "本地视频") return ["本地视频", "粒子光斑", "季节天气"]
+        return [cat]
     }
 
     Component.onCompleted: {
@@ -1120,17 +1162,16 @@ ApplicationWindow {
                             // A hero that could not be fetched has to say so in this line. Falling back
                             // to the site's smaller file in silence is what reads as "还是没原图清楚"
                             // with nothing to point at: the caption above still names the real size.
+                            // 还在取的那一段不再写字了——正中那三个点就是它；失败要写字，因为它不是
+                            // "再等等"，是"等不到了，可以重来"。
                             Text {
                                 id: heroFetch
                                 readonly property string st: Bridge.onlineHeroState
                                 readonly property bool card: root.hero !== null && root.hero.online === true
-                                visible: card && (st === "queued" || st === "fetching" || st === "retrying"
-                                                  || st === "failed")
-                                text: st === "failed"
-                                        ? trs("online_hero_failed")
-                                          + (Bridge.onlineHeroError.length > 0 ? " (" + Bridge.onlineHeroError + ")" : "")
-                                        : trs("online_hero_fetching")
-                                color: st === "failed" ? "#F2A33C" : "#9FB0C6"
+                                visible: card && st === "failed"
+                                text: trs("online_hero_failed")
+                                      + (Bridge.onlineHeroError.length > 0 ? " (" + Bridge.onlineHeroError + ")" : "")
+                                color: "#F2A33C"
                                 font.family: root.fontFamily; font.pixelSize: 12
                             }
                             Btn {
@@ -1184,23 +1225,28 @@ ApplicationWindow {
                                 Layout.preferredWidth: 28
                                 Layout.preferredHeight: 28
                                 readonly property bool fav: root.hero !== null && Bridge.isFavorite(root.hero.id)
+                                // A picture that is not in the library cannot be a favourite: the
+                                // list is a set of ids the renderer owns, and a remote key in it
+                                // would sit there forever pointing at nothing. That rule was already
+                                // on the click - the mouse just never said so, so the heart stayed
+                                // full brightness on an online card and looked pressable.
+                                readonly property bool usable: root.hero !== null && root.hero.online !== true
                                 Icon {
                                     anchors.centerIn: parent
                                     name: favCell.fav ? "heart_fill" : "heart"
                                     px: 18
-                                    tint: favCell.fav ? th.err : "#D8DEE8"
+                                    tint: favCell.usable ? (favCell.fav ? th.err : "#D8DEE8")
+                                                         : Qt.alpha(th.muted, 0.6)
                                 }
                                 MouseArea {
                                     id: favHover
                                     anchors.fill: parent
                                     hoverEnabled: true
-                                    // A picture that is not in the library cannot be a favourite: the
-                                    // list is a set of ids the renderer owns, and a remote key in it
-                                    // would sit there forever pointing at nothing.
-                                    enabled: root.hero !== null && root.hero.online !== true
+                                    enabled: favCell.usable
                                     // A clickable place has to say so under the pointer, and taking the
                                     // press also drops the caret out of whichever field still holds it.
-                                    cursorShape: Qt.PointingHandCursor
+                                    // A greyed one does not promise a hand.
+                                    cursorShape: favCell.usable ? Qt.PointingHandCursor : Qt.ArrowCursor
                                     onPressed: forceActiveFocus()
                                     onClicked: if (root.hero) Bridge.toggleFavorite(root.hero.id)
                                 }
@@ -1377,6 +1423,7 @@ ApplicationWindow {
                     // with the same scrim the caption row uses. Declared after the picture layers
                     // because heroBox paints its children in order.
                     Rectangle {
+                        id: topBand
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.top: parent.top
@@ -1414,7 +1461,10 @@ ApplicationWindow {
                             // stops 12 short of them. Both numbers move together: there are two gaps,
                             // so every px added to the buttons' own spacing costs 2 px here, or the
                             // box and the first plate end up touching.
-                            anchors.rightMargin: 152
+                            // 198 in 在线: the drawer's entry button joins the three window buttons
+                            // on this line, and each is 40 px wide with 6 between, so the search box
+                            // has to stop 46 px further left or it lands under the icon.
+                            anchors.rightMargin: root.onlineMode ? 198 : 152
                             anchors.topMargin: 14
                             spacing: 10
 
@@ -1442,9 +1492,14 @@ ApplicationWindow {
                                     Repeater {
                                         model: ["all"]
                                                .concat(Object.keys(root.categoryCounts).filter(
-                                                       function (k) { return k !== "本地图片" && k !== "本地视频" }))
+                                                       function (k) { return k !== "本地图片" && k !== "本地视频"
+                                                                            && root.mergedChips.indexOf(k) < 0 }))
                                                .concat(["fav", "本地图片"])
-                                               .concat(root.categoryCounts["本地视频"] ? ["本地视频"] : [])
+                                               // It carries three categories now, so it appears when any of them is in the
+                                               // library - otherwise a library of particles with no clip would lose those
+                                               // wallpapers out of the row altogether.
+                                               .concat(root.chipCategories("本地视频").some(
+                                                       function (k) { return root.categoryCounts[k] }) ? ["本地视频"] : [])
                                                .concat([root.onlineCat])
                                         delegate: Btn {
                                             required property var modelData
@@ -1523,100 +1578,232 @@ ApplicationWindow {
                                     }
                                 }
                             }
-                            // 在线才出现的一行：来源、这个站自己的筛选项、翻页，以及"这一页是什么"的
-                            // 读数。放在 chip 下面而不是设置窗里，因为它属于"正在看哪一批图"这个状态，
-                            // 不属于配置。
-                            RowLayout {
-                                visible: root.onlineMode
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: 28
-                                spacing: 8
+                        }
+                    }
 
-                                Choice {
+                    // 在线的筛选抽屉：整条筛选行从顶栏搬进来，浮在大图左半边之上（他 2026-10-13 点的形态）。
+                    // 底边停在字幕条之上——他自己定的不变量：抽屉不许盖住底部那一行和小卡片。
+                    // 声明在顶栏蒙版之后、小卡片之前，所以它压得住图片，也不会把导航带闷掉。
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: root.onlineMode && root.onlineDrawer
+                        onPressed: root.onlineDrawer = false
+                    }
+                    // 投影：一块和抽屉同形状的暗种子交给 MultiEffect 模糊，垫在抽屉底下。
+                    // 不走 layer.effect 那条路——那一层纹理只有控件自身大小，阴影长到外面的一段
+                    // 会被裁掉，正好是这次要的效果。种子本体被抽屉盖住，只有模糊出去的一圈看得见，
+                    // 所以重复画一次不改变面板的颜色。
+                    Rectangle {
+                        id: drawerShadow
+                        anchors.fill: onlineDrawerPanel
+                        visible: onlineDrawerPanel.visible
+                        radius: 8
+                        color: "#8A000000"
+                    }
+                    MultiEffect {
+                        source: drawerShadow
+                        anchors.fill: drawerShadow
+                        visible: onlineDrawerPanel.visible
+                        blurEnabled: true
+                        blur: 0.65
+                        blurMax: 24
+                        autoPaddingEnabled: true
+                    }
+                    Rectangle {
+                        id: onlineDrawerPanel
+                        visible: root.onlineMode && root.onlineDrawer
+                        anchors.left: parent.left
+                        // 16: the same inset the chip row above uses, so the drawer's left edge and
+                        // 全部壁纸's left edge are one line rather than two that nearly agree.
+                        anchors.leftMargin: 16
+                        anchors.top: topBand.bottom
+                        // Stopping above the strip, not above the caption: the navigator cards are
+                        // the thing he clicks next, and a panel over them takes the row away.
+                        anchors.bottom: strip.top
+                        anchors.bottomMargin: 10
+                        width: 300
+                        // 300: the page bar's worst window ([1 … 85 86 87], 4 cells + an ellipsis
+                        // + two chevrons) needs 244 px, and the old 260 left only 232 inside its
+                        // margins - the last two cells were drawn on the wallpaper.
+                        // The drawer's own border went away, so the shade has to carry the depth
+                        // step instead: bg is the deepest ramp entry and one full step under
+                        // th.surface, which is what every pill in here paints.
+                        color: Qt.alpha(th.bg, 0.94)
+                        // 8, the corner the big picture and every card under it already use.
+                        radius: 8
+
+                        // A Rectangle does not eat a press, so without this a click on the drawer's
+                        // own empty space fell through to the dismiss layer underneath and the drawer
+                        // closed itself.
+                        MouseArea { anchors.fill: parent }
+
+                        Flickable {
+                            id: drawerScroll
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.bottom: drawerFoot.top
+                            anchors.leftMargin: 14
+                            anchors.rightMargin: 14
+                            anchors.topMargin: 14
+                            contentWidth: width
+                            contentHeight: drawerCol.height
+                            boundsBehavior: Flickable.StopAtBounds
+                            clip: true
+
+                            ColumnLayout {
+                                id: drawerCol
+                                width: drawerScroll.width
+                                spacing: 14
+
+                                // 地址（源）。管理态里每枚药丸带一个删除，末尾多一枚"添加"。
+                                PillGroup {
+                                    title: trs("online_address_group")
                                     items: Bridge.onlineSourceItems
-                                    value: Bridge.onlineSource
-                                    Layout.preferredWidth: 120
-                                    enabled: Bridge.onlineSourceItems.length > 1
+                                    current: Bridge.onlineSource
+                                    manage: root.onlineManage
                                     onPicked: function (v) { Bridge.onlineSource = v }
-                                }
-                                Repeater {
-                                    model: Bridge.onlineOptions
-                                    delegate: RowLayout {
-                                        required property var modelData
-                                        spacing: 6
-                                        ScrimText {
-                                            text: modelData.label
-                                            color: "#C6CEDA"; font.pixelSize: 11
-                                            // Never squeezed: the first version let RowLayout take the
-                                            // labels down when the row ran out of width, and 分辨率下限
-                                            // arrived on screen as 分辨率下. The pickers shrink instead.
-                                            Layout.minimumWidth: implicitWidth
-                                        }
-                                        Choice {
-                                            items: modelData.values
-                                            value: modelData.current
-                                            Layout.preferredWidth: 120
-                                            onPicked: function (v) { Bridge.onlineSetOption(modelData.key, v) }
-                                        }
+                                    onRemove: function (v) { Bridge.onlineRemoveSource(v) }
+                                    onAddRequested: {
+                                        root.sourceError = ""
+                                        root.sourceEditor = true
                                     }
                                 }
+                                // 分类、分辨率……站点自己声明的每一项各成一组，标题用站点自己的话。
+                                Repeater {
+                                    model: Bridge.onlineOptions
+                                    delegate: PillGroup {
+                                        required property var modelData
+                                        title: modelData.label
+                                        items: modelData.values
+                                        current: modelData.current
+                                        onPicked: function (v) { Bridge.onlineSetOption(modelData.key, v) }
+                                    }
+                                }
+
+                            }
+                        }
+
+                        // 结果数、页码、管理/搜索钉在抽屉底边，不跟着筛选组滚走。筛选组是可选
+                        // 也可折叠的一长列，出口不是：要滚动才看得见的按钮等于没有按钮。
+                        ColumnLayout {
+                            id: drawerFoot
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            anchors.margins: 14
+                            spacing: 12
+
+                            // 页码药丸条。没有结果时那一格写 0（他点的名），而不是空着——
+                            // 空着会被读成"还没加载"，不是"这一批没有图"。结果数本身不再写：
+                            // 这一页几条不等于这个分类一共几条，挂着"结果"两个字更容易读错。
+                            RowLayout {
+                                id: pageBar
+                                Layout.fillWidth: true
+                                spacing: 4
+                                readonly property bool empty: Bridge.onlineRows.length === 0
+                                // 最挤一窗 = 5 格数字 + 2 个省略号 + 两枚箭头。格宽从"这一行还剩
+                                // 多少"倒推而不是写死 36：写死就只会把尾巴挤到面板外面去。26 是三位
+                                // 数字按 12 px 字号放得下的下限，加宽后的抽屉到不了那一步。
+                                readonly property var win: empty ? [0]
+                                                                 : root.pageWindow(Bridge.onlinePage,
+                                                                                   Math.max(1, Bridge.onlineLastPage))
+                                readonly property int digits: {
+                                    var n = 0
+                                    for (var i = 0; i < win.length; ++i) if (win[i] !== 0) ++n
+                                    return n
+                                }
+                                readonly property int ellipses: win.length - digits
+                                readonly property int cellW: Math.max(26, Math.min(36, Math.floor(
+                                    (width - 56 - 12 * ellipses - 4 * (win.length + 2))
+                                    / Math.max(1, digits))))
                                 Item { Layout.fillWidth: true }
-                                ScrimText {
-                                    visible: Bridge.onlineBusy || Bridge.onlineError.length > 0
-                                             || Bridge.onlinePendingState.length > 0
-                                    text: Bridge.onlineBusy ? trs("online_busy")
-                                          : Bridge.onlinePendingState === "downloading"
-                                                ? trs("online_downloading") + " "
-                                                  + Math.round(Bridge.onlineProgress * 100) + "%"
-                                          : Bridge.onlinePendingState === "importing"
-                                                ? trs("online_importing")
-                                          : Bridge.onlinePendingState === "failed"
-                                                ? trs("online_download_failed") + ": " + Bridge.onlinePendingDetail
-                                          : Bridge.onlineError
-                                    color: Bridge.onlineError.length > 0
-                                           || Bridge.onlinePendingState === "failed" ? th.err : "#C6CEDA"
-                                    font.pixelSize: 11
-                                }
-                                ScrimText {
-                                    // Nothing asked for yet, or nothing came back: the strip is empty and
-                                    // the only thing that explains it is this line.
-                                    visible: !Bridge.onlineBusy && Bridge.onlineError.length === 0
-                                             && Bridge.onlineRows.length === 0
-                                    text: trs("online_empty")
-                                    color: "#C6CEDA"; font.pixelSize: 11
-                                }
-                                ScrimText {
-                                    visible: !Bridge.onlineBusy && Bridge.onlineRows.length > 0
-                                    text: trs("online_results") + " " + Bridge.onlineRows.length + " · "
-                                          + trs("online_page") + " " + Bridge.onlinePage + "/"
-                                          + Bridge.onlineLastPage
-                                          + (Bridge.onlineTotal > 0
-                                             ? " · " + trs("online_total") + " " + Bridge.onlineTotal
-                                               + " " + trs("online_items") : "")
-                                    color: "#C6CEDA"; font.pixelSize: 11
-                                }
-                                Btn {
-                                    // Enter in the box does the same thing; this is the part of the
-                                    // affordance that does not require knowing the shortcut.
-                                    text: trs("online_search")
-                                    compact: true
-                                    raised: true
-                                    enabled: !Bridge.onlineBusy && Bridge.onlineSourceItems.length > 0
-                                    onClicked: Bridge.onlineSearch()
-                                }
                                 IconBtn {
-                                    icon: "chevL"; tip: trs("online_prev"); flat: true; tint: th.text
+                                    icon: "chevL"; tip: trs("online_prev"); tint: th.text
                                     enabled: Bridge.onlinePage > 1 && !Bridge.onlineBusy
                                     onClicked: Bridge.onlinePageStep(-1)
                                 }
+                                Repeater {
+                                    model: pageBar.win
+                                    delegate: Item {
+                                        required property int modelData
+                                        readonly property int pageNo: modelData
+                                        readonly property bool gap: pageNo === 0 && !pageBar.empty
+                                        implicitWidth: gap ? 12 : pageBar.cellW
+                                        implicitHeight: 28
+                                        width: implicitWidth
+                                        height: implicitHeight
+                                        Text {
+                                            visible: parent.gap
+                                            anchors.centerIn: parent
+                                            text: "…"
+                                            color: th.muted; font.family: root.fontFamily; font.pixelSize: 12
+                                        }
+                                        Btn {
+                                            visible: !parent.gap
+                                            anchors.fill: parent
+                                            text: pageBar.empty ? "0" : String(parent.pageNo)
+                                            enabled: !pageBar.empty
+                                            // 36 定宽的上限：Btn 最小 56 px 是给两三个汉字的标签用的，
+                                            // 页码只有 1~3 位数字，按 56 排就超出抽屉宽度。
+                                            implicitWidth: pageBar.cellW
+                                            compact: true
+                                            tint: true
+                                            corner: 8
+                                            checked: parent.pageNo === Bridge.onlinePage
+                                            alpha: 0.9
+                                            onClicked: Bridge.onlineGoTo(parent.pageNo)
+                                        }
+                                    }
+                                }
                                 IconBtn {
-                                    icon: "chevR"; tip: trs("online_next"); flat: true; tint: th.text
+                                    icon: "chevR"; tip: trs("online_next"); tint: th.text
                                     enabled: Bridge.onlinePage < Bridge.onlineLastPage && !Bridge.onlineBusy
                                     onClicked: Bridge.onlinePageStep(1)
                                 }
                             }
+
+                            ScrimText {
+                                Layout.fillWidth: true
+                                visible: text.length > 0
+                                text: Bridge.onlinePendingState === "downloading"
+                                          ? trs("online_downloading") + " "
+                                            + Math.round(Bridge.onlineProgress * 100) + "%"
+                                  : Bridge.onlinePendingState === "importing" ? trs("online_importing")
+                                  : Bridge.onlinePendingState === "failed"
+                                        ? trs("online_download_failed") + ": " + Bridge.onlinePendingDetail
+                                  : Bridge.onlineError
+                                color: Bridge.onlineError.length > 0
+                                       || Bridge.onlinePendingState === "failed" ? th.err : "#C6CEDA"
+                                font.pixelSize: 11
+                                wrapMode: Text.Wrap
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Btn {
+                                    text: trs(root.onlineManage ? "online_done" : "online_manage")
+                                    compact: true
+                                    alpha: 0.9
+                                    corner: 8
+                                    checked: root.onlineManage
+                                    onClicked: root.onlineManage = !root.onlineManage
+                                }
+                                Item { Layout.fillWidth: true }
+                                Btn {
+                                    // 他点的名：搜索放右边。
+                                    text: trs("online_search")
+                                    compact: true
+                                    raised: true
+                                    corner: 8
+                                    enabled: !Bridge.onlineBusy && Bridge.onlineSourceItems.length > 0
+                                    onClicked: Bridge.onlineSearch()
+                                }
+                            }
                         }
                     }
+
                     // The small cards: the carousel's navigator, floating over the bottom of the big
                     // picture and above the caption. Clicking one stops the rotation. They stay
                     // landscape like the sheet he pasted - only the selected one grows.
@@ -1908,8 +2095,101 @@ ApplicationWindow {
     }
 
     // -------------------------------------------------------------- settings dialog
+    // 全局的"在等"：三个点轮流亮，钉在客户端正中。它压在小卡片和抽屉之上（声明在它们之后），
+    // 但在两个整窗覆盖层之下——对话框开着的时候不该还有一个东西在中间闪。
+    LoadingDots {
+        anchors.centerIn: parent
+        working: root.waiting
+    }
+
     // A dialog over the page, not a fourth column: opening it must not move the grid. The left
     // strip is the category list, so each tab holds one subject instead of one long scroll.
+    // 新地址源：一份能直接改的 JSON 模板。填错不落盘——先解析、校验 name 和 homepage，
+    // 再写文件、重新读目录；没通过加载就把文件删回去，并把原因显示在这底下。
+    Rectangle {
+        anchors.fill: parent
+        visible: root.sourceEditor
+        color: "#99000000"
+        MouseArea { anchors.fill: parent; onClicked: root.sourceEditor = false }
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: Math.min(820, parent.width - 48)
+            height: Math.min(660, parent.height - 48)
+            radius: 8
+            color: th.surface
+            border.color: th.line
+            border.width: 1
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 18
+                spacing: 10
+
+                Text {
+                    text: trs("online_editor_title")
+                    color: th.text; font.family: root.fontFamily
+                    font.pixelSize: 16; font.weight: Font.DemiBold
+                }
+                Text {
+                    text: trs("online_editor_hint")
+                    color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+                Flickable {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    contentWidth: Math.max(editable.paintedWidth + 24, width)
+                    contentHeight: editable.paintedHeight + 24
+                    boundsBehavior: Flickable.StopAtBounds
+                    clip: true
+                    // 故意不挂 ScrollBar：附加属性写在裸 Flickable 上会让整个 qml 文件加载失败
+                    // （这个坑在这个文件上踩过两次）。滚轮和拖动照常能用。
+                    TextEdit {
+                        id: editable
+                        width: Math.max(implicitWidth, parent.width - 24)
+                        leftPadding: 12
+                        topPadding: 10
+                        text: Bridge.onlineSourceTemplate()
+                        selectByMouse: true
+                        color: th.text
+                        font.family: "Consolas"
+                        font.pixelSize: 12
+                        persistentSelection: true
+                    }
+                }
+                Text {
+                    visible: root.sourceError.length > 0
+                    text: root.sourceError
+                    color: th.err; font.family: root.fontFamily; font.pixelSize: 11
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Item { Layout.fillWidth: true }
+                    Btn {
+                        text: trs("online_cancel")
+                        compact: true
+                        onClicked: root.sourceEditor = false
+                    }
+                    Btn {
+                        text: trs("online_save")
+                        compact: true
+                        accent: true
+                        onClicked: {
+                            const err = Bridge.onlineAddSource(editable.text)
+                            root.sourceError = err
+                            if (err.length === 0) { root.sourceEditor = false; root.onlineManage = false }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Rectangle {
         id: settingsLayer
         anchors.fill: parent
@@ -3315,7 +3595,10 @@ ApplicationWindow {
         x: field ? field.mapToItem(dropList.parent, 0, 0).x : 0
         y: flipUp ? fieldTop - height - 4 : belowY
         width: field ? Math.max(field.width, 150) : 150
-        height: field ? Math.max(Math.min(needed, room), 120) : needed
+        // Content-sized: three options are three rows, not a 120 px box with a gap under them (he
+        // pointed at 无/溶解/液态). The cap is still the room on the side it opens to, and the floor
+        // is two rows so a field sitting against the window edge still shows something to scroll.
+        height: field ? Math.min(needed, Math.max(room, 56)) : needed
         z: 1000
         radius: 6
         color: th.surfaceAlt
@@ -3418,6 +3701,16 @@ ApplicationWindow {
         // too, and only this margin decides whether the three groups sit on one line.
         anchors.topMargin: 14
 
+        WinBtn {
+            // 抽屉唯一的入口，放在最小化左边（他点的名）。只在 在线 这页出现：别的页面点开它是一扇
+            // 空的门，那就不是控件是陷阱。用 WinBtn 而不是 IconBtn 是因为这一列的三颗都是 40x28
+            // 同一块底板，混一颗 28 方的进去，四条边就站不齐了。
+            name: "panel"
+            tip: trs("online_filters")
+            visible: root.onlineMode
+            checked: root.onlineDrawer
+            onClicked: root.onlineDrawer = !root.onlineDrawer
+        }
         WinBtn {
             name: "wmin"
             tip: trs("win_min")
@@ -3662,6 +3955,10 @@ ApplicationWindow {
                 c.beginPath(); c.moveTo(3.4, 17.4); c.lineTo(12, 22.4)
                 c.lineTo(20.6, 17.4); c.stroke()
                 break
+            case "panel":
+                rr(3.4, 4.6, 17.2, 14.8, 2.2); c.stroke()
+                c.beginPath(); c.moveTo(9.8, 4.6); c.lineTo(9.8, 19.4); c.stroke()
+                break
             case "cpu":
                 rr(6.2, 6.2, 11.6, 11.6, 1.8); c.stroke()
                 rr(9.8, 9.8, 4.4, 4.4, 1.0); c.stroke()
@@ -3753,6 +4050,9 @@ ApplicationWindow {
         property color tint: th.text
         property string tip: ""
         property bool checked: false
+        // 折叠箭头要朝下也要朝上，字形表里没有第二枚 chevron：翻一下比再画一个便宜，
+        // 而且两个状态必然是同一形状。
+        property bool flipped: false
         // What a flat button shows under the pointer. The default is a dark veil, right for a button
         // sitting on a bright picture and invisible on the dark caption bar, which passes a light one.
         property color veil: "#40000000"
@@ -3772,11 +4072,19 @@ ApplicationWindow {
 
         Icon {
             name: ib.icon
-            tint: ib.tint
+            // 不能用的那颗要读起来是灰的，不是"颜色对了一半"。整颗按钮本来已经压到 0.45，
+            // 但红色/蓝色在 45% 上看着还是"能点、只是暗"——在线那张的动图键就是这样（他点的名）。
+            // 所以禁用时连颜色也换成 muted，只有颜色，几何一个像素不动。
+            tint: ib.enabled ? ib.tint : Qt.alpha(th.muted, 0.6)
             px: ib.glyph
             stroke: ib.stroke
             anchors.centerIn: parent
             enabled: ib.enabled
+            transform: Rotation {
+                origin.x: ib.glyph / 2
+                origin.y: ib.glyph / 2
+                angle: ib.flipped ? 180 : 0
+            }
         }
         MouseArea {
                 // A clickable place has to say so under the pointer, and taking the press also
@@ -3846,6 +4154,10 @@ ApplicationWindow {
         property string name: ""
         property string tip: ""
         property bool danger: false
+        // What IconBtn already does and these four did not need until the drawer's entry asked:
+        // an open panel has to leave its button marked, or the only way to tell whether the
+        // thing is open is to look at the picture it covers.
+        property bool checked: false
         signal clicked
         readonly property alias hoverArea: wbHover
 
@@ -3854,6 +4166,8 @@ ApplicationWindow {
         radius: 4
         color: wbHover.containsMouse ? (wb.danger ? Qt.alpha(th.err, 0.85) : "#26FFFFFF")
                                      : Qt.alpha(th.surface, root.plateAlpha)
+        border.color: wb.checked ? th.accent : "transparent"
+        border.width: 1
 
         Icon {
             anchors.centerIn: parent
@@ -4095,6 +4409,150 @@ ApplicationWindow {
     // (see dropList below). A list that lives inside a group card only receives the mouse where it
     // overlaps that card, so everything hanging below the card's own rect was unhittable - which
     // looked exactly like "only the first option can be picked".
+    // 全局等待指示：三枚点在 900 ms 的圈里轮流亮，相位差 300 ms。不用 Canvas 每帧重绘，也不用
+    // 渐变配遮罩——那两条都要一张离屏纹理，压在这块半透明底板上是白花一次合成。垫板是必须有的：
+    // 白点落在雪景图上就没了，落在深色图上又太亮，只有一块底能让它在两种画面上都是同一档。
+    component LoadingDots: Rectangle {
+        id: dots
+        property bool working: false
+        width: dotsRow.width + 24
+        height: 32
+        radius: 10
+        color: Qt.alpha(th.bg, 0.82)
+        visible: working
+
+        Row {
+            id: dotsRow
+            anchors.centerIn: parent
+            spacing: 7
+
+            Repeater {
+                model: 3
+                Rectangle {
+                    width: 7; height: 7
+                    radius: 3.5
+                    color: th.text
+                    opacity: 0.25
+                    SequentialAnimation on opacity {
+                        loops: Animation.Infinite
+                        running: dots.working
+                        PauseAnimation { duration: 300 * index }
+                        NumberAnimation { to: 1.0; duration: 150; easing.type: Easing.InOutQuad }
+                        NumberAnimation { to: 0.25; duration: 150; easing.type: Easing.InOutQuad }
+                        // 三枚点各自补到 900 ms：相位不同但周期必须相同，不然转几圈就散成乱闪。
+                        PauseAnimation { duration: 600 - 300 * index }
+                    }
+                }
+            }
+        }
+    }
+
+    // 一组药丸：标题 + 药丸流，超过 5 行折起来，折不动就不出现那枚箭头（一条点不动的箭头是许诺）。
+    component PillGroup: ColumnLayout {
+        id: pg
+        property string title: ""
+        property var items: []
+        property string current: ""
+        property bool manage: false
+        property bool folded: true
+        // 哪一枚被按成"确认删除"。放在组上而不是药丸上：退出管理态要能一次清干净，
+        // 否则那枚药丸会一直顶着"确认删除 xxx"的字。
+        property string armed: ""
+        signal picked(string v)
+        signal remove(string v)
+        signal addRequested()
+        onManageChanged: if (!manage) armed = ""
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 6
+            Text {
+                text: pg.title
+                color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                Layout.fillWidth: true
+            }
+            IconBtn {
+                visible: pg.foldable
+                icon: "caret"; tint: th.text; glyph: 12
+                flipped: !pg.folded
+                tip: trs(pg.folded ? "online_expand" : "online_collapse")
+                onClicked: pg.folded = !pg.folded
+            }
+        }
+
+        Item {
+            Layout.fillWidth: true
+            Layout.preferredHeight: pg.foldable && pg.folded ? root.foldedPx : pills.implicitHeight
+            clip: true
+            Behavior on Layout.preferredHeight { NumberAnimation { duration: 160 } }
+
+            Flow {
+                id: pills
+                width: parent.width
+                spacing: 8
+
+                Repeater {
+                    model: pg.items
+                    delegate: Btn {
+                        id: pill
+                        required property var modelData
+                        readonly property string v: modelData.value
+                        readonly property bool arming: pg.armed === v
+                        text: String(modelData.label)
+                        compact: true
+                        tint: true
+                        corner: 8
+                        alpha: 0.9
+                        checked: v === pg.current
+                        // 管理态给那枚 × 留位。40 不是随手加的：× 的墨迹占盒子右边 9~20 px，
+                        // 文字居中，所以标签右沿在 (18+extra)/2 处。extra=26 时标签和 × 之间只剩
+                        // 2 px；40 让这一侧也留出 9 px，和 × 自己右边距 9 对称。
+                        extraWidth: pg.manage ? 40 : 0
+                        border.color: arming ? th.err : (checked ? th.accent : "transparent")
+                        border.width: 1
+
+                        Icon {
+                            visible: pg.manage
+                            anchors.right: parent.right
+                            anchors.rightMargin: 9
+                            anchors.verticalCenter: parent.verticalCenter
+                            name: "close"; px: 11
+                            tint: pill.arming ? th.err : th.muted
+                        }
+                        // 两步删除：第一下 × 变红=确认，第二下才真删；点药丸本身还是选它。
+                        MouseArea {
+                            visible: pg.manage
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 28
+                            height: parent.height
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (!pill.arming) { pg.armed = pill.v; return }
+                                pg.armed = ""
+                                pg.remove(pill.v)
+                            }
+                        }
+                        onClicked: pg.picked(v)
+                    }
+                }
+                Btn {
+                    visible: pg.manage
+                    text: trs("online_add")
+                    compact: true
+                    corner: 8
+                    alpha: 0.9
+                    onClicked: pg.addRequested()
+                }
+            }
+        }
+        // 折叠高度按量出来的溢出决定，不按项数猜：药丸宽度跟着标签长度走，
+        // 同样 30 项在这个宽度里可能是 8 行也可能是 11 行。
+        readonly property bool foldable: pills.implicitHeight > root.foldedPx + 2
+        // ---- 临时探针（2026-10-13 版式对账），量完即删 ----
+
+    }
+
     component Choice: Rectangle {
         id: choice
         property var items: []
@@ -4171,13 +4629,22 @@ ApplicationWindow {
         property bool raised: false
         // The card's octagonal HUD rim instead of a 1 px rounded border. Only the chips ask for it.
         property bool frame: false
+        // 药丸要的是全圆头，和"选中=淡一档 accent"而不是 入库 那种实心蓝。两档都有默认值，
+        // 所以现有每一颗 Btn 一个像素都没变。
+        property real corner: 6
+        property bool tint: false
+        // Room for a badge the caller paints itself (the × on a managed pill). It has to be added
+        // inside implicitWidth, not overridden from outside - a delegate cannot name this
+        // component's lbl, and that binding would fail silently and leave the pill 0 px wide.
+        property real extraWidth: 0
         signal clicked
 
-        implicitWidth: Math.max(compact ? 56 : 92, lbl.implicitWidth + (compact ? 18 : 26))
+        implicitWidth: Math.max(compact ? 56 : 92,
+                                lbl.implicitWidth + (compact ? 18 : 26) + extraWidth)
         implicitHeight: compact ? 28 : 34
         Layout.preferredWidth: implicitWidth
         Layout.preferredHeight: implicitHeight
-        radius: 6
+        radius: corner
         opacity: enabled ? 1.0 : 0.45
         // How see-through the plate is. 1.0 leaves every existing button exactly as it was; the top
         // tabs and the search field lower it so the wallpaper reads through them.
@@ -4185,7 +4652,7 @@ ApplicationWindow {
         readonly property color plate: Qt.alpha(
             !enabled ? (raised ? th.surfaceAlt : th.surface)
              : hoverC.containsMouse ? (accent ? th.accentDim : th.hover)
-             : checked ? (raised ? th.hover : th.surfaceAlt)
+             : checked ? (tint ? th.accent : raised ? th.hover : th.surfaceAlt)
              : accent ? th.accent : (raised ? th.surfaceAlt : th.surface), btn.alpha)
         // A rounded plate behind an octagonal rim pokes 1.75 px past each chamfer, so the framed
         // button hands its background to the frame, which fills the same octagon it outlines.
@@ -4209,7 +4676,7 @@ ApplicationWindow {
             id: lbl
             anchors.centerIn: parent
             text: btn.text
-            color: btn.accent && btn.enabled ? "white" : th.text
+            color: (btn.accent && btn.enabled) || (btn.tint && btn.checked) ? "white" : th.text
             font.family: root.fontFamily
             font.pixelSize: btn.compact ? 12 : 13
         }

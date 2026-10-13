@@ -14,6 +14,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QCoreApplication>
+#include <QRegularExpression>
 #include <QTimer>
 
 #include <QDesktopServices>
@@ -73,7 +74,7 @@ const Entry kStrings[] = {
     {"local_images", "本地图片", "Local images"},
     {"auto_rotate", "自动更换", "Auto rotate"},
     {"categories", "壁纸分类", "Categories"},
-    {"all", "全部", "All"},
+    {"all", "全部壁纸", "All wallpapers"},
     {"search_placeholder", "搜索壁纸、分类", "Search wallpapers, categories"},
     {"set_as_wallpaper", "设为壁纸", "Set as wallpaper"},
     {"apply_mode", "应用方式", "Apply mode"},
@@ -301,10 +302,29 @@ const Entry kStrings[] = {
     {"tray_pause_ring", "暂停图标", "Pause the icons"},
     // 在线：一个站 = sources 目录里的一个 json。标签写在这里而不是写在那份描述里，是为了"中文默认 +
     // 英文开关"这条约定只有一处要维护；那份文件只描述端点和字段。
-    {"tab_online", "在线", "Online"},
+    {"tab_online", "在线壁纸", "Online wallpapers"},
+    {"online_filters", "筛选", "Filters"},
+    {"online_bad_json", "这份描述不是合法的 JSON", "This description is not valid JSON"},
+    {"online_not_object", "这份描述不是一个对象", "This description is not a JSON object"},
+    {"online_bad_name", "name 只能用字母数字和 . _ -，且不能为空", "name may only use letters, digits and . _ -, and must not be empty"},
+    {"online_bad_homepage", "homepage 必须以 http:// 或 https:// 开头", "homepage must start with http:// or https://"},
+    {"online_write_failed", "写不进去", "Could not write the file"},
+    {"online_load_failed", "这份描述没被加载", "This description did not load"},
+    {"online_add", "添加", "Add"},
+    {"online_cancel", "取消", "Cancel"},
+    {"online_manage", "管理", "Manage"},
+    {"online_done", "完成", "Done"},
+    {"online_delete", "删除", "Delete"},
+    {"online_editor_title", "新地址源", "New source"},    {"online_editor_hint", "填好按保存就能用。name 是缓存文件名，留空存不进去。", "Fill it in and save; name is the cache file name and must not be empty."},
+    {"online_save", "保存", "Save"},
+    {"online_address_group", "地址", "Sources"},
+    {"online_expand", "展开全部", "Expand"},
+    {"online_collapse", "折叠", "Collapse"},
+    {"online_confirm_delete", "确认", "Confirm"},
+
+
     {"online_query", "搜索词", "Search"},
     {"online_search", "搜索", "Search"},
-    {"online_results", "结果", "Results"},
     {"online_empty", "还没有结果：输入一个词，按回车", "Nothing yet - type a word and press Enter"},
     {"online_page", "第", "Page"},
     {"online_items", "条", "items"},
@@ -316,7 +336,6 @@ const Entry kStrings[] = {
     // exact file to take here. 4kwallpapers names its row through the site-qualified key.
     {"online_4kwallpapers_resolution", "分辨率", "Resolution"},
     {"online_category", "分类", "Category"},
-    {"online_hero_fetching", "正在取原图…", "fetching the original…"},
     {"online_hero_failed", "原图没取到，现在是站点预览", "original not fetched - this is the site preview"},
     {"online_hero_retry", "重试", "Retry"},
     {"online_sort", "排序", "Sort by"},
@@ -340,7 +359,6 @@ const Entry kStrings[] = {
     {"online_no_answer", "渲染器没有回音，看它的日志", "The renderer never answered; check its log"},
     {"online_no_sources", "没有读到任何在线源描述", "No online source description was loaded"},
     {"online_offsite", "源描述的地址不在它自己的站上", "The source points outside its own site"},
-    {"online_busy", "正在请求", "Asking the site"},
     // A delete the renderer never completed. Not "it failed because X" - what was measured is that the
     // package is still in the catalog.
     {"delete_still_there", "问了几次还在库里", "Still in the library after several asks"},
@@ -1556,6 +1574,12 @@ void Bridge::onlinePageStep(int delta) {
     onlineSearch();
 }
 
+void Bridge::onlineGoTo(int page) {
+    if (page < 1 || page > onlineLastPage_ || page == onlinePage_) return;
+    onlinePage_ = page;
+    onlineSearch();
+}
+
 void Bridge::onlineSetOption(const QString& key, const QString& value) {
     OnlineSource* s = online_.source(onlineSource_);
     if (!s || !s->setOption(key.toStdString(), value.toStdString())) return;
@@ -1624,6 +1648,108 @@ void Bridge::onlineHeroPreview(int index) {
     emit onlineHeroFileChanged();
     if (key.isEmpty()) { setHeroState(QString()); return; }
     requestHero(key);
+}
+
+QString Bridge::onlineSourceTemplate() const {
+    // 一份能直接改的骨架。name 故意留空：LoadAll 会以 "no 'name'" 拒掉它，所以原样按下保存
+    // 一定失败并说出原因——一个填了个标题就能出现的空源比报错更难解释。
+    return QStringLiteral(R"JSON({
+  "_怎么填": "把下面每一项改成你的站的信息，name 留空是存不进去的。带花括号的地址里 {query} 是搜索词、{page} 是第一页之外的页码、{选项key} 是你在 options 里写的每一项。",
+  "name": "",
+  "label": "显示在药丸上的名字",
+  "homepage": "https://example.com",
+  "url": "https://example.com/list/{page}",
+  "ask": false,
+  "user_agent": "Mozilla/5.0",
+  "min_interval_ms": 3000,
+  "_record": "抓网页时用：一条正则，每个字段用 $1 $2 这样引用它抓到的组。整个正则会被反复匹配，一次匹配=一张卡片。",
+  "record": "<a[^>]+href=\"(/wall/[^\"]+)-(\\d+)\\.html\"[^>]*title=\"([^\"]*)\"[^>]*><img[^>]+src=\"([^\"]+)\"",
+  "_fields": "JSON 应答的站把 record 删掉、改用 fields 的点号路径；网页站里 $n 表示第 n 个捕获组，其余是模板。",
+  "fields": {
+    "key": "$2",
+    "title": "$3",
+    "page": "https://example.com$1.html",
+    "thumb": "$4",
+    "image": "https://example.com/images/{slug}-{resolution}-{key}.jpg"
+  },
+  "_slug": "image 里 {slug} 从哪来：slug_from 指到某个字段，slug_basename 取它的文件名，slug_cut 在第一个 '-' 处截断。",
+  "slug_from": "$1",
+  "slug_basename": false,
+  "slug_cut": true,
+  "size": "",
+  "last_page": "page=(\\d+)",
+  "ext": "jpg",
+  "options": {
+    "category": {
+      "values": ["nature", "space"],
+      "default": "nature",
+      "labels": { "nature": "自然", "space": "宇宙" }
+    },
+    "resolution": { "values": ["1920x1080", "3840x2160"], "default": "3840x2160" }
+  }
+})JSON");
+}
+
+QString Bridge::sourcesDir() const {
+    return QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("sources"));
+}
+
+void Bridge::reloadSources() {
+    const QString keep = onlineSource_;
+    loadOnlineSources();
+    for (const auto& row : onlineSourceItems_)
+        if (row.toMap().value("value").toString() == keep) { setOnlineSource(keep); return; }
+}
+
+QString Bridge::onlineAddSource(const QString& text) {
+    std::string err;
+    const auto parsed = Json::Parse(text.toStdString(), err);
+    if (!parsed) return t("online_bad_json") + QStringLiteral(": ") + QString::fromStdString(err);
+    if (!parsed->isObject()) return t("online_not_object");
+    const QString name = QString::fromStdString(parsed->strOr("name"));
+    // 文件名从这里派生，所以它不能带路径分隔符或 ..；界面上填的 name 也就是缓存前缀。
+    static const QRegularExpression safe(QStringLiteral("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"));
+    if (!safe.match(name).hasMatch()) return t("online_bad_name") + QStringLiteral(": ") + name;
+    const QString home = QString::fromStdString(parsed->strOr("homepage"));
+    if (!home.startsWith(QLatin1String("http://")) && !home.startsWith(QLatin1String("https://")))
+        return t("online_bad_homepage") + QStringLiteral(": ") + home;
+
+    const QString path = QDir(sourcesDir()).absoluteFilePath(name + QStringLiteral(".json"));
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return t("online_write_failed") + QStringLiteral(": ") + f.errorString();
+    f.write(text.toUtf8());
+    f.close();
+
+    reloadSources();
+    for (const auto& row : onlineSourceItems_)
+        if (row.toMap().value("value").toString() == name) return QString();
+
+    // 没通过加载就被删回去：目录里留一份坏描述，下次启动只会再多一行 skipped 警告。
+    QStringList why;
+    std::vector<std::string> skipped;
+    OnlineSource::LoadAll(sourcesDir().toStdWString(), skipped);
+    for (const auto& s : skipped)
+        if (QString::fromStdString(s).startsWith(name + QLatin1Char('.'))) why << QString::fromStdString(s);
+    QFile::remove(path);
+    reloadSources();
+    return why.isEmpty() ? t("online_load_failed") : why.join(QStringLiteral("; "));
+}
+
+bool Bridge::onlineRemoveSource(const QString& name) {
+    QDir d(sourcesDir());
+    bool removed = false;
+    for (const QFileInfo& e : d.entryInfoList({QStringLiteral("*.json")}, QDir::Files)) {
+        QFile f(e.absoluteFilePath());
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        const QByteArray body = f.readAll();
+        f.close();
+        std::string err;
+        const auto j = Json::Parse(body.toStdString(), err);
+        if (j && QString::fromStdString(j->strOr("name")) == name) { removed = QFile::remove(e.absoluteFilePath()); }
+    }
+    if (removed) reloadSources();
+    return removed;
 }
 
 void Bridge::onlineHeroRetry() {
