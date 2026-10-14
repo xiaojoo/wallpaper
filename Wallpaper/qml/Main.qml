@@ -94,6 +94,16 @@ ApplicationWindow {
         return out
     }
     property string query: ""
+    // The top row folds: the five tabs and the search box each hide behind one 40x28 chevron on
+    // their own side, and both open on click and close when the pointer leaves them. The search box
+    // keeps its word - it only folds while the query is empty, and never while it holds the caret,
+    // or reaching for a card would throw away what he is typing.
+    property bool menuOpen: false
+    property bool searchOpen: false
+    // Whether the search's fold button exists at all: a site whose own search is closed to programs
+    // (4kwallpapers' robots.txt, motionbgs' fake ?s=) has no box to unfold, so neither the box nor
+    // its chevron is shown - and the top row's right margin has to stop reserving a slot for it.
+    readonly property bool searchFoldShown: !(onlineMode && !Bridge.onlineAsk)
     property string selectedId: ""
     property bool settingsOpen: false
     property bool previewMotion: true    // the big picture shows the motion frames unless told otherwise
@@ -1695,7 +1705,10 @@ ApplicationWindow {
                             anchors.left: parent.left
                             anchors.right: parent.right
                             anchors.top: parent.top
-                            anchors.leftMargin: 16
+                            anchors.leftMargin: 8
+                            // 8, not 16: measured on the render, the first chip's left edge sat 16 px
+                            // from the glass while the ✕ sat 8 px from it on the other side, so the
+                            // row read as hanging off-centre in a window with no frame of its own.
                             // 152, not 16: the three window buttons sit at this strip's right end
                             // (40 px each, 6 apart, 8 in from the glass = 140 px) and the search box
                             // stops 12 short of them. Both numbers move together: there are two gaps,
@@ -1704,7 +1717,11 @@ ApplicationWindow {
                             // 198 in 在线: the drawer's entry button joins the three window buttons
                             // on this line, and each is 40 px wide with 6 between, so the search box
                             // has to stop 46 px further left or it lands under the icon.
-                            anchors.rightMargin: root.onlineMode ? 198 : 152
+                            // 46 more while the search's own chevron stands in that row: it is a 40 px
+                            // plate with 6 of gap, and the row grows leftwards because it is
+                            // right-anchored. Not reserved when the site has no search at all.
+                            anchors.rightMargin: (root.onlineMode ? 198 : 152)
+                                                 + (root.searchFoldShown ? 46 : 0)
                             anchors.topMargin: 14
                             spacing: 10
 
@@ -1714,10 +1731,21 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 spacing: 10
 
+                                WinBtn {
+                                    // The tabs' toggle, on the row's own left edge: the chips unfold to
+                                    // the right of it and it stays marked while they are out.
+                                    id: menuToggle
+                                    name: "chevR"
+                                    tip: trs("all")
+                                    bubble: false
+                                    checked: root.menuOpen
+                                    onClicked: root.menuOpen = !root.menuOpen
+                                }
                                 Row {
-                                    Layout.fillWidth: true
+                                    id: menuRow
                                     Layout.preferredHeight: 28
                                     spacing: 6
+                                    visible: root.menuOpen
                                     // Favourites is one more tab, not a second filter axis: picking it
                                     // drops the category exactly the way picking 极光星空 does.
                                     // Imported photos carry "本地图片" in their wallpaper.json, so the
@@ -1769,13 +1797,23 @@ ApplicationWindow {
                                     }
                                 }
 
+                                // The slack that keeps the search group at the row's right end now that
+                                // the chips no longer stretch across the line themselves.
+                                Item {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 1
+                                }
+
                                 Rectangle {
+                                    id: searchBox
                                     Layout.preferredWidth: 260
                                     Layout.preferredHeight: 28
                                     // 4kwallpapers puts its search under /search/, which its own
                                     // robots.txt closes to programs, so there is no box to show for it
                                     // here - the category picker in the row below takes the question.
-                                    visible: !(root.onlineMode && !Bridge.onlineAsk)
+                                    // (And with no box to open, its toggle hides too: a chevron that
+                                    // unfolds into nothing is a trap, not a control.)
+                                    visible: root.searchFoldShown && root.searchOpen
                                     radius: 6   // same corner as the chips beside it
                                     color: Qt.alpha(search.activeFocus ? th.surfaceAlt : th.surface,
                                                     root.plateAlpha)
@@ -1806,7 +1844,13 @@ ApplicationWindow {
                                             onTextChanged: {
                                                 root.query = text
                                                 if (root.onlineMode) Bridge.onlineQuery = text
+                                                // Emptying it with the ✕ inside the box leaves the pointer
+                                                // somewhere else entirely, so the fold is asked about here
+                                                // too rather than waiting for a hover event that may never
+                                                // come.
+                                                headerFold.restart()
                                             }
+                                            onActiveFocusChanged: headerFold.restart()
                                             onAccepted: if (root.onlineMode) Bridge.onlineSearch()
                                         }
                                         IconBtn {
@@ -1815,6 +1859,61 @@ ApplicationWindow {
                                             tip: trs("clear_search")
                                             onClicked: search.text = ""
                                         }
+                                    }
+                                }
+
+                                // Each group folds once the pointer is off BOTH its toggle and its
+                                // content. The check runs on a delay rather than on the instant the
+                                // pointer leaves, because the gap between a toggle and what it opens
+                                // belongs to neither - folding there makes the row flicker under the
+                                // cursor on the way in.
+                                //
+                                // A toggle asks its OWN MouseArea (WinBtn exports hoverArea) rather
+                                // than getting a HoverHandler of its own: a handler laid over a button
+                                // that already has a MouseArea leaves that containsMouse stuck true,
+                                // and the button's tooltip then never goes away - which is exactly what
+                                // the first version of this did to 全部壁纸. Only the two items with no
+                                // hover state of their own - the chip row and the search plate - get one.
+                                HoverHandler { id: menuRowHover; parent: menuRow
+                                    onHoveredChanged: headerFold.restart() }
+                                // The search's own chevron does NOT live here: it stands in the window
+                                // button row at the glass edge (he pointed there), and this box unfolds
+                                // to the left of it. Only the hover handler for the plate stays.
+                                HoverHandler { id: searchBoxHover; parent: searchBox
+                                    onHoveredChanged: headerFold.restart() }
+                                // And the two toggles wake it from their own MouseAreas. Taking the
+                                // handlers off the buttons (the tooltip fix) also took away the only
+                                // thing that ever STARTED this timer - measured: with the pointer on a
+                                // toggle, opening the row and walking straight off it left the row open
+                                // at 7 s, because nothing had restarted the countdown.
+                                Connections {
+                                    target: menuToggle.hoverArea
+                                    function onContainsMouseChanged() { headerFold.restart() }
+                                }
+                                Connections {
+                                    target: searchToggle.hoverArea
+                                    function onContainsMouseChanged() { headerFold.restart() }
+                                }
+
+                                Timer {
+                                    id: headerFold
+                                    // 5 s after the pointer has left both the toggle and what it opens.
+                                    // Long enough to answer the other thing this has to survive - walking
+                                    // across the gap between a button and its content - and short enough
+                                    // that the row does not sit unfolded over the picture for a minute
+                                    // after he has moved on.
+                                    interval: 5000
+                                    onTriggered: {
+                                        if (root.menuOpen && !menuToggle.hoverArea.containsMouse
+                                            && !menuRowHover.hovered)
+                                            root.menuOpen = false
+                                        // A word typed is a word kept: the box only folds while it is
+                                        // empty, and never while it holds the caret - reaching for a
+                                        // card must not throw away what he is in the middle of typing.
+                                        if (root.searchOpen && !searchToggle.hoverArea.containsMouse
+                                            && !searchBoxHover.hovered && search.text.length === 0
+                                            && !search.activeFocus)
+                                            root.searchOpen = false
                                     }
                                 }
                             }
@@ -4069,6 +4168,20 @@ ApplicationWindow {
         anchors.topMargin: 14
 
         WinBtn {
+            // 搜索的折叠钮，按他指的位置贴到玻璃边上：和抽屉入口同一行、同一块 40x28 底板，排在它
+            // 左边；点它，输入框在它左边的内容行里展开。站点自己没有搜索时这颗不出现（见
+            // searchFoldShown），顶栏的右内衬也跟着让回那 46 px。
+            id: searchToggle
+            name: "chevL"
+            // 同一个框问的是两个问题，所以提示跟着这一页现在问哪个走。
+            tip: root.onlineMode ? trs("online_query") : trs("search_placeholder")
+            bubble: false
+            checked: root.searchOpen
+            visible: root.searchFoldShown
+            onClicked: root.searchOpen = !root.searchOpen
+        }
+
+        WinBtn {
             // 抽屉唯一的入口，放在最小化左边（他点的名）。只在 在线 这页出现：别的页面点开它是一扇
             // 空的门，那就不是控件是陷阱。用 WinBtn 而不是 IconBtn 是因为这一列的三颗都是 40x28
             // 同一块底板，混一颗 28 方的进去，四条边就站不齐了。
@@ -4215,16 +4328,29 @@ ApplicationWindow {
             if (!nothing(body)) { g.fillStyle = body; ring(g, 0, k); g.fill() }
             g.lineJoin = "miter"
             if (seedOnly) { hud(g, 2.5, k - 2.5); return }
-            g.strokeStyle = Qt.alpha(primary, 0.22); g.lineWidth = 1; ring(g, 0.5, k - 0.5); g.stroke()
-            g.strokeStyle = primary; g.lineWidth = 2; ring(g, 2.5, k - 2.5); g.stroke()
-            g.strokeStyle = Qt.alpha(secondary, 0.7); g.lineWidth = 1; ring(g, echo, k - (echo - 1)); g.stroke()
+            // `Qt.alpha(c, a)` ASSIGNS the alpha channel, it does not multiply - so
+            // Qt.alpha("transparent", 0.22) is rgba(0,0,0,0.22), a black line. That is what drew two
+            // dark hairlines (plate 75 -> 58 and 48 on the chip's own column) inside every tab that
+            // asked for no frame at all: the chips pass primary/secondary transparent when they are
+            // not the selected one. A colour with no alpha must paint nothing, same rule `body` above
+            // already follows.
+            if (!nothing(primary)) {
+                g.strokeStyle = Qt.alpha(primary, 0.22); g.lineWidth = 1; ring(g, 0.5, k - 0.5); g.stroke()
+                g.strokeStyle = primary; g.lineWidth = 2; ring(g, 2.5, k - 2.5); g.stroke()
+            }
+            if (!nothing(secondary)) {
+                g.strokeStyle = Qt.alpha(secondary, 0.7); g.lineWidth = 1
+                ring(g, echo, k - (echo - 1)); g.stroke()
+            }
             if (!decor) return
             // The broken lines: 2 on / 5 off, and stopped short of the corners so they read as
             // instrument ticks rather than a second box.
-            g.strokeStyle = Qt.alpha(secondary, 0.62); g.lineWidth = 1; g.setLineDash([2, 5])
-            g.beginPath(); g.moveTo(11, k + 9); g.lineTo(11, height - k - 9)
-            g.moveTo(width - 11, k + 9); g.lineTo(width - 11, height - k - 9); g.stroke()
-            g.setLineDash([])
+            if (!nothing(secondary)) {
+                g.strokeStyle = Qt.alpha(secondary, 0.62); g.lineWidth = 1; g.setLineDash([2, 5])
+                g.beginPath(); g.moveTo(11, k + 9); g.lineTo(11, height - k - 9)
+                g.moveTo(width - 11, k + 9); g.lineTo(width - 11, height - k - 9); g.stroke()
+                g.setLineDash([])
+            }
             hud(g, 2.5, k - 2.5)
         }
     }
@@ -4525,6 +4651,10 @@ ApplicationWindow {
         // an open panel has to leave its button marked, or the only way to tell whether the
         // thing is open is to look at the picture it covers.
         property bool checked: false
+        // The speech bubble that follows the pointer onto the button. Off for the two header
+        // toggles, which sit at the glass edge and repeat a name the row beside them already says.
+        // The tip stays either way - it is what names the button to an accessibility client.
+        property bool bubble: true
         signal clicked
         readonly property alias hoverArea: wbHover
 
@@ -4552,7 +4682,9 @@ ApplicationWindow {
         Accessible.role: Accessible.Button
         Accessible.name: wb.tip
         Accessible.onPressAction: wb.clicked()
-        Hint { label: wb.tip; hovered: wb.hoverArea; place: "bottom" }
+        // null in `hovered` is what switches the bubble off: Hint's own visibility is
+        // "hovered !== null && hovered.containsMouse", so this needs no second property on it.
+        Hint { label: wb.tip; hovered: wb.bubble ? wb.hoverArea : null; place: "bottom" }
     }
 
     // One resize zone of a frameless window: it hands the press to the platform, which is the only
