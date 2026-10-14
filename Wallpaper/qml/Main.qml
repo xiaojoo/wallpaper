@@ -698,6 +698,10 @@ ApplicationWindow {
     // fast click-through from becoming five 1-4 MB requests in ten seconds, which is what the site
     // answered with 429.
     property int heroAskIndex: -1
+    // Which card to take once a page the strip asked for has landed: >= 0 counts back from the END of
+    // the new row (a 上一页 that dropped him on its first card would undo the press that got him here),
+    // -1 means nothing pending and slideIndex()'s own fallback - the new page's first card - applies.
+    property int selFromEnd: -1
     function askHeroFull(id) {
         if (!(onlineMode && String(id).indexOf("wh:") === 0)) return
         heroAskIndex = onlineIndexOf(id)
@@ -1941,9 +1945,15 @@ ApplicationWindow {
                                 // 最挤一窗 = 5 格数字 + 2 个省略号 + 两枚箭头。格宽从"这一行还剩
                                 // 多少"倒推而不是写死 36：写死就只会把尾巴挤到面板外面去。26 是三位
                                 // 数字按 12 px 字号放得下的下限，加宽后的抽屉到不了那一步。
+                                // A site that publishes no total gets its own page number and nothing
+                                // else. pageWindow() puts the LAST page in the right-hand cell, and on a
+                                // rolling pager that cell is only ever current+1 - "1 … 4 5" on a site
+                                // that runs to 213 pages reads as a total wrong by two hundred.
                                 readonly property var win: empty ? [0]
-                                                                 : root.pageWindow(Bridge.onlinePage,
-                                                                                   Math.max(1, Bridge.onlineLastPage))
+                                                                 : Bridge.onlinePagesKnown
+                                                                   ? root.pageWindow(Bridge.onlinePage,
+                                                                                     Math.max(1, Bridge.onlineLastPage))
+                                                                   : [Bridge.onlinePage]
                                 readonly property int digits: {
                                     var n = 0
                                     for (var i = 0; i < win.length; ++i) if (win[i] !== 0) ++n
@@ -2081,6 +2091,15 @@ ApplicationWindow {
                         property real picInset: 3
                         readonly property int n: root.shown.length
                         readonly property int sel: root.slideIndex()
+                        // The row can also turn the page. On the 在线 tab the end of the list is not the
+                        // end of the results - one page is 24-36 hits out of up to 7,649 - and until now
+                        // the only way over was the drawer's page bar, which is a click on 抽屉, a scroll
+                        // and a click. These two say what the chevrons are allowed to do at an end.
+                        readonly property bool canNextPage: root.onlineMode
+                                                            && Bridge.onlinePage < Bridge.onlineLastPage
+                                                            && !Bridge.onlineBusy
+                        readonly property bool canPrevPage: root.onlineMode && Bridge.onlinePage > 1
+                                                            && !Bridge.onlineBusy
                         readonly property real pitch: smallW + gap
                         readonly property real rowW: bigW + (n - 1) * pitch
                         // The row's left edge in strip coordinates - the offset the row glides TO.
@@ -2292,7 +2311,10 @@ ApplicationWindow {
                         }
 
                         // Prev / next at the two ends of the row: they move the selection, and the row
-                        // slides under the window to follow. Disabled rather than hidden at an end of
+                        // slides under the window to follow. On the 在线 tab, once the selection is
+                        // already at the end of this page, the same button turns the page instead of
+                        // greying out - and its tip says 上一页/下一页 rather than 上一张/下一张, because
+                        // that is what the press now does. Disabled rather than hidden at a real end of
                         // the list, so the pair does not appear and disappear between slides.
                         // On the idle cards' centre line, not the strip's: the idle cards are 25 px
                         // shorter than the strip and sit on its bottom edge, so the strip's centre is
@@ -2300,7 +2322,7 @@ ApplicationWindow {
                         // 707.5).
                         IconBtn {
                             icon: "chevL"
-                            tip: trs("prev")
+                            tip: strip.sel > 0 ? trs("prev") : trs("online_prev")
                             flat: true
                             box: 44
                             glyph: 34
@@ -2311,12 +2333,19 @@ ApplicationWindow {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.verticalCenterOffset: (strip.bigH - strip.smallH) / 2
                             anchors.leftMargin: 12
-                            enabled: strip.sel > 0
-                            onClicked: strip.go(strip.sel - 1)
+                            enabled: strip.sel > 0 || strip.canPrevPage
+                            onClicked: {
+                                if (strip.sel > 0) { strip.go(strip.sel - 1); return }
+                                if (!strip.canPrevPage) return
+                                // Land on the LAST card of the page before: a press back that put him
+                                // on the first card would undo the press that came before it.
+                                root.selFromEnd = 0
+                                Bridge.onlinePageStep(-1)
+                            }
                         }
                         IconBtn {
                             icon: "chevR"
-                            tip: trs("next")
+                            tip: strip.sel < strip.n - 1 ? trs("next") : trs("online_next")
                             flat: true
                             box: 44
                             glyph: 34
@@ -2327,8 +2356,15 @@ ApplicationWindow {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.verticalCenterOffset: (strip.bigH - strip.smallH) / 2
                             anchors.rightMargin: 12
-                            enabled: strip.sel < strip.n - 1
-                            onClicked: strip.go(strip.sel + 1)
+                            enabled: strip.sel < strip.n - 1 || strip.canNextPage
+                            onClicked: {
+                                if (strip.sel < strip.n - 1) { strip.go(strip.sel + 1); return }
+                                if (!strip.canNextPage) return
+                                // A page nobody has picked a card from yet falls out of slideIndex() as
+                                // 0, which is exactly the first card of the new page.
+                                root.selFromEnd = -1
+                                Bridge.onlinePageStep(1)
+                            }
                         }
                     }
                 }
@@ -3947,7 +3983,15 @@ ApplicationWindow {
         // land - read in the handler itself it is still the previous page's card.
         target: Bridge
         function onOnlineChanged() {
-            Qt.callLater(function () { root.askHeroFull(root.hero ? root.hero.id : "") })
+            Qt.callLater(function () {
+                if (root.selFromEnd >= 0 && root.shown.length > 0) {
+                    const back = root.selFromEnd
+                    root.selFromEnd = -1
+                    strip.go(Math.max(0, root.shown.length - 1 - back))   // asks the hero itself
+                    return
+                }
+                root.askHeroFull(root.hero ? root.hero.id : "")
+            })
         }
     }
 
