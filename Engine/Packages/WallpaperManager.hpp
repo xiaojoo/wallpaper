@@ -127,6 +127,14 @@ public:
     const WallpaperPackage* find(std::string_view id) const;
     bool Scan(std::vector<std::string>& skipped);
 
+    // A clip the settings window is about to show but never imported. `find()` resolves these so the
+    // preview pass can start one; `catalog()` keeps hiding them, so the card row and the status JSON
+    // never show a wallpaper the user did not add. Holds one at a time because the big picture does.
+    bool AddEphemeral(const std::wstring& dir, std::string& error);
+    void DropEphemeral();
+    // The pointer is only good until the next AddEphemeral, which reallocates the vector.
+    const WallpaperPackage* ephemeral() const { return ephemeral_.empty() ? nullptr : &ephemeral_.front(); }
+
     // Which package this monitor should show, honouring per-monitor then "all" assignments.
     std::string WallpaperForMonitor(const MonitorInfo& m, const std::string& fallback) const;
     int FpsForMonitor(const MonitorInfo& m) const;
@@ -178,6 +186,7 @@ private:
     Settings s_;
     Json raw_;                       // the config as loaded, so extra sections survive a save
     std::vector<WallpaperPackage> catalog_;
+    std::vector<WallpaperPackage> ephemeral_;
 };
 
 } // namespace sw

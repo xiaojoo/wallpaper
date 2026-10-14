@@ -338,6 +338,11 @@ const Entry kStrings[] = {
     {"online_category", "分类", "Category"},
     {"online_hero_failed", "原图没取到，现在是站点预览", "original not fetched - this is the site preview"},
     {"online_hero_retry", "重试", "Retry"},
+    // The clip's own two sentences: while it is 10 MB away the big picture is a still frame of it, and
+    // that has to read as "还在取", not as a wallpaper that stopped moving.
+    {"online_clip_fetching", "取视频中", "fetching the clip"},
+    {"online_clip_failed", "视频没取到，画面是它的一帧", "clip not fetched - this is one frame of it"},
+    {"online_preview_rung", "预览清晰度", "Preview clarity"},
     // The strip card's own failure line. It names what is missing (the cover, not the wallpaper) so
     // it cannot be read as the 原图 message above it.
     {"online_thumb_failed", "封面没取到", "Cover did not arrive"},
@@ -458,6 +463,7 @@ Bridge::Bridge(QObject* parent) : QObject(parent) {
     favorites_ = s.value("favorites").toStringList();
     target_ = s.value("target", "all").toString();
     transition_ = s.value("transition", "liquid").toString();
+    previewRung_ = s.value("preview_rung").toString();
     timer_ = new QTimer(this);
     connect(timer_, &QTimer::timeout, this, &Bridge::tick);
     timer_->start(1000);
@@ -594,6 +600,19 @@ void Bridge::setTransition(const QString& mode) {
     QSettings s(QSettings::IniFormat, QSettings::UserScope, "SmartWallpaper", "ui");
     s.setValue("transition", transition_);
     emit transitionChanged();
+}
+
+void Bridge::setPreviewRung(const QString& which) {
+    if (which == previewRung_ || which.isEmpty()) return;
+    previewRung_ = which;
+    QSettings s(QSettings::IniFormat, QSettings::UserScope, "SmartWallpaper", "ui");
+    s.setValue("preview_rung", previewRung_);
+    emit previewRungChanged();
+    // The card under the big picture was fetched at the old rung, so the answer about it is stale:
+    // drop it (which stops the second pass through the QML gate) and ask again at the new one.
+    const QString key = heroKey_;
+    clearClip();
+    if (!key.isEmpty()) requestClip(key);
 }
 
 QString Bridge::pipeName() const { return QStringLiteral(R"(\\.\pipe\SmartWallpaper.Renderer)"); }
@@ -1513,6 +1532,10 @@ void Bridge::setOnlineSource(const QString& name) {
     importRow_ = -1;
     heroKey_.clear();
     heroInFlight_.clear();
+    // A size picked on one site is not carried to the next: 4kwallpapers defaults its own import to
+    // 3840x2160, and letting that land on motionbgs would preview every card at 19-28 MB without him
+    // ever choosing it. Every site starts at the row above - 分辨率下限, the size 入库 takes.
+    previewRung_.clear();
     if (!heroFile_.isEmpty()) { heroFile_.clear(); emit onlineHeroFileChanged(); }
     rebuildOnlineOptions();
     emit onlineChanged();
@@ -1524,8 +1547,13 @@ void Bridge::setOnlineSource(const QString& name) {
 void Bridge::rebuildOnlineOptions() {
     OnlineSource* s = online_.source(onlineSource_);
     onlineOptions_.clear();
+    onlineRungs_.clear();
     if (!s) return;
     for (const auto& o : s->options()) {
+        // The resolution list is the clip preview's menu, kept beside the row the page already draws so
+        // the two cannot disagree about what this site offers.
+        if (o.key == "resolution")
+            for (const auto& v : o.values) onlineRungs_ << QString::fromStdString(v);
         QVariantList vals;
         for (const auto& v : o.values) {
             const QString raw = QString::fromStdString(v);
@@ -1555,6 +1583,23 @@ void Bridge::rebuildOnlineOptions() {
         row.insert("values", vals);
         row.insert("current", QString::fromStdString(s->optionValue(o.key)));
         onlineOptions_.push_back(row);
+        // The same list, handed to 预览清晰度 on its own so that group shows exactly the sizes this
+        // site has rather than a low/mid/high invented here.
+        if (o.key == "resolution") onlineRungs_ = vals;
+    }
+    // A stored size the new site does not publish (a 4K remembered from motionbgs, now on a site whose
+    // top rung is 1440p) is not a choice anybody can see highlighted, so it falls back to the rung
+    // 入库 itself would take - which is also the cheapest answer: the file is already the one being
+    // fetched, so previewing costs nothing extra until he picks another row.
+    QStringList vals;
+    for (const auto& v : onlineRungs_) vals << v.toMap().value("value").toString();
+    if (!vals.contains(previewRung_)) {
+        const QString keep = previewRung_;
+        const QString cur = QString::fromStdString(s->optionValue("resolution"));
+        if (vals.contains(cur)) previewRung_ = cur;
+        else if (!vals.isEmpty()) previewRung_ = vals.first();
+        // The pill row binds on this signal, and `onlineChanged` is not enough to move it.
+        if (previewRung_ != keep) emit previewRungChanged();
     }
 }
 
@@ -1627,7 +1672,7 @@ QString Bridge::onlineCacheDir() const {
     return dir;
 }
 
-QString Bridge::onlineDest(const QVariantMap& row, const QString& url) {
+QString Bridge::onlineDest(const QVariantMap& row, const QString& url, const QString& tag) {
     // The extension comes from the url actually being fetched, so a card whose clip and whose preview
     // frame are both wanted keeps two files (`-10319.jpg` and `-10319.mp4`) instead of writing one
     // over the other.
@@ -1635,8 +1680,8 @@ QString Bridge::onlineDest(const QVariantMap& row, const QString& url) {
     const QString ext = QString::fromStdString(
         s ? s->ExtensionFor(url.toStdString()) : std::string());
     return QDir(onlineCacheDir())
-        .absoluteFilePath(onlineSource_ + QLatin1Char('-')
-                          + row.value("key").toString() + QLatin1Char('.') + ext);
+        .absoluteFilePath(onlineSource_ + QLatin1Char('-') + row.value("key").toString() + tag
+                          + QLatin1Char('.') + ext);
 }
 
 namespace {
@@ -1644,6 +1689,9 @@ namespace {
 // twice as long: 6 s, then 12 s. More than that is the site saying no for this visit.
 constexpr int kHeroRetries = 2;
 constexpr qint64 kHeroBackoffMs = 3000;
+// A clip that gave up stays given up for the rest of the visit unless he asks again: 10 MB of a clip
+// that will not arrive is not worth re-fetching every time the hero drifts back over it.
+constexpr qint64 kClipGiveUpMs = 600000;
 } // namespace
 
 void Bridge::onlineHeroPreview(int index) {
@@ -1670,7 +1718,11 @@ void Bridge::onlineHeroPreview(int index) {
     heroTries_ = 0;
     emit onlineHeroFileChanged();
     if (key.isEmpty()) { setHeroState(QString()); return; }
+    // The clip is asked for on the same schedule as the still: this is the one place that knows a card
+    // became the picture he is looking at. Order matters only in the queue - the still is 405 KB and
+    // the clip is 10 MB, and the sharp frame of it is worth more on screen than its motion.
     requestHero(key);
+    requestClip(key);
 }
 
 QString Bridge::onlineSourceTemplate() const {
@@ -1782,6 +1834,15 @@ void Bridge::onlineHeroRetry() {
     requestHero(heroKey_);
 }
 
+void Bridge::onlineClipRetry() {
+    if (heroKey_.isEmpty()) return;
+    clipTries_ = 0;
+    clipBlockedKey_.clear();
+    clipBlockedUntilMs_ = 0;
+    clipStartMs_ = 0;      // same rule as the still above
+    requestClip(heroKey_);
+}
+
 void Bridge::requestHero(const QString& key) {
     // By key, not by the index the caller had: a page landing in the meantime moves the card.
     int index = -1;
@@ -1870,6 +1931,151 @@ void Bridge::setHeroState(const QString& state) {
     if (heroState_ == state) return;
     heroState_ = state;
     emit onlineHeroStateChanged();
+}
+
+// Which size of this site's own list to preview at. A site that publishes no resolution list gets an
+// empty answer and its cards stay still frames: inventing a size here is how a preview turns into a
+// 404 that can only be seen as "它不动".
+QString Bridge::clipRung() {
+    return onlineRungs_.isEmpty() ? QString() : previewRung_;
+}
+
+// The big picture over an online clip plays the clip rather than a frame of it. Three steps: fetch the
+// video at the rung 预览画质 picks, hand it to the renderer as a throwaway package (`onlineclip`,
+// which registers it and starts the second pass in one command), then let the hero read the frames
+// that pass already ships for imported videos.
+//
+// The download is deliberately not 入库's: a card he only looked at must not end up in the library,
+// and the library copy is fetched at the *import* resolution, which is usually not this one. When the
+// two agree the same file is asked for, and the on-disk check below makes the second one free.
+void Bridge::setOnlineClipWanted(bool on) {
+    if (clipWanted_ == on) return;
+    clipWanted_ = on;
+    emit onlineClipWantedChanged();
+    // Coming back on is the moment the rotation stopped, and the card under the big picture is the one
+    // he chose to look at - ask for it now rather than waiting for the next hero change.
+    if (on && !heroKey_.isEmpty()) requestClip(heroKey_);
+}
+
+void Bridge::requestClip(const QString& key) {
+    if (key.isEmpty() || !clipWanted_) return;
+    OnlineSource* s = online_.source(onlineSource_);
+    if (!s) return;
+    int index = -1;
+    for (int i = 0; i < onlineRows_.size(); ++i)
+        if (onlineRows_[i].toMap().value("key").toString() == key) { index = i; break; }
+    if (index < 0) return;                       // this list no longer holds that card
+    const QVariantMap row = onlineRows_[index].toMap();
+    if (!row.value("mime").toString().startsWith(QLatin1String("video/"))) return;
+    if (row.value("state").toString() == QLatin1String("unsupported")) return;
+    const QString image = row.value("image").toString();
+    if (image.isEmpty() || !OnlineFetcher::sameHost(image, onlineSite_)) return;
+    if (clipKey_ == key && !clipId_.isEmpty()) return;   // this one is already playing
+    if (clipInFlight_ == key) return;                     // and this one is already on its way
+    // Awaiting a backoff, or already given up, is not a moment to start again: this function is also
+    // called once a second by the hero being reassigned the same card, and without this the retry
+    // timer's 6 s and 12 s would be walked straight over. Blocked by key, because moving to another
+    // card has to be able to ask immediately - and only his press on 重试 lifts a giving-up.
+    if (clipBlockedKey_ == key && QDateTime::currentMSecsSinceEpoch() < clipBlockedUntilMs_) return;
+    const QString rung = clipRung();
+    if (rung.isEmpty()) { clearClip(); return; }          // the site names no rungs to choose from
+
+    const QString cur = QString::fromStdString(s->optionValue("resolution"));
+    QString url = image;
+    QString tag;
+    // The rung is one token in the url the site itself printed, so the request for another one is that
+    // token changed - and the file is named after it, which is what lets the 540p preview and the 4K
+    // import of the same card sit beside each other instead of over each other.
+    if (!cur.isEmpty() && rung != cur) { url.replace(cur, rung); tag = QLatin1String("-") + rung; }
+    if (!OnlineFetcher::sameHost(url, onlineSite_)) return;
+    const QString dest = onlineDest(row, url, tag);
+    if (QFileInfo::exists(dest) && QFileInfo(dest).size() > 0) { clipReady(key, dest); return; }
+
+    // One interval for both halves of a card: the site counts its per-minute budget over everything
+    // this host gets, and a card now asks for a frame and a clip.
+    const qint64 last = std::max(heroStartMs_, clipStartMs_);
+    const qint64 since = QDateTime::currentMSecsSinceEpoch() - last;
+    if (last != 0 && since < s->minIntervalMs()) {
+        setClipState(QStringLiteral("queued"));
+        QTimer::singleShot(int(s->minIntervalMs() - since), this, [this, key] {
+            if (key == heroKey_) requestClip(key);
+        });
+        return;
+    }
+    clipInFlight_ = key;
+    clipStartMs_ = QDateTime::currentMSecsSinceEpoch();
+    qWarning("online: clip asks key=%s row=%s want=%s file=%s (try %d of %d)", key.toUtf8().constData(),
+             cur.toUtf8().constData(), rung.toUtf8().constData(),
+             QFileInfo(dest).fileName().toUtf8().constData(), clipTries_ + 1, kHeroRetries + 1);
+    setClipState(QStringLiteral("fetching"));
+    online_.download(*s, url, dest, [this, key, dest](const QString& error, const QString& type) {
+        if (clipInFlight_ == key) clipInFlight_.clear();
+        if (!error.isEmpty()) {
+            qWarning("online: clip %s: %s", key.toUtf8().constData(), error.toUtf8().constData());
+            if (key != heroKey_) return;      // he moved on; nothing retries for a card nobody is on
+            if (clipTries_ < kHeroRetries) {
+                ++clipTries_;
+                const qint64 wait = kHeroBackoffMs << clipTries_;
+                clipBlockedKey_ = key;
+                clipBlockedUntilMs_ = QDateTime::currentMSecsSinceEpoch() + wait;
+                setClipState(QStringLiteral("retrying"));
+                QTimer::singleShot(int(wait), this, [this, key] {
+                    if (key == heroKey_) requestClip(key);
+                });
+            } else {
+                clipBlockedKey_ = key;
+                clipBlockedUntilMs_ = QDateTime::currentMSecsSinceEpoch() + kClipGiveUpMs;
+                setClipState(QStringLiteral("failed"));
+            }
+            return;
+        }
+        // 4kwallpapers answers with the wrong Content-Type, so the bytes decide: an html error page
+        // saved under a clip's name would otherwise be handed to the decoder as if it were a video.
+        const QString real = sniffMedia(dest);
+        if (!real.startsWith(QLatin1String("video/"))) {
+            qWarning("online: clip %s is %s (%s), not a video", key.toUtf8().constData(),
+                     real.toUtf8().constData(), type.toUtf8().constData());
+            if (key == heroKey_) {
+                clipBlockedKey_ = key;
+                clipBlockedUntilMs_ = QDateTime::currentMSecsSinceEpoch() + kClipGiveUpMs;
+                setClipState(QStringLiteral("failed"));
+            }
+            return;
+        }
+        if (clipTries_ != 0) setClipState(QStringLiteral("fetching"));
+        clipTries_ = 0;
+        if (heroKey_ != key) return;   // he moved on; the next look finds the file already there
+        clipReady(key, dest);
+    });
+}
+
+void Bridge::clipReady(const QString& key, const QString& path) {
+    clipKey_ = key;
+    clipPath_ = path;
+    clipTries_ = 0;
+    clipBlockedKey_.clear();
+    clipBlockedUntilMs_ = 0;
+    // The renderer derives the id from the file name, and the file name is the card's key plus the
+    // rung, so this window can say which clip it is asking for without a second round trip.
+    clipId_ = QStringLiteral("pv:") + QFileInfo(path).fileName();
+    setClipState(QStringLiteral("ready"));
+    emit onlineClipChanged();
+}
+
+void Bridge::clearClip() {
+    if (clipKey_.isEmpty() && clipId_.isEmpty() && clipState_.isEmpty()) return;
+    clipKey_.clear();
+    clipId_.clear();
+    clipPath_.clear();
+    clipState_.clear();
+    clipTries_ = 0;
+    emit onlineClipChanged();
+}
+
+void Bridge::setClipState(const QString& state) {
+    if (clipState_ == state) return;
+    clipState_ = state;
+    emit onlineClipChanged();
 }
 
 QString Bridge::heroErrorOf(const QString& error) {
@@ -1993,7 +2199,14 @@ void Bridge::showPreview(const QString& id) {
         // showing 已暂停 over a picture that is already running.
         if (previewPaused_) { previewPaused_ = false; emit previewVideoPausedChanged(); }
         previewBeatMs_ = 0;   // a new wallpaper asks for a beat straight away
-        std::string body = std::format(R"({{"cmd":"preview","arg":"{}"}})", id.toStdString());
+        // A `pv:` id is not in the library, so `preview` could not find it: the engine has to be told
+        // which file to register as a throwaway package first, and `onlineclip` does that and starts
+        // the pass in one command. This is why the id travels as the file's name and not as a row index
+        // - the same clip asked for twice must land on the same id, or the pass restarts and the
+        // picture jumps back to frame zero.
+        const std::string body = id.startsWith(QLatin1String("pv:"))
+            ? std::format(R"({{"cmd":"onlineclip","arg":"{}"}})", clipPath_.toStdString())
+            : std::format(R"({{"cmd":"preview","arg":"{}"}})", id.toStdString());
         Json out;
         request(body.c_str(), 2000, &out);
     }
@@ -2001,10 +2214,20 @@ void Bridge::showPreview(const QString& id) {
 }
 
 void Bridge::hidePreview() {
-    if (!previewTimer_->isActive()) return;
+    // The clip belongs to the pass, not to this window's memory: once nothing is drawing it, the id it
+    // was known by has to go, or the hero keeps asking for a feed the renderer no longer resolves.
+    // Wiped here and announced at the very end - emitting first would run this function again from the
+    // QML gate while the beat timer was still going, and the outer call would then skip the teardown.
+    const bool told = !clipKey_.isEmpty() || !clipId_.isEmpty() || !clipState_.isEmpty();
+    clipKey_.clear(); clipId_.clear(); clipPath_.clear(); clipState_.clear(); clipTries_ = 0;
+    if (!previewTimer_->isActive()) {
+        if (told) emit onlineClipChanged();
+        return;
+    }
     previewTimer_->stop();
     request(R"({"cmd":"previewoff"})", 1000, nullptr);
     previewId_.clear();
+    if (told) emit onlineClipChanged();
 }
 
 void Bridge::previewBeat() {

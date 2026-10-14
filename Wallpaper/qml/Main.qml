@@ -471,7 +471,14 @@ ApplicationWindow {
                                      ? hero.frame_ms : 42
     // Delivered frames, not a flag from the pipe: if the renderer is older than this build or the
     // section is gone, running stays false and the saved strip keeps playing.
-    readonly property bool liveWanted: useLivePreview && previewMotion && !heroIsStill
+    readonly property bool liveWanted: useLivePreview && previewMotion && (!heroIsStill || heroIsClip)
+    // The live id of the clip the renderer is playing for the card under the big picture, and empty
+    // when this card is not the one being fed. A key pair on purpose: one stream carries every preview
+    // frame, so a hero that asked for whatever is arriving would paint the clip he just left.
+    readonly property string heroClipId: hero !== null && Bridge.onlineClipId.length > 0
+                                         && String(hero.key) === Bridge.onlineClipKey
+                                         ? Bridge.onlineClipId : ""
+    readonly property bool heroIsClip: heroClipId.length > 0
     // A still photo has nothing for the second pass to animate that its own file does not show better:
     // the stream is a fixed 1920x1080 grab, the file is the resolution the package was imported at.
     // So the hero reads the file and the pass is not asked for - which also stops the window paying
@@ -869,13 +876,17 @@ ApplicationWindow {
                     // with the old behaviour: `opened ... local_05\video.mp4 via FFmpeg`, then
                     // `live players in this process: 2`, then `closed a player: 1 still live, process
                     // ws 946 MB` (against ~320 MB while one player serves both passes).
-                    // An online card is not in the renderer's library, so there is no second pass of it
-                    // to ask for - and asking would leave this window beating a heartbeat for a pass the
-                    // engine refused to start.
+                    // A clip is 10 MB and a rotation moves every 4 s, so the picture that is only
+                    // passing through does not get one: the fetch is for the card he stopped on.
+                    Bridge.onlineClipWanted = !carouselPlaying
+                    // An online card is not in the renderer's library - unless it is a clip this window
+                    // has just handed over as a throwaway package, which is the one case where a second
+                    // pass of it exists and has to be beaten for.
                     const want = root.hero !== null && root.useLivePreview
-                                 && root.hero.online !== true && !root.heroIsStill
+                                 && (root.heroIsClip
+                                     || (root.hero.online !== true && !root.heroIsStill))
                     if (want)
-                        Bridge.showPreview(root.hero.id)
+                        Bridge.showPreview(root.heroIsClip ? root.heroClipId : root.hero.id)
                     else
                         Bridge.hidePreview()
                     // Set after the request, because a *new* id clears the pause flag inside it: the
@@ -889,6 +900,18 @@ ApplicationWindow {
                 Connections {
                     target: Bridge
                     function onPreviewVideoPausedChanged() { carousel.syncPreview() }
+                }
+                Connections {
+                    target: Bridge
+                    // A clip this window just finished fetching is a second pass that now exists, and
+                    // nothing else re-runs this gate - the hero object did not change, only its feed.
+                    function onOnlineClipChanged() { carousel.syncPreview() }
+                }
+                Connections {
+                    target: root
+                    // Stopping the rotation is the moment the card under the big picture becomes the one
+                    // he is looking at, and that is what lets a clip be fetched for it.
+                    function onCarouselPlayingChanged() { carousel.syncPreview() }
                 }
                 onVisibleChanged: syncPreview()
                 Component.onCompleted: syncPreview()
@@ -963,7 +986,8 @@ ApplicationWindow {
                             anchors.fill: parent
                             anchors.margins: 0
                             active: root.liveWanted
-                            wantedId: root.hero ? root.hero.id : ""
+                            wantedId: root.hero ? (root.heroClipId.length > 0 ? root.heroClipId
+                                                                               : root.hero.id) : ""
                         }
 
                         // The previous card's picture, kept painted underneath the preview layer while
@@ -1430,6 +1454,26 @@ ApplicationWindow {
                                 text: trs("online_hero_retry")
                                 onClicked: Bridge.onlineHeroRetry()
                             }
+                            // A clip's motion is its own download - 10 MB against the frame's 405 KB -
+                            // so the big picture can sit on one still frame for a while with nothing on
+                            // this bar saying why. Without this line a slow fetch reads as a wallpaper
+                            // that stopped moving, which is the complaint he can only make once.
+                            Text {
+                                id: clipFetch
+                                readonly property string st: Bridge.onlineClipState
+                                visible: root.hero !== null && root.hero.online === true
+                                         && (st === "fetching" || st === "queued" || st === "retrying"
+                                             || st === "failed")
+                                text: st === "failed" ? trs("online_clip_failed") : trs("online_clip_fetching")
+                                color: st === "failed" ? "#F2A33C" : "#C6CEDA"
+                                font.family: root.fontFamily; font.pixelSize: 12
+                            }
+                            Btn {
+                                visible: clipFetch.visible && Bridge.onlineClipState === "failed"
+                                compact: true
+                                text: trs("online_hero_retry")
+                                onClicked: Bridge.onlineClipRetry()
+                            }
                             Item { Layout.fillWidth: true }
                             // On-state is the icon's own colour, like the favourite - not a border.
                             IconBtn {
@@ -1439,7 +1483,8 @@ ApplicationWindow {
                                 // live), so the button that means 动/不动 on every other card had
                                 // nothing to act on and sat disabled - which is how he read it:
                                 // 「自己上传的视频，这个播放、暂停按钮不能用」.
-                                readonly property bool isClip: root.hero !== null && root.hero.type === "video"
+                                readonly property bool isClip: root.hero !== null
+                                                               && (root.hero.type === "video" || root.heroIsClip)
                                 icon: "motion"
                                 tip: isClip ? trs(Bridge.previewVideoPaused ? "video_resume" : "video_pause")
                                             : trs("preview_motion")
@@ -2019,6 +2064,16 @@ ApplicationWindow {
                                         onPicked: function (v) { Bridge.onlineSetOption(modelData.key, v) }
                                     }
                                 }
+                                // 这一组是我们自己的，不是站点声明的：站点那行 分辨率下限 决定"存进库"
+                                // 是哪一档，这一行决定"看一张片子"要下多少兆。摆在筛选列末尾，和它管的
+                                // 那一行挨着，选项就是上面那行的尺寸原样搬过来（motionbgs 实测五张卡：
+                                // 960x540 是 0.8-1.0 MB、1920x1080 是 9.7-13.7、3840x2160 是 19.4-28.8）。
+                                PillGroup {
+                                    title: trs("online_preview_rung")
+                                    items: Bridge.onlineRungs
+                                    current: Bridge.previewRung
+                                    onPicked: function (v) { Bridge.setPreviewRung(v) }
+                                }
 
                             }
                         }
@@ -2283,6 +2338,13 @@ ApplicationWindow {
                                 // Image.source 是不变的，Qt 不会重取，所以重试带一个递增的 ?r=。
                                 property int retry: 0
                                 readonly property bool picFailed: picImg.status === Image.Error
+                                // Whether this card is a clip. A local package says it in `type`; an
+                                // online row cannot - its card is a still cover on purpose (the hero
+                                // hold waits for that jpg to land, and retyping the card would switch
+                                // that off), so the only thing that knows is the mime the site reported.
+                                readonly property bool isClip: slide !== undefined
+                                                               && (String(slide.type) === "video"
+                                                                   || String(slide.mime).indexOf("video/") === 0)
                                 width: strip.cardW(src)
                                 height: sel ? strip.bigH : strip.smallH
                                 x: strip.cardX(src)
@@ -2406,6 +2468,28 @@ ApplicationWindow {
                                             onClicked: { strip.go(thumbCell.src); thumbCell.retry++ }
                                         }
                                     }
+                                    // A clip's card is otherwise indistinguishable from a photo's until
+                                    // it reaches the desktop, so the mark goes on the card. It reuses the
+                                    // missing-cover recipe above - the page's only other treatment for
+                                    // information that has to sit on top of arbitrary artwork: a dark
+                                    // plate, a light glyph. Not clickable; it says, it does not do.
+                                    Rectangle {
+                                        visible: thumbCell.isClip
+                                        anchors.left: parent.left
+                                        anchors.bottom: parent.bottom
+                                        anchors.leftMargin: 8
+                                        anchors.bottomMargin: 6
+                                        width: 22
+                                        height: 16
+                                        radius: 4
+                                        color: Qt.alpha(th.bg, 0.72)
+                                        Icon {
+                                            anchors.centerIn: parent
+                                            name: "play"
+                                            px: 11
+                                            tint: th.text
+                                        }
+                                    }
                                 }
                                 // On top of the picture: the rim, its inner echo, the broken side lines
                                 // and the HUD marks. Same geometry on every card. **Every colour on the
@@ -2432,7 +2516,13 @@ ApplicationWindow {
                                         cursorShape: Qt.PointingHandCursor
                                         onPressed: forceActiveFocus()   // takes the caret out of any field
                                     anchors.fill: parent
-                                    onClicked: strip.go(thumbCell.src)
+                                    onClicked: {
+                                        // Pressing a card is him choosing it, which is the one thing the
+                                        // rotation is not: the clip may be fetched for it even while the
+                                        // strip keeps walking. The next automatic move closes this again.
+                                        Bridge.onlineClipWanted = true
+                                        strip.go(thumbCell.src)
+                                    }
                                 }
                             }
                         }
