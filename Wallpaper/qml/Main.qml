@@ -189,9 +189,11 @@ ApplicationWindow {
     // so that overlay was a foreign picture arriving at full opacity - the flash he saw), and dipping
     // the whole stack to the box's dark base was rejected for the same reason: it dims. So the
     // outgoing frame is *captured* instead - whichever layer really is on screen, which is why one
-    // mechanism covers the live, motion and still cases alike - and the swap happens underneath it
-    // while that capture is taken away by the transition picked in 设置 > 通用 > 切换动画: "dissolve"
-    // fades it, "liquid" churns it into the new picture (shaders/HeroLiquid.frag), "none" cuts.
+    // mechanism covers the live, motion and still cases alike - and the swap happens underneath it.
+    // The capture is raised for all three settings of 设置 > 通用 > 切换动画 and is held until the new
+    // card's own picture can be painted; what the setting picks is only how it is taken away:
+    // "dissolve" fades it (heroOutFade), "liquid" churns it into the new picture
+    // (shaders/HeroLiquid.frag), "none" drops it in the frame the picture lands.
     readonly property var pendingHero: current !== null ? current : applied
     property var hero: null
     // 0 = nothing in flight, 1 = the capture is fading out, 2 = the liquid morph is running.
@@ -332,6 +334,9 @@ ApplicationWindow {
             heroLiquidRotBase = (heroLiquidRotBase + heroLiquidRotRad) % 6.28319
             heroLiquidRun.restart()
         }
+        // 无: the held cover leaves in the frame the picture arrives. heroFxStop also replays a pick
+        // that arrived during the wait, which is the only thing that used to do that for this mode.
+        else if (heroFx === 0) heroFxStop()
         else heroOutFade.restart()
     }
     function heroUncoverNow() {
@@ -398,8 +403,13 @@ ApplicationWindow {
         // The first picture has nothing to dissolve *from*, and before the window has been drawn the
         // morph's shader has no status to report either, so it must land at once.
         if (hero === null) { hero = pendingHero; return }
-        if (snapBusy || heroSnapWatch.running || heroFx !== 0) { heroRetry = true; return }
-        if (Bridge.transition === "none") { heroFxStop(); snapUrl = ""; hero = pendingHero; return }
+        // A wait is in flight too now: a pick that lands while the cover is still holding for the
+        // previous pick's picture is remembered, and heroFxStop replays it once this swap commits.
+        if (snapBusy || heroSnapWatch.running || heroFx !== 0 || heroWaitPicture) { heroRetry = true; return }
+        // 无 used to skip the capture entirely and move the hero in that same frame, which is what put
+        // the site's 400x225 thumbnail on screen for as long as that card's original took to arrive.
+        // It captures now; what it still skips is the *taking away* - the cover is held and then
+        // dropped in one frame instead of fading or churning. A cut that waits is still a cut.
         // Set before the capture starts: the two grabs the morph needs are switched on by this.
         heroFx = heroFxMode()
         snapBusy = true
@@ -1240,9 +1250,11 @@ ApplicationWindow {
                         // Dissolving: this *is* the overlay, so it paints for the whole fade.
                         // Morphing: it paints until the effect has taken over, then stands down -
                         // the effect is opaque over the same rect, so painting both is for nothing.
+                        // 无: it paints while the swap is still waiting for the new card's picture,
+                        // and heroStartFx drops it in the frame that wait ends.
                         visible: root.heroFx === root.fxDissolve ? opacity > 0.001
                                  : root.heroFx === root.fxLiquid ? (!root.heroLiquidArmed && root.heroSnapFresh)
-                                 : false
+                                 : (root.heroWaitPicture && root.heroSnapFresh)
                         opacity: 0
                         source: root.snapUrl
                         NumberAnimation {
