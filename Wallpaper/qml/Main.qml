@@ -2103,10 +2103,35 @@ ApplicationWindow {
                         readonly property real pitch: smallW + gap
                         readonly property real rowW: bigW + (n - 1) * pitch
                         // The row's left edge in strip coordinates - the offset the row glides TO.
+                        // `pan` is the wheel's look-around on top of the offset the selection asks for:
+                        // scrolling the strip shows the neighbours without moving the preview, which is
+                        // the whole point - the selection IS the preview.
+                        property real pan: 0
                         readonly property real rowX: {
                             if (rowW <= width) return (width - rowW) / 2
                             return Math.max(width - rowW,
-                                            Math.min(0, (width - bigW) / 2 - sel * pitch))
+                                            Math.min(0, (width - bigW) / 2 - sel * pitch + pan))
+                        }
+                        // dx > 0 looks at later cards. Once the row cannot move any further that way,
+                        // the same gesture turns the page - the end of a page of 36 is not the end of
+                        // the 7,649 this site has.
+                        // dx > 0 looks at LATER cards. The row's left edge is `base + pan`, so looking
+                        // later means making the offset SMALLER - reading this as `at + dx` moves the
+                        // row the right way but then asks for the previous page at the end of the row,
+                        // which is how the first two versions of this got it backwards.
+                        function scrollBy(dx) {
+                            if (rowW <= width) return          // nothing to look past
+                            const base = (width - bigW) / 2 - sel * pitch
+                            const lo = (width - rowW) - base, hi = -base
+                            // Fold the offset back onto the range the row can actually sit at BEFORE
+                            // adding to it. Without this the first notch is dead: with the selection on
+                            // the first card `base` is +586, so `pan` has to burn that slack before
+                            // rowX moves - a whole notch swallowed at the start of every page.
+                            const at = Math.max(lo, Math.min(hi, pan))
+                            const want = Math.max(lo, Math.min(hi, at - dx))
+                            if (want !== at) { pan = want; return }
+                            if (dx > 0 && canNextPage) { root.selFromEnd = -1; pan = 0; Bridge.onlinePageStep(1) }
+                            else if (dx < 0 && canPrevPage) { root.selFromEnd = 0; pan = 0; Bridge.onlinePageStep(-1) }
                         }
                         function cardW(i) { return i === sel ? bigW : smallW }
                         function slotX(i) { return i * pitch + (i > sel ? bigW - smallW : 0) }
@@ -2136,6 +2161,9 @@ ApplicationWindow {
                         }
                         function go(i) {
                             if (i < 0 || i >= root.shown.length) return
+                            // A pick puts the row back under the thing that was picked: a pan that
+                            // survived it would leave the new selection off-screen.
+                            pan = 0
                             root.selectedId = root.shown[i].id
                             root.askHeroFull(root.shown[i].id)
                             root.motionT0 = Date.now()
@@ -2364,6 +2392,24 @@ ApplicationWindow {
                                 // 0, which is exactly the first card of the new page.
                                 root.selFromEnd = -1
                                 Bridge.onlinePageStep(1)
+                            }
+                        }
+
+                        // The wheel over the row looks along it WITHOUT touching the preview - the
+                        // selection is the preview, and this moves only the offset, never `sel`.
+                        // One mouse notch (angleDelta 120) is exactly one card's pitch, so the row
+                        // advances the way it does under the chevrons; a trackpad's smaller deltas
+                        // scale off the same constant. At either end of the row the same gesture turns
+                        // the page, which is what makes 36 hits a page rather than a wall.
+                        //
+                        // The mapping, said without left/right because both readings exist: wheel DOWN
+                        // brings the LATER cards into view, wheel UP brings the EARLIER ones back. At
+                        // the far end of the row one more DOWN turns the next page; at the near end one
+                        // more UP turns the previous one. The minus is what makes the wheel agree with
+                        // the chevrons under it - angleDelta is positive on an up-rotate.
+                        WheelHandler {
+                            onWheel: function (event) {
+                                strip.scrollBy(-event.angleDelta.y * strip.pitch / 120)
                             }
                         }
                     }
