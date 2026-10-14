@@ -56,8 +56,8 @@ public static class GC2
         RECT r; GetWindowRect(h, out r);
         // HWND_TOPMOST when asked: a game client that runs topmost cannot be out-raised with
         // HWND_TOP, and the guard below would (correctly) refuse every point.
-        if (topmost) { SetWindowPos(h, (IntPtr)(-2), 0, 0, 0, 0, 1 | 0x10); }
-        else { SetWindowPos(h, (IntPtr)0, 0, 0, 0, 0, 1 | 0x10); }   // TOP, NOSIZE, NOACTIVATE
+        if (topmost) { SetWindowPos(h, (IntPtr)(-2), 0, 0, 0, 0, 0x2 | 1 | 0x10); }
+        else { SetWindowPos(h, (IntPtr)0, 0, 0, 0, 0, 0x2 | 1 | 0x10); }   // TOP, NOMOVE, NOSIZE, NOACTIVATE
         System.Threading.Thread.Sleep(300);
 
         int vx = GetSystemMetrics(76), vy = GetSystemMetrics(77);
@@ -71,7 +71,7 @@ public static class GC2
             RECT cr; GetClientRect(h, out cr);
             if (cx < 0 || cy < 0 || cx >= cr.R || cy >= cr.B) {
                 log.Add("ABORT at " + p + ": client point " + cx + "," + cy + " is outside the window's " + cr.R + "x" + cr.B);
-                if (topmost) SetWindowPos(h, (IntPtr)(-3), 0, 0, 0, 0, 1 | 0x10 | 0x1);   // NOTOPMOST
+                if (topmost) SetWindowPos(h, (IntPtr)(-3), 0, 0, 0, 0, 0x2 | 1 | 0x10);   // NOTOPMOST, NOMOVE
                 return string.Join("\n", log.ToArray());
             }
             if (post) {
@@ -91,7 +91,7 @@ public static class GC2
             if (hit != h) {
                 var cb = new StringBuilder(300); if (hit != IntPtr.Zero) GetClassNameW(hit, cb, 300);
                 log.Add("ABORT at " + p + ": point belongs to 0x" + ((long)hit).ToString("X") + " (" + cb + "), not our window");
-                if (topmost) SetWindowPos(h, (IntPtr)(-3), 0, 0, 0, 0, 1 | 0x10 | 0x1);   // NOTOPMOST
+                if (topmost) SetWindowPos(h, (IntPtr)(-3), 0, 0, 0, 0, 0x2 | 1 | 0x10);   // NOTOPMOST, NOMOVE
                 return string.Join("\n", log.ToArray());
             }
             int ax = (int)(((long)(px - vx) * 65535) / (vw - 1));
@@ -104,7 +104,7 @@ public static class GC2
             System.Threading.Thread.Sleep(450);
             log.Add("clicked " + p + " (verified on our window)");
         }
-        if (topmost) SetWindowPos(h, (IntPtr)(-3), 0, 0, 0, 0, 1 | 0x10 | 0x1);   // NOTOPMOST
+        if (topmost) SetWindowPos(h, (IntPtr)(-3), 0, 0, 0, 0, 0x2 | 1 | 0x10);   // NOTOPMOST, NOMOVE
         if (outPath.Length > 0) {
             var bmp = new Bitmap(r.R - r.L, r.B - r.T);
             using (var g = Graphics.FromImage(bmp)) {
