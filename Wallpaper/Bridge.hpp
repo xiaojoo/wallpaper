@@ -170,6 +170,25 @@ class Bridge final : public QObject {
     Q_PROPERTY(QString onlineHeroState READ onlineHeroState NOTIFY onlineHeroStateChanged)
     // Only the code (429, closed) - the whole sentence goes to the log.
     Q_PROPERTY(QString onlineHeroError READ onlineHeroError NOTIFY onlineHeroStateChanged)
+    // The clip the renderer's second pass is playing for the card under the big picture, and how its
+    // download is going. A pair again: the live layer must refuse frames that belong to another card,
+    // which is the same reason `onlineHeroKey` exists. Empty id means nothing is being fed.
+    Q_PROPERTY(QString onlineClipId READ onlineClipId NOTIFY onlineClipChanged)
+    Q_PROPERTY(QString onlineClipKey READ onlineClipKey NOTIFY onlineClipChanged)
+    Q_PROPERTY(QString onlineClipState READ onlineClipState NOTIFY onlineClipChanged)
+    // Which rung of the site's own resolution list the preview asks for. It is a size the site
+    // publishes ("960x540"), not a made-up low/mid/high: the only thing that has to be true is that
+    // swapping the token in the url lands on a file the site actually has. Held in ui.ini, because it
+    // decides how many megabytes a browse session costs.
+    Q_PROPERTY(QString previewRung READ previewRung WRITE setPreviewRung NOTIFY previewRungChanged)
+    // That list, in the site's own order and with its own labels - the same rows the 分辨率下限 group
+    // shows, so the two can never disagree about what this site offers.
+    Q_PROPERTY(QVariantList onlineRungs READ onlineRungs NOTIFY onlineChanged)
+    // Whether a clip may be fetched for the card under the big picture. Off while the rotation is
+    // playing: one clip is 10 MB and a rotation moves every 4 s, which is 150 MB a minute of pictures
+    // nobody stopped on. Turning it back on asks again for whichever card is up at that moment.
+    Q_PROPERTY(bool onlineClipWanted READ onlineClipWanted WRITE setOnlineClipWanted
+               NOTIFY onlineClipWantedChanged)
 
 public:
     explicit Bridge(QObject* parent = nullptr);
@@ -291,6 +310,18 @@ public:
     QString onlineHeroKey() const { return heroKey_; }
     QString onlineHeroState() const { return heroState_; }
     QString onlineHeroError() const { return heroError_; }
+    QString onlineClipId() const { return clipId_; }
+    QString onlineClipKey() const { return clipKey_; }
+    QString onlineClipState() const { return clipState_; }
+    QString previewRung() const { return previewRung_; }
+    // Q_INVOKABLE because the drawer's pill row calls it by name, and a property's WRITE accessor is
+    // not callable from QML under that name - measured: five presses on 低, five lines of
+    // "TypeError: Property 'setPreviewRung' of object sw::Bridge is not a function" in ui.log and the
+    // pill never moving. Every setter this window calls by name carries it (setFit, setTransition).
+    Q_INVOKABLE void setPreviewRung(const QString& which);
+    QVariantList onlineRungs() const { return onlineRungs_; }
+    bool onlineClipWanted() const { return clipWanted_; }
+    void setOnlineClipWanted(bool on);
     void setOnlineSource(const QString& name);
     void setOnlineQuery(const QString& q) { onlineQuery_ = q; }
 
@@ -383,6 +414,8 @@ public:
     Q_INVOKABLE void onlineHeroPreview(int index);
     // The caption's 重试: the backoff gave up on this card, and he is asking for another round.
     Q_INVOKABLE void onlineHeroRetry();
+    // The same second chance for the clip that is playing this card's motion.
+    Q_INVOKABLE void onlineClipRetry();
     // 用户自己接一个站：抓取语言就是内置源那一份 json，所以"通配"不需要新代码，只需要一个能
     // 写文件的入口 + 一次重新加载。三个方法都只在设置窗这一侧，引擎仍然零网络。
     Q_INVOKABLE QString onlineSourceTemplate() const;
@@ -398,6 +431,9 @@ signals:
     void onlineProgressChanged();
     void onlineHeroFileChanged();
     void onlineHeroStateChanged();
+    void onlineClipChanged();
+    void onlineClipWantedChanged();
+    void previewRungChanged();
     void langChanged();
     void targetChanged();
     void messageChanged();
@@ -428,11 +464,19 @@ private:
     // the same row, so on a picture source the original he looked at first is the file the import
     // registers without asking the site again. A source that names a separate `hero` gets a second,
     // differently-suffixed file for it.
-    QString onlineDest(const QVariantMap& row, const QString& url);
+    QString onlineDest(const QVariantMap& row, const QString& url, const QString& tag = QString());
     // The hero's original, in three parts: find the card by its key (the rows shift under a page
     // change, an index does not survive it), then the one state transition every caller reports.
     void requestHero(const QString& key);
     void setHeroState(const QString& state);
+    // The same three parts for a clip's video, and the one thing it does that a picture never needs:
+    // hand the finished file to the renderer as a throwaway package so the second pass has something
+    // to decode. `rung` is the resolution this site publishes, empty for a site that names none.
+    void requestClip(const QString& key);
+    QString clipRung();
+    void clipReady(const QString& key, const QString& path);
+    void setClipState(const QString& state);
+    void clearClip();
     // "429" / "closed" - what fits in the caption. The full sentence goes to the log.
     static QString heroErrorOf(const QString& error);
     // The renderer's answer to addimage is "queued", so the package this window is waiting for has to
@@ -539,7 +583,7 @@ private:
 
     // ------------------------------------------------------------------ 在线源
     OnlineFetcher online_;
-    QVariantList onlineRows_, onlineSourceItems_, onlineOptions_;
+    QVariantList onlineRows_, onlineSourceItems_, onlineOptions_, onlineRungs_;
     QString onlineSource_, onlineQuery_, onlineError_, onlineSite_;
     int onlinePage_ = 1, onlineLastPage_ = 1;
     qint64 onlineTotal_ = 0;
@@ -568,6 +612,21 @@ private:
     QString heroInFlight_;
     qint64 heroStartMs_ = 0;
     int heroTries_ = 0;
+    // The clip's own download, on the same terms: which card, which file is on its way, when the last
+    // one started. The interval gate reads this *and* the hero's, because a card asks for two files
+    // from one site and the site counts both against its per-minute budget.
+    QString clipKey_, clipId_, clipPath_, clipState_, clipInFlight_;
+    qint64 clipStartMs_ = 0;
+    int clipTries_ = 0;
+    // Which card is currently in a backoff, and until when. Keyed rather than a flag: moving to a
+    // different card has to be able to ask immediately.
+    QString clipBlockedKey_;
+    qint64 clipBlockedUntilMs_ = 0;
+    // Starts closed on purpose: the QML gate opens it, and a default of true would let every card the
+    // rotation walks past ask for its clip before the first syncPreview had run.
+    bool clipWanted_ = false;
+    // Empty until it is normalised against the site's own list - see rebuildOnlineOptions.
+    QString previewRung_;
 
     quintptr chromeHwnd_ = 0;   // the settings window, for showCommand
 };

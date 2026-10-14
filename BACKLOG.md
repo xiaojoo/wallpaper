@@ -955,3 +955,9 @@ Application::BuildThumbnails ← Application::Start
    所以仍退回 v1。判据：`status.machine.gpu_mem_reserved_mb` 出现且 `used + reserved + free == total`，
    并且和 nvidia-smi 的差进到 ±30 MB。没有用"减掉一个常量"的写法糊过去。
 
+
+7. **在线：切站不重搜。** 抽屉里点另一个站的药丸，`Bridge::setOnlineSource` 只把 `onlineRows_` 清空、把页码复位（Bridge.cpp:1531），不发请求；
+   于是界面停在"这个站的条件 + 空的格子"上，页码条显示 0，要再按一下 搜索 才出图。`onlineSetOption` 是
+   `setOnlineSource` + `onlineSearch()` 两件事，所以改分类/分辨率反而会出图。判据：点站名之后 `ui.log` 里应当立刻
+   出现一条该站的 `online: GET`，且格子不为空。没做的原因：这是浏览页自己的既有行为，和这次"在线片子实时播放"
+   是两件事，混在一起改会把下载闸门的复量一起弄脏。

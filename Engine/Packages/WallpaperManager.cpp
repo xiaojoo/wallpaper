@@ -234,8 +234,23 @@ bool WallpaperManager::Scan(std::vector<std::string>& skipped) {
 const WallpaperPackage* WallpaperManager::find(std::string_view id) const {
     for (auto& p : catalog_)
         if (p.id() == id) return &p;
+    for (auto& p : ephemeral_)
+        if (p.id() == id) return &p;
     return nullptr;
 }
+
+bool WallpaperManager::AddEphemeral(const std::wstring& dir, std::string& error) {
+    auto p = WallpaperPackage::LoadFromDir(dir, error);
+    if (!p) return false;
+    // One at a time: a second preview target would need a second decoder, and the big picture only
+    // ever shows the clip it is on. Re-adding the same key replaces it rather than growing the list.
+    ephemeral_.clear();
+    Info(MOD, "ephemeral {}", p->summary());
+    ephemeral_.push_back(std::move(*p));
+    return true;
+}
+
+void WallpaperManager::DropEphemeral() { ephemeral_.clear(); }
 
 bool WallpaperManager::MatchMonitor(const Assignment& a, const MonitorInfo& m) const {
     if (a.monitor.empty() || a.monitor == "all" || a.monitor == "*") return true;

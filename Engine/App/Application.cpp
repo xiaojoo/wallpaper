@@ -460,6 +460,56 @@ std::string AddVideoPackage(const std::wstring& root, const std::wstring& srcFil
          duration, probe.codec);
     return id;
 }
+
+// Writes a manifest for a clip that is only being looked at, never imported. The file stays where the
+// settings window put it under cache\preview and the manifest goes beside it, because a package reads
+// its video as `dir() + "\" + videoFile()` - so previewing costs neither a copy of a 19-29 MB clip nor
+// a hard link, and the library never gains a row for something he only scrolled past.
+//
+// The id is prefixed so it cannot collide with a folder, and it is `dir\wallpaper.json`'s own "id"
+// rather than the folder name because the folder is named after the site's item key, which contains
+// characters the id travels through in a JSON string on a pipe.
+bool WriteClipPreviewManifest(const std::wstring& file, std::wstring& dir, std::string& id,
+                              std::string& error) {
+    namespace fs = std::filesystem;
+    if (!fs::exists(file)) { error = "clip does not exist"; return false; }
+    dir = fs::path(file).parent_path().wstring();
+    VideoProbe probe{};
+    std::string perr;
+    if (!FfmpegProbeVideo(file, probe, perr)) { error = perr; return false; }
+    if (!probe.w || !probe.h) { error = "the video has no readable frame size"; return false; }
+
+    id = "pv:" + ToUtf8(fs::path(file).filename().wstring());
+    const int fps = probe.fps > 1.0 ? int(probe.fps + 0.5) : 30;
+    // The same numbers a real package carries, so the preview pass reads them the same way: a manifest
+    // that names a video has to ask for the video renderer, or the clip plays nowhere.
+    Json j = Json::Object();
+    j.set("id", Json::Of(id));
+    j.set("name", Json::Of(ToUtf8(fs::path(file).filename().wstring())));
+    j.set("category", Json::Of(std::string("在线视频")));
+    j.set("renderer", Json::Of(std::string("video")));
+    j.set("video", Json::Of(ToUtf8(fs::path(file).filename().wstring())));
+    j.set("loop", Json::Of(true));
+    j.set("width", Json::Of((long long)probe.w));
+    j.set("height", Json::Of((long long)probe.h));
+    j.set("duration_s", Json::Of(probe.duration_s));
+    j.set("fps", Json::Of(fps));
+    j.set("quality", Json::Of(std::string("high")));
+    j.set("shader", Json::Of(std::string("Video.hlsl")));
+    Json pr = Json::Object();
+    pr.set("zoom", Json::Of(1.0));
+    pr.set("src_aspect", Json::Of(double(probe.w) / double(probe.h)));
+    pr.set("vignette", Json::Of(0.0));
+    pr.set("drift", Json::Of(0.0));
+    pr.set("saturation", Json::Of(1.0));
+    pr.set("brightness", Json::Of(1.0));
+    pr.set("bt601", Json::Of(probe.bt601 ? 1.0 : 0.0));
+    j.set("params", std::move(pr));
+    if (!WriteFileUtf8(dir + L"\\wallpaper.json", j.dump(2))) { error = "cannot write manifest"; return false; }
+    Info(MOD, "preview manifest {} ({}x{}, {:.2f} fps, {:.1f} s)", id, probe.w, probe.h, probe.fps,
+         probe.duration_s);
+    return true;
+}
 } // namespace
 
 // Removes an imported image package - the copy we made under Wallpapers\local_NN, never the file the
@@ -2363,6 +2413,11 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
     std::string result;
     if (action == "apply") {
         std::string monitor = arg2.empty() ? "all" : arg2;
+        // A preview scratch clip is not a wallpaper. The assignment survives in config.json across a
+        // restart, and cache\preview is thrown away, so accepting one here would put a picture on his
+        // desktop that comes back missing the next time the folder is cleaned.
+        if (arg.rfind("pv:", 0) == 0)
+            return std::format(R"({{"ok":false,"code":"preview_only","error":"{} is a preview clip, not a wallpaper"}})", arg);
         // A pause zeroes the slot's whole frame budget, so a wallpaper applied while paused reloads and
         // then draws nothing ever: measured 2026-10-14, a still went into the assignment, this command
         // answered ok, and the slot sat at frames=0 / error empty with the desktop showing the system
@@ -2850,6 +2905,24 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
             result = std::format(R"({{"ok":true,"players":{}}})", list.dump(0));
     } else if (action == "delimage") {
         result = DeleteImagePackage(arg);
+    } else if (action == "onlineclip") {
+        // Preview a clip the settings window downloaded but never imported. `arg` is the file it wrote
+        // under cache\preview; the answer is the same shape `preview` gives so the window can treat the
+        // two the same way.
+        std::string err;
+        std::wstring dir;
+        std::string id;
+        if (!WriteClipPreviewManifest(ToWide(arg), dir, id, err)) {
+            result = std::format(R"({{"ok":false,"error":"{}"}})", err);
+        } else if (!wpm_.AddEphemeral(dir, err)) {
+            result = std::format(R"({{"ok":false,"error":"{}"}})", err);
+        } else if (!StartPreview(id, err)) {
+            wpm_.DropEphemeral();
+            result = std::format(R"({{"ok":false,"error":"{}"}})", err);
+        } else {
+            result = std::format(R"({{"ok":true,"preview":"on","id":"{}","size":"{}x{}","fps":{}}})",
+                                 preview_.id, preview_.w, preview_.h, kPreviewFps);
+        }
     } else if (action == "preview") {
         std::string err;
         result = StartPreview(arg, err)
@@ -2858,6 +2931,9 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
                      : std::format(R"({{"ok":false,"error":"{}"}})", err);
     } else if (action == "previewoff") {
         StopPreview("ipc");
+        // The scratch clip is only findable while something is looking at it. Without this a `pv:` id
+        // stays resolvable after the pass ends, and `find()` is the same door the desktop loads through.
+        wpm_.DropEphemeral();
         result = R"({"ok":true,"preview":"off"})";
     } else if (action == "previewbeat") {
         preview_.lastBeatMs = GetTickCount64();
