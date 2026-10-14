@@ -136,9 +136,11 @@ void TrayMenu::syncStates() {
     // and compiled the pass. Grey it out when it cannot, rather than letting the tick move and the
     // desktop stay as it was.
     orbit_->setEnabled(up && bridge_.orbitIcons() && bridge_.orbitReady());
-    // A still on the desktop has nothing playing, so the hold has no effect to show - grey it rather
-    // than let the tick move and the wallpaper stay exactly as it was.
-    pauseWallpaper_->setEnabled(up && bridge_.showingDynamic());
+    // A still on the desktop has nothing playing, so *starting* a hold has no effect to show - that row
+    // would be a dead control. But once a hold from an earlier wallpaper is on, the row is the only way
+    // off it, and the still is exactly what makes it invisible: the hold zeroes the frame budget, so the
+    // picture he just applied never draws a frame. Grey it only when there is genuinely nothing to undo.
+    pauseWallpaper_->setEnabled(up && (bridge_.showingDynamic() || bridge_.paused()));
     // Nothing is turning when the ring is off, so there is nothing to hold either.
     pauseRing_->setEnabled(up && bridge_.orbit());
     hideIcons_->setEnabled(up);

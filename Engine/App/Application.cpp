@@ -2363,6 +2363,12 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
     std::string result;
     if (action == "apply") {
         std::string monitor = arg2.empty() ? "all" : arg2;
+        // A pause zeroes the slot's whole frame budget, so a wallpaper applied while paused reloads and
+        // then draws nothing ever: measured 2026-10-14, a still went into the assignment, this command
+        // answered ok, and the slot sat at frames=0 / error empty with the desktop showing the system
+        // wallpaper underneath. Asking for a picture is the intent to see it, so the hold ends here -
+        // the same rule the preview pass already applies to a new target.
+        paused_ = false;
         wpm_.SetAssignment(monitor, arg);
         // The text is this thread's own state and costs microseconds; the file is 8-43 ms of disk on a
         // machine with something scanning every write, which was a fifth of the held picture at a switch.
@@ -2737,6 +2743,10 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         } else if (arg == "next" || arg == "prev") {
             // Manual stepping works whether or not the timer is on. A running timer gets its whole
             // interval back, otherwise a hand pick would be overwritten on the next tick.
+            // The hold ends for a hand pick for the same reason `apply` clears it above; the automatic
+            // tick does not, so a paused wallpaper can still be advanced underneath and stays blank
+            // until he resumes.
+            paused_ = false;
             const std::string applied = RotateStep(arg == "next" ? 1 : -1);
             if (rotate_.pool.empty()) {
                 result = R"({"ok":false,"error":"the rotation pool is empty"})";
