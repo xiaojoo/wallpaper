@@ -39,19 +39,37 @@ float hash12(vec2 p) {
 void main() {
     vec2 uv = qt_TexCoord0;
     float n = hash12(floor(vec2(uv.x * u.gridX, uv.y * u.gridY)));
-    // A hard threshold would strobe between two frames; a 0.12 ramp over the threshold keeps the
-    // leading edge soft, which is what makes it read as developing rather than as noise switching.
-    float a = clamp((u.prog - n) / 0.12 + 0.5, 0.0, 1.0);
+    // The ramp is R wide per cell and the whole field has to be finished at prog = 1, because that
+    // is the frame the effect is dropped. The obvious `prog - n` form leaves every cell with
+    // n > 1 - R/2 still soft there (n = 0.99 sits at a = 0.58, half blurred), and those ~12 % of the
+    // cells then snap sharp in the single frame the ShaderEffect hides - the 快结束的时候抖一下 he
+    // reported on 2026-10-14. Scaling prog by (1 + R) puts the last cell's completion exactly at
+    // prog = 1 and the first cell's start exactly at prog = 0, so both ends of the sweep reproduce
+    // the plain picture pixel for pixel.
+    const float R = 0.12;
+    float a = clamp((u.prog * (1.0 + R) - n) / R, 0.0, 1.0);
     vec2 r = (1.0 - a) * vec2(u.blurX, u.blurY);
+    // Two full symmetric rings plus the centre, all at weight 1/17. The first version used a
+    // Poisson-style 9-tap disc whose offsets summed to (+0.581, -0.139): an asymmetric kernel
+    // translates the picture by 0.058 * radius, so the sweep drifted sideways by a fraction of a
+    // pixel while it sharpened. Symmetric rings cannot translate anything, at any radius.
     vec4 c = texture(sharpTex, uv);
-    c += texture(sharpTex, uv + r * vec2(-0.326, -0.406));
-    c += texture(sharpTex, uv + r * vec2(-0.840, -0.074));
-    c += texture(sharpTex, uv + r * vec2(-0.696,  0.457));
-    c += texture(sharpTex, uv + r * vec2(-0.203,  0.621));
-    c += texture(sharpTex, uv + r * vec2( 0.962, -0.195));
-    c += texture(sharpTex, uv + r * vec2( 0.473, -0.480));
-    c += texture(sharpTex, uv + r * vec2( 0.519,  0.767));
-    c += texture(sharpTex, uv + r * vec2( 0.185, -0.893));
-    c += texture(sharpTex, uv + r * vec2( 0.507,  0.064));
-    fragColor = u.qt_Opacity * (c / 10.0);
+    c += texture(sharpTex, uv + r * vec2( 1.000,  0.000));
+    c += texture(sharpTex, uv + r * vec2(-1.000,  0.000));
+    c += texture(sharpTex, uv + r * vec2( 0.000,  1.000));
+    c += texture(sharpTex, uv + r * vec2( 0.000, -1.000));
+    c += texture(sharpTex, uv + r * vec2( 0.707,  0.707));
+    c += texture(sharpTex, uv + r * vec2(-0.707,  0.707));
+    c += texture(sharpTex, uv + r * vec2( 0.707, -0.707));
+    c += texture(sharpTex, uv + r * vec2(-0.707, -0.707));
+    vec2 r2 = r * 0.45;
+    c += texture(sharpTex, uv + r2 * vec2( 1.000,  0.000));
+    c += texture(sharpTex, uv + r2 * vec2(-1.000,  0.000));
+    c += texture(sharpTex, uv + r2 * vec2( 0.000,  1.000));
+    c += texture(sharpTex, uv + r2 * vec2( 0.000, -1.000));
+    c += texture(sharpTex, uv + r2 * vec2( 0.707,  0.707));
+    c += texture(sharpTex, uv + r2 * vec2(-0.707,  0.707));
+    c += texture(sharpTex, uv + r2 * vec2( 0.707, -0.707));
+    c += texture(sharpTex, uv + r2 * vec2(-0.707, -0.707));
+    fragColor = u.qt_Opacity * (c / 17.0);
 }
