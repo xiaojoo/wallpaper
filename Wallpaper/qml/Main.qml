@@ -356,11 +356,42 @@ ApplicationWindow {
         heroFramesAtSwap = liveView.frames
         if (hero && hero.type === "video" && liveWanted && !heroPictureIsHere()) {
             heroWaitPicture = true
+            heroUncoverWatch.interval = 600
+            heroUncoverWatch.restart()
+            return
+        }
+        // An online still's first layer is the site's own thumbnail, and that thumbnail is 400x225
+        // blown into a 3840-wide box: measured offline on two cards, 0.063 and 0.27 of the original's
+        // edge detail at the same crop. The cover comes down ~280 ms after the click whatever is
+        // underneath, so he watched that stamp for as long as the original took to decode - which is
+        // the 闪 of his 06:10 recording, where all 8 switches fell to 0.04-0.12 of their settled
+        // detail. Waiting for the original means the thumbnail never reaches the screen at all.
+        // The wake-up is heroBig's own status, not the live pass: a still never runs the second pass,
+        // which is exactly why the last attempt at this gate could only ever exit on its timeout.
+        if (hero && hero.online === true && hero.type === "image" && !heroBigPictureIsHere()) {
+            heroWaitPicture = true
+            // Longer than the clip's 600 ms because this wait can be a multi-megabyte download rather
+            // than a decoder priming; past it the thumbnail is the only picture there is to show, so
+            // uncovering is the honest answer.
+            heroUncoverWatch.interval = 1200
             heroUncoverWatch.restart()
             return
         }
         heroStartFx()
     }
+    // Whether the full-size picture of the card that is up right now is on screen. `fullUp` is a
+    // binding on the current hero, so it cannot answer for the previous card the way reading
+    // `heroBig.source` would.
+    function heroBigPictureIsHere() {
+        return heroBig.fullUp && heroBig.status === Image.Ready
+    }
+    // The preview URL a card would paint in the hero, for the online cards only.
+    // What heroHold keeps underneath: the last picture the preview layer actually managed to paint.
+    // `heroLive` and `heroMotion` are in here because those two layers cover the box completely when
+    // they are up, so holding a still underneath them would only cost a texture.
+    property string heroHeld: ""
+    readonly property bool heroHoldWanted: hero !== null && hero.online === true && hero.type === "image"
+                                           && !heroMotion && !heroLive
     function startHeroSwap() {
         const nid = heroIdOf(pendingHero), cid = heroIdOf(hero)
         if (nid === cid) { hero = pendingHero; return }      // same wallpaper, new object: no fade
@@ -911,6 +942,40 @@ ApplicationWindow {
                             wantedId: root.hero ? root.hero.id : ""
                         }
 
+                        // The previous card's picture, kept painted underneath the preview layer while
+                        // a new online card's own preview is still crossing the network.
+                        //
+                        // Without it the box can be legitimately empty: `heroImg` is visible but has no
+                        // pixmap while its status is Loading, and an Image with nothing to paint paints
+                        // nothing - which leaves heroBox's own #080B10 showing. Measured over the 74
+                        // online switches of one browsing session (2026-10-14, layer probes at 200 ms):
+                        // the preview reached Ready a median 116 ms after the swap, worst 1640 ms, and
+                        // the downloaded original became visible a median 470 ms after it. In 5 of the
+                        // 74 the dissolve cover had already faded to nothing at ~300 ms while both
+                        // layers were still empty, so the box went flat for 124, 167, 221, 264 and
+                        // 264 ms. With 切换动画=无 there is no cover at all and every switch is one of
+                        // those.
+                        //
+                        // It stays visible rather than toggling with the status, and that is the point:
+                        // a hidden Image gives up its reference to the decoded pixmap, which then
+                        // leaves Qt's 10 MB image cache to whoever asks next, and the hold would have
+                        // to re-fetch the very picture it is supposed to be holding. Covered by
+                        // `heroImg` whenever that one has pixels, so it costs one extra quad.
+                        //
+                        // Gated on `online === true && type === "image"`: a local card's preview is a
+                        // file that is already on disk, and this surface is not allowed to change what
+                        // he has already accepted there. Video cards and the strip never see it either,
+                        // because the live pass and the frame stack paint over it regardless.
+                        Image {
+                            id: heroHold
+                            anchors.fill: parent
+                            anchors.margins: 0
+                            fillMode: Image.PreserveAspectCrop
+                            asynchronous: true
+                            visible: root.heroHoldWanted
+                            source: root.heroHeld
+                        }
+
                         Image {
                             id: heroImg
                             anchors.fill: parent
@@ -918,6 +983,11 @@ ApplicationWindow {
                             fillMode: Image.PreserveAspectCrop
                             asynchronous: true
                             visible: !root.heroMotion && !root.heroLive
+                            // What this layer last managed to paint, kept for heroHold. Read from the
+                            // signal rather than from a binding: at the moment the swap happens a
+                            // binding on `source` still answers with the *previous* card's URL, which
+                            // is what made the earlier version of this gate skip 23 times out of 23.
+                            onStatusChanged: if (status === Image.Ready) root.heroHeld = String(source)
                             // Always the small layer: the site's preview for a remote card, the
                             // 1280x720 `*_large.png` for a local one. The full-size picture is a second
                             // image on top of this one, never a re-aim of this one - changing `source`
@@ -1022,11 +1092,30 @@ ApplicationWindow {
                             // Against 1.538 (measured 2026-10-13, both rendered 1529 px wide). So
                             // raising the original over the cover multiplies the structure on screen
                             // by 1.35-4.1x in a single frame, and that step is what he still sees on
-                            // the online cards: the geometry is aligned (his own two frames correlate
-                            // at dx=0 dy=0, peak/noise 1460), the detail arrives all at once.
+                            // the online cards: the detail arrives all at once. (Registration is NOT
+                            // guaranteed, contrary to what this comment used to claim: measured
+                            // 2026-10-14 one card's two layers sit 2.04 % apart anisotropically -
+                            // see heroBig's own rect above.)
                             // An opacity fade does not fix that - 200 ms and 3 s were both still
                             // reported as movement. What fixes it is heroDevelop below.
-                            onVisibleChanged: if (visible) heroDevelopRun.start()
+                            // Keyed to the picture, not to `visible` flipping: when the card that gets
+                            // selected already has its original on disk, `source` changes and `status`
+                            // never leaves Ready, so `visible` does not change and the sweep simply
+                            // never starts. Measured on three switches in a row: two ran 45 and 51
+                            // frames, the third stepped 0.84 -> 1.00 detail in a single frame. That is
+                            // why the animation reads as absent on the cards he goes back to.
+                            //
+                            // 切换动画=无 means nothing animates. This sweep is an animation, so it
+                            // stops with the others - until today it kept running under 无, which is
+                            // why his single-variable test of that switch still showed the 1 s of
+                            // defocus and the cover theory looked dead.
+                            readonly property string shown: visible ? String(source) : ""
+                            // The other half of the gate in commitHeroSwap: the cover stands down the
+                            // moment this layer has the current card's picture, not on a timer.
+                            onStatusChanged: if (status === Image.Ready && root.heroWaitPicture
+                                                  && fullUp) root.heroUncoverNow()
+                            onShownChanged: if (visible && Bridge.transition !== "none") heroDevelopRun.start()
+                            onVisibleChanged: if (visible && Bridge.transition !== "none") heroDevelopRun.start()
                         }
 
                         // The sharpness reveal: the original is drawn blurred and sharpened through a
@@ -1071,11 +1160,18 @@ ApplicationWindow {
                             // ~3 px cells at any window size (HeroDevelop).
                             property real gridX: heroBox.width / 3
                             property real gridY: heroBox.height / 3
-                            // Where the sweep starts. 7 px is the softness of the site's own preview
-                            // at this box - its edge detail measures 0.68 of the original's, and the
-                            // first frame of the new sweep has to read the same or the hand-over from
-                            // the preview layer underneath is itself a step.
-                            property real blurPx: 7
+                            // Where the sweep starts. It has to be soft enough to swallow the
+                            // hand-over from the site's preview underneath, which is measured at
+                            // 5 px of vertical step (his three frames: 147/206 correspondences,
+                            // 1.00 px residual, sy=1.0000 - so it is the site's own crop, not our
+                            // mapping). Tracking the box width gave 4K a 32 px start, and his own
+                            // 4K/60 fps recording measured what that costs: on all 8 switches the
+                            // picture fell to 0.04-0.11 of its settled edge energy and took
+                            // 1033-1216 ms to get 90 % of it back - a full-frame defocus, which is
+                            // the 闪 he was pointing at. The cap leaves the accepted small-window
+                            // look alone (1360 px box -> 11.3 px, under the cap) and only bites
+                            // above a 1680 px box.
+                            property real blurPx: Math.min(14, Math.max(8, heroBox.width / 120))
                             property real blurX: blurPx / heroBox.width
                             property real blurY: blurPx / heroBox.height
                             fragmentShader: "HeroDevelop.frag.qsb"
@@ -1086,7 +1182,10 @@ ApplicationWindow {
                             property: "prog"
                             from: 0
                             to: 1
-                            duration: 1000
+                            // 400, not 1000: at 1000 the sweep needed 1033-1216 ms to hand back 90 %
+                            // of the picture's detail on his 4K recording, long enough to read as an
+                            // event of its own rather than as the photograph settling.
+                            duration: 400
                             easing.type: Easing.InOutSine
                         }
 
