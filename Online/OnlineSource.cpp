@@ -51,6 +51,23 @@ std::string ReplaceAll(std::string s, const std::string& from, const std::string
     return s;
 }
 
+// What a file name's suffix means to this app. The window reads the mime off the card to decide two
+// things - whether 入库 can take it at all, and whether the hero is worth fetching - so a clip called
+// "image/jpeg" makes it pull the whole video to preview a card (measured 2026-10-14 on motionbgs:
+// 19.4-28.8 MB per selection). nullptr for a suffix nothing here can import, which the card reports
+// instead of guessing at a picture.
+const char* MimeForExtension(const std::string& ext) {
+    static const std::pair<const char*, const char*> table[] = {
+        {"jpg", "image/jpeg"},  {"jpeg", "image/jpeg"}, {"png", "image/png"},
+        {"webp", "image/webp"}, {"bmp", "image/bmp"},   {"tif", "image/tiff"},
+        {"tiff", "image/tiff"}, {"gif", "image/gif"},   {"mp4", "video/mp4"},
+        {"m4v", "video/mp4"},   {"webm", "video/webm"},
+    };
+    for (const auto& [suffix, mime] : table)
+        if (ext == suffix) return mime;
+    return nullptr;
+}
+
 } // namespace
 
 bool OnlineSource::setOption(const std::string& key, const std::string& value) {
@@ -160,6 +177,7 @@ bool OnlineSource::ParseHtml(const std::string& body, int askedPage, std::vector
         // path - so the record's own slug and id are enough to name any size we are allowed to take.
         o.thumb = itemField(m, vars, "thumb");
         o.image = itemField(m, vars, "image");
+        o.hero = itemField(m, vars, "hero");
         if (o.image.empty()) continue;
         if (o.thumb.empty()) o.thumb = o.image;
         if (!sizeFrom_.empty()) {
@@ -170,7 +188,9 @@ bool OnlineSource::ParseHtml(const std::string& body, int askedPage, std::vector
                 o.height = std::atoi(s.c_str() + x + 1);
             }
         }
-        o.mime = std::string("image/") + (ExtensionFor(o.image) == "png" ? "png" : "jpeg");
+        // Named off the file this record points at. The old line could only ever say jpg or png, which
+        // is what made a clip source's card claim to be a picture.
+        if (const char* mime = MimeForExtension(ExtensionFor(o.image))) o.mime = mime;
         items.push_back(std::move(o));
     }
 
@@ -183,6 +203,9 @@ bool OnlineSource::ParseHtml(const std::string& body, int askedPage, std::vector
     // The site says how many pages there are and never how many pictures; counting the ones on this
     // page would be a number that changes every page, so the total stays unknown.
     meta.total = 0;
+    // A site that links only its neighbour page can never say how many there are; `lastPage` above is
+    // then just "there is one more", which is enough for the arrows and not enough for a number.
+    meta.pagesKnown = !rollingPages_;
     if (items.empty()) error = "the site returned no picture on this page";
     return !items.empty();
 }
@@ -215,8 +238,9 @@ bool OnlineSource::ParseSearch(const Json& root, std::vector<OnlineItem>& items,
         return {};
     };
     const std::string fKey = field("key"), fTitle = field("title"), fThumb = field("thumb"),
-                      fImage = field("image"), fPage = field("page"), fW = field("width"),
-                      fH = field("height"), fBytes = field("bytes"), fMime = field("mime");
+                      fImage = field("image"), fHero = field("hero"), fPage = field("page"),
+                      fW = field("width"), fH = field("height"), fBytes = field("bytes"),
+                      fMime = field("mime");
     if (fKey.empty() || fImage.empty()) {
         error = std::format("{} names no 'key' and 'image' field", name_);
         return false;
@@ -230,6 +254,7 @@ bool OnlineSource::ParseSearch(const Json& root, std::vector<OnlineItem>& items,
         o.title = fTitle.empty() ? o.key : Text(it, fTitle);
         o.thumb = fThumb.empty() ? o.image : Text(it, fThumb);
         if (o.thumb.empty()) o.thumb = o.image;
+        o.hero = fHero.empty() ? std::string() : Text(it, fHero);
         o.page = fPage.empty() ? std::string() : Text(it, fPage);
         o.width = int(Number(it, fW));
         o.height = int(Number(it, fH));
@@ -287,6 +312,7 @@ std::vector<OnlineSource> OnlineSource::LoadAll(const std::wstring& dir, std::ve
         // A page with no api is described by the same file, with `record` naming the groups to read.
         s.recordRe_ = j.strOr("record");
         s.acceptsQuery_ = j.boolOr("ask", true);
+        s.rollingPages_ = j.boolOr("rolling_pages", false);
         s.lastPageRe_ = j.strOr("last_page");
         s.slugFrom_ = j.strOr("slug_from");
         s.slugBasename_ = j.boolOr("slug_basename", false);

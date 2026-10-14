@@ -22,6 +22,11 @@ struct OnlineItem {
     std::string title;
     std::string thumb;    // small enough to look at without downloading anything
     std::string image;    // the file 入库 fetches
+    // A cheap full-size picture to preview `image` with, for a source whose `image` is not a picture.
+    // A clip's original is the whole video and the hero is only ever looked at, so the site's own
+    // frame of it stands in: motionbgs serves the 4K frame of a card for 405 KB against 19-29 MB for
+    // the .mp4. Empty means "preview `image` itself", which is every picture source.
+    std::string hero;
     std::string page;     // the site's page for it - what goes into the manifest as `origin`
     int width = 0;
     int height = 0;
@@ -33,6 +38,11 @@ struct OnlineMeta {
     int page = 1;
     int lastPage = 1;
     long long total = 0;
+    // False for a site whose pager links only its neighbour pages: it can answer "is there a next
+    // one", never "how many there are". motionbgs is one (measured 2026-10-14: /4k/ runs to page 213,
+    // and page 1 prints nothing but a Next arrow). The window draws a bare page number instead of a
+    // numbered window when this is false, because the last cell of that window would be a lie.
+    bool pagesKnown = true;
 };
 
 // One of the choices a site offers (a resolution floor, a sort order). `values` is in the order the
@@ -69,6 +79,10 @@ public:
     // /search/, which its own robots.txt disallows. The page hides the box instead of greying it,
     // because a greyed box promises a thing the site will never answer.
     bool acceptsQuery() const { return acceptsQuery_; }
+    // True when the site's own pager only links the neighbouring page, so no total can ever be read
+    // off a listing. Declared by the description file, not guessed: a page that happens to print one
+    // link today is not the same thing as a site that publishes no total.
+    bool rollingPages() const { return rollingPages_; }
     // Non-empty when this site is read out of a web page instead of a JSON reply.
     const std::string& record() const { return recordRe_; }
     const std::vector<OnlineOption>& options() const { return options_; }
@@ -108,6 +122,7 @@ private:
     std::string searchUrl_, listPath_, pagePath_, lastPagePath_, totalPath_, defaultExt_;
     int minIntervalMs_ = 2000;
     bool acceptsQuery_ = true;
+    bool rollingPages_ = false;
     std::string recordRe_, lastPageRe_, slugFrom_, slugCut_, sizeFrom_;
     bool slugBasename_ = false;
     std::vector<std::pair<std::string, std::string>> params_;      // name -> value template
