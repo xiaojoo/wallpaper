@@ -480,6 +480,11 @@ Bridge::Bridge(QObject* parent) : QObject(parent) {
                 onlinePage_ = meta.value("page").toInt();
                 onlineLastPage_ = meta.value("lastPage").toInt();
                 onlineTotal_ = meta.value("total").toLongLong();
+                // A description file that never says anything about its pager is a site that publishes
+                // one (wallhaven and 4kwallpapers both do), and the numbered window is the shape that
+                // was measured with - so the key's absence means known, not unknown.
+                onlinePagesKnown_ = meta.contains("pagesKnown") ? meta.value("pagesKnown").toBool()
+                                                                : true;
                 onlineRows_.clear();
                 for (const auto& v : rows) {
                     QVariantMap row = v.toMap();
@@ -1622,11 +1627,13 @@ QString Bridge::onlineCacheDir() const {
     return dir;
 }
 
-QString Bridge::onlineDest(const QVariantMap& row) {
-    const QString image = row.value("image").toString();
+QString Bridge::onlineDest(const QVariantMap& row, const QString& url) {
+    // The extension comes from the url actually being fetched, so a card whose clip and whose preview
+    // frame are both wanted keeps two files (`-10319.jpg` and `-10319.mp4`) instead of writing one
+    // over the other.
     OnlineSource* s = online_.source(onlineSource_);
     const QString ext = QString::fromStdString(
-        s ? s->ExtensionFor(image.toStdString()) : std::string());
+        s ? s->ExtensionFor(url.toStdString()) : std::string());
     return QDir(onlineCacheDir())
         .absoluteFilePath(onlineSource_ + QLatin1Char('-')
                           + row.value("key").toString() + QLatin1Char('.') + ext);
@@ -1783,14 +1790,19 @@ void Bridge::requestHero(const QString& key) {
     if (index < 0) { setHeroState(QString()); return; }   // this list no longer holds that card
     const QVariantMap row = onlineRows_[index].toMap();
     const QString image = row.value("image").toString();
-    // A video's "original" is the whole clip. Its hero is the preview frame, same as a local package's,
-    // so pulling tens of megabytes for that buys nothing and this stays with pictures.
+    // A video's "original" is the whole clip, and a hero is only ever looked at, so pulling tens of
+    // megabytes for it buys nothing. A source that can name a cheap full-size frame of the clip gets
+    // that fetched instead; one that cannot stays with pictures, as it did before clips came here.
+    const QString heroUrl = row.value("hero").toString();
+    const QString fetch = heroUrl.isEmpty() ? image : heroUrl;
     const QString mime = row.value("mime").toString();
-    if (image.isEmpty() || !mime.startsWith(QLatin1String("image/"))) { setHeroState("none"); return; }
+    if (fetch.isEmpty() || (heroUrl.isEmpty() && !mime.startsWith(QLatin1String("image/")))) {
+        setHeroState("none"); return;
+    }
     if (row.value("state").toString() == QLatin1String("unsupported")) { setHeroState("none"); return; }
-    if (!OnlineFetcher::sameHost(image, onlineSite_)) { setHeroState("none"); return; }
+    if (!OnlineFetcher::sameHost(fetch, onlineSite_)) { setHeroState("none"); return; }
 
-    const QString dest = onlineDest(row);
+    const QString dest = onlineDest(row, fetch);
     if (QFileInfo::exists(dest) && QFileInfo(dest).size() > 0) {
         heroFile_ = QUrl::fromLocalFile(dest).toString();
         emit onlineHeroFileChanged();
@@ -1819,7 +1831,7 @@ void Bridge::requestHero(const QString& key) {
     setHeroState("fetching");
     // Deliberately not through setPending: that one belongs to the press on 入库, and its progress
     // would otherwise start on a card he only looked at.
-    online_.download(*s, image, dest, [this, key, dest](const QString& error, const QString& type) {
+    online_.download(*s, fetch, dest, [this, key, dest](const QString& error, const QString& type) {
         if (heroInFlight_ == key) heroInFlight_.clear();
         if (!error.isEmpty()) {
             // The file stays on disk whichever way this went - 入库 would have wanted it too. The whole
@@ -1888,7 +1900,7 @@ void Bridge::onlineImport(int index) {
         say(t("online_offsite") + QStringLiteral(": ") + image, true);
         return;
     }
-    const QString dest = onlineDest(row);
+    const QString dest = onlineDest(row, image);
     const QString key = row.value("key").toString();
     setPending(key, QStringLiteral("downloading"), QString());
     // The key travels with the callback: a new search can replace the grid while this is in flight,

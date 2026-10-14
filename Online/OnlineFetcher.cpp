@@ -30,6 +30,7 @@ QVariantMap toRow(const OnlineItem& it) {
     r.insert("title", QString::fromStdString(it.title));
     r.insert("thumb", QString::fromStdString(it.thumb));
     r.insert("image", QString::fromStdString(it.image));
+    r.insert("hero", QString::fromStdString(it.hero));
     r.insert("page", QString::fromStdString(it.page));
     r.insert("width", it.width);
     r.insert("height", it.height);
@@ -173,6 +174,7 @@ void OnlineFetcher::pumpSearch(OnlineSource& src, const QString& query, int page
         m.insert("page", meta.page);
         m.insert("lastPage", meta.lastPage);
         m.insert("total", qlonglong(meta.total));
+        m.insert("pagesKnown", meta.pagesKnown);
         emit searched(name, rows, m, QString());
     });
 }

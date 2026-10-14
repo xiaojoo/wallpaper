@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QTextStream>
 #include <QTimer>
+#include <QUrl>
 #include <QVariant>
 
 #include <functional>
@@ -77,12 +78,32 @@ int RunOnlineSelfTest(Bridge& bridge, const QString& query, const QString& outFi
     line(QString("rows=%1 page=%2/%3 total=%4")
              .arg(int(bridge.onlineRows().size())).arg(bridge.onlinePage()).arg(bridge.onlineLastPage())
              .arg(bridge.onlineTotal()));
+    // Whether this site published a total at all. The two states have to stay distinguishable in the
+    // report: a source that silently loses the flag would put a wrong page count on the bar, and one
+    // that sets it wrongly would hide a total the site does print.
+    line("pages known=" + QString(bridge.onlinePagesKnown() ? "1" : "0"));
     line("first key=" + first.value("key").toString());
     line("first dims=" + first.value("width").toString() + "x" + first.value("height").toString()
              + " bytes=" + first.value("bytes").toString() + " mime=" + first.value("mime").toString());
     line("first thumb=" + first.value("thumb").toString());
     line("first image=" + first.value("image").toString());
     line("first page=" + first.value("page").toString());
+
+    // The hero is the third thing this app asks a site for, and for a clip source it is a different
+    // file from the one 入库 takes: the source names a cheap full-size frame so that previewing a card
+    // does not pull the whole video. A wrong url there is invisible on the pipe - the pane just stays
+    // soft - so it is read back here rather than off a screenshot.
+    bridge.onlineHeroPreview(0);
+    const bool heroSettled = waitFor(bridge, [&] {
+        const QString s = bridge.onlineHeroState();
+        return s == QLatin1String("ready") || s == QLatin1String("failed")
+            || s == QLatin1String("none");
+    }, 25000);
+    const QString heroPath = QUrl(bridge.onlineHeroFile()).toLocalFile();
+    line(QString("hero settled=%1 state=%2 file=%3 bytes=%4 error=%5")
+             .arg(heroSettled).arg(bridge.onlineHeroState()).arg(QFileInfo(heroPath).fileName())
+             .arg(QFileInfo::exists(heroPath) ? QFileInfo(heroPath).size() : -1)
+             .arg(bridge.onlineHeroError()));
 
     const int catalogBefore = bridge.catalog().size();
     line(QString("catalog before=%1").arg(catalogBefore));
@@ -124,9 +145,14 @@ int RunOnlineSelfTest(Bridge& bridge, const QString& query, const QString& outFi
         }
         line("package dir " + pkg);
         line("package files " + QDir(pkg).entryList(QDir::Files, QDir::Name).join(", "));
-        // The two things the manifest is supposed to have gained by coming from a site.
-        line(QString("manifest carries the origin=%1 category=在线图片=%2")
-                 .arg(text.contains(page)).arg(text.contains(QStringLiteral("在线图片"))));
+        // The two things the manifest is supposed to have gained by coming from a site. Which category
+        // that is depends on what came in: a clip goes under 在线视频 and a picture under 在线图片
+        // (Application.cpp:367 and :436), so asserting the picture name for a video source reports a
+        // red that belongs to this test rather than to the app.
+        const QString wantCat = first.value("mime").toString().startsWith(QLatin1String("video/"))
+                                  ? QStringLiteral("在线视频") : QStringLiteral("在线图片");
+        line(QString("manifest carries the origin=%1 category=%2=%3")
+                 .arg(text.contains(page)).arg(wantCat).arg(text.contains(wantCat)));
         const QString thumbDir = QDir(root).absoluteFilePath("cache/thumbs");
         line(QString("thumb still=%1 large=%2")
                  .arg(QFileInfo(QDir(thumbDir).absoluteFilePath(id + "_still.png")).size())

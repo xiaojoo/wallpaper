@@ -142,6 +142,9 @@ class Bridge final : public QObject {
     Q_PROPERTY(int onlinePage READ onlinePage NOTIFY onlineChanged)
     Q_PROPERTY(int onlineLastPage READ onlineLastPage NOTIFY onlineChanged)
     Q_PROPERTY(qint64 onlineTotal READ onlineTotal NOTIFY onlineChanged)
+    // False for a site whose pager only links the neighbouring page: the window then shows the page
+    // it is on rather than a numbered window whose last cell would claim a total nobody published.
+    Q_PROPERTY(bool onlinePagesKnown READ onlinePagesKnown NOTIFY onlineChanged)
     // The one import in flight, kept out of the row list on purpose. A progress tick written into a
     // row would change the model and rebuild all 24 tiles, and every one of them would re-decode its
     // picture - which reads as the grid blinking while a single card is being fetched.
@@ -277,6 +280,7 @@ public:
     int onlinePage() const { return onlinePage_; }
     int onlineLastPage() const { return onlineLastPage_; }
     qint64 onlineTotal() const { return onlineTotal_; }
+    bool onlinePagesKnown() const { return onlinePagesKnown_; }
     int onlineIntervalMs() const { return onlineIntervalMs_; }
     bool onlineAsk() const { return onlineAsk_; }
     QString onlinePendingKey() const { return pendingKey_; }
@@ -420,9 +424,11 @@ private:
     QString sourcesDir() const;
     // 重新读一遍目录，尽量把他还停在那个站这件事保住（loadOnlineSources 会跳回第一个）。
     void reloadSources();
-    // Where a row's original file lives on this disk: the hero preview and 入库 name it the same way,
-    // so the picture he looked at first is the file the import then registers.
-    QString onlineDest(const QVariantMap& row);
+    // Where the file for `url` lives on this disk: the hero preview and 入库 name it the same way off
+    // the same row, so on a picture source the original he looked at first is the file the import
+    // registers without asking the site again. A source that names a separate `hero` gets a second,
+    // differently-suffixed file for it.
+    QString onlineDest(const QVariantMap& row, const QString& url);
     // The hero's original, in three parts: find the card by its key (the rows shift under a page
     // change, an index does not survive it), then the one state transition every caller reports.
     void requestHero(const QString& key);
@@ -537,6 +543,7 @@ private:
     QString onlineSource_, onlineQuery_, onlineError_, onlineSite_;
     int onlinePage_ = 1, onlineLastPage_ = 1;
     qint64 onlineTotal_ = 0;
+    bool onlinePagesKnown_ = true;
     int onlineIntervalMs_ = 0;
     bool onlineAsk_ = true;
     bool onlineBusy_ = false;
