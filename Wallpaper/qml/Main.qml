@@ -778,15 +778,16 @@ ApplicationWindow {
         return m
     }
 
-    // A chip covers a group of categories now, not one: 在线图片 goes under 本地图片 and
-    // 粒子光斑 / 季节天气 under 本地视频 (he asked for that on 2026-10-13, so the row reads
+    // A chip covers a group of categories now, not one: 在线图片 / 在线视频 goes under 本地图片 and
+    // 本地视频, and 粒子光斑 / 季节天气 under 本地视频 (he asked for the first of those on 2026-10-13
+    // and for the clip on 2026-10-15: 「这个下载的视频不要单做一个 tab，放到本地视频」, so the row reads
     // 全部壁纸 / 收藏夹 / 本地图片 / 本地视频 / 在线壁纸 instead of one chip per label the
     // manifest happens to carry). The merged names are still what the packages say about
     // themselves - only the row stops naming them.
-    readonly property var mergedChips: ["在线图片", "粒子光斑", "季节天气"]
+    readonly property var mergedChips: ["在线图片", "在线视频", "粒子光斑", "季节天气"]
     function chipCategories(cat) {
         if (cat === "本地图片") return ["本地图片", "在线图片"]
-        if (cat === "本地视频") return ["本地视频", "粒子光斑", "季节天气"]
+        if (cat === "本地视频") return ["本地视频", "在线视频", "粒子光斑", "季节天气"]
         return [cat]
     }
 
@@ -1997,9 +1998,11 @@ ApplicationWindow {
                         id: onlineDrawerPanel
                         visible: root.onlineMode && root.onlineDrawer
                         anchors.left: parent.left
-                        // 16: the same inset the chip row above uses, so the drawer's left edge and
-                        // 全部壁纸's left edge are one line rather than two that nearly agree.
-                        anchors.leftMargin: 16
+                        // 8, the chip row's own left inset (he set the tabs to 8 on 2026-10-14 and asked
+                        // for the drawer to match on 2026-10-15): the drawer's left edge and 全部壁纸's
+                        // left edge are one line. It was 16 from before that change, so the two nearly
+                        // agreed and did not.
+                        anchors.leftMargin: 8
                         anchors.top: topBand.bottom
                         // Stopping above the strip, not above the caption: the navigator cards are
                         // the thing he clicks next, and a panel over them takes the row away.
@@ -2030,6 +2033,11 @@ ApplicationWindow {
                             anchors.leftMargin: 14
                             anchors.rightMargin: 14
                             anchors.topMargin: 14
+                            // 14 on the bottom too, so the last group's bottom sits one group-gap
+                            // above the pager - the same 14 that separates 分辨率 from 预览清晰度.
+                            // Without it the viewport ended exactly at the pager's top edge and that
+                            // last gap was whatever the pager's own padding happened to leave (8).
+                            anchors.bottomMargin: 14
                             contentWidth: width
                             contentHeight: drawerCol.height
                             boundsBehavior: Flickable.StopAtBounds
@@ -2096,9 +2104,6 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 spacing: 4
                                 readonly property bool empty: Bridge.onlineRows.length === 0
-                                // 最挤一窗 = 5 格数字 + 2 个省略号 + 两枚箭头。格宽从"这一行还剩
-                                // 多少"倒推而不是写死 36：写死就只会把尾巴挤到面板外面去。26 是三位
-                                // 数字按 12 px 字号放得下的下限，加宽后的抽屉到不了那一步。
                                 // A site that publishes no total gets its own page number and nothing
                                 // else. pageWindow() puts the LAST page in the right-hand cell, and on a
                                 // rolling pager that cell is only ever current+1 - "1 … 4 5" on a site
@@ -2108,16 +2113,9 @@ ApplicationWindow {
                                                                    ? root.pageWindow(Bridge.onlinePage,
                                                                                      Math.max(1, Bridge.onlineLastPage))
                                                                    : [Bridge.onlinePage]
-                                readonly property int digits: {
-                                    var n = 0
-                                    for (var i = 0; i < win.length; ++i) if (win[i] !== 0) ++n
-                                    return n
-                                }
-                                readonly property int ellipses: win.length - digits
-                                readonly property int cellW: Math.max(26, Math.min(36, Math.floor(
-                                    (width - 56 - 12 * ellipses - 4 * (win.length + 2))
-                                    / Math.max(1, digits))))
-                                Item { Layout.fillWidth: true }
+                                // 数字格吃满剩下的宽度，所以这一条自己就横跨 22..294：左沿和上面每一组
+                                // 对齐，右沿和下面 搜索 那颗对齐，两头都不再需要弹簧。上下限还是 26/36：
+                                // 只剩一格时（站点不印总数的页码条）撑到 200 px 反而不像个页码。
                                 IconBtn {
                                     icon: "chevL"; tip: trs("online_prev"); tint: th.text
                                     enabled: Bridge.onlinePage > 1 && !Bridge.onlineBusy
@@ -2129,10 +2127,13 @@ ApplicationWindow {
                                         required property int modelData
                                         readonly property int pageNo: modelData
                                         readonly property bool gap: pageNo === 0 && !pageBar.empty
-                                        implicitWidth: gap ? 12 : pageBar.cellW
+                                        Layout.fillWidth: !gap
+                                        Layout.preferredWidth: gap ? 12 : 26
+                                        Layout.minimumWidth: gap ? 12 : 26
+                                        Layout.maximumWidth: gap ? 12 : 36
+                                        Layout.preferredHeight: 28
+                                        implicitWidth: gap ? 12 : 32
                                         implicitHeight: 28
-                                        width: implicitWidth
-                                        height: implicitHeight
                                         Text {
                                             visible: parent.gap
                                             anchors.centerIn: parent
@@ -2144,9 +2145,9 @@ ApplicationWindow {
                                             anchors.fill: parent
                                             text: pageBar.empty ? "0" : String(parent.pageNo)
                                             enabled: !pageBar.empty
-                                            // 36 定宽的上限：Btn 最小 56 px 是给两三个汉字的标签用的，
-                                            // 页码只有 1~3 位数字，按 56 排就超出抽屉宽度。
-                                            implicitWidth: pageBar.cellW
+                                            // 页码只有 1~3 位数字，Btn 那个 56 px 的最小宽是给两三个
+                                            // 汉字用的，按它排就超出抽屉宽度。
+                                            implicitWidth: 26
                                             compact: true
                                             tint: true
                                             corner: 8
@@ -2188,15 +2189,20 @@ ApplicationWindow {
                                     alpha: 0.9
                                     corner: 8
                                     checked: root.onlineManage
+                                    // 两颗各占抽屉内容宽的一半：中间那根弹簧撤了。平分之后 管理 换成
+                                    // 完成 也不会把这一行重新排一遍——字变了宽度不变。
+                                    Layout.fillWidth: true
+                                    Layout.preferredWidth: 0
                                     onClicked: root.onlineManage = !root.onlineManage
                                 }
-                                Item { Layout.fillWidth: true }
                                 Btn {
                                     // 他点的名：搜索放右边。
                                     text: trs("online_search")
                                     compact: true
                                     raised: true
                                     corner: 8
+                                    Layout.fillWidth: true
+                                    Layout.preferredWidth: 0
                                     enabled: !Bridge.onlineBusy && Bridge.onlineSourceItems.length > 0
                                     onClicked: Bridge.onlineSearch()
                                 }
