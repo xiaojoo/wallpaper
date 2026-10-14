@@ -340,7 +340,6 @@ const Entry kStrings[] = {
     {"online_hero_retry", "重试", "Retry"},
     // The clip's own two sentences: while it is 10 MB away the big picture is a still frame of it, and
     // that has to read as "还在取", not as a wallpaper that stopped moving.
-    {"online_clip_fetching", "取视频中", "fetching the clip"},
     {"online_clip_failed", "视频没取到，画面是它的一帧", "clip not fetched - this is one frame of it"},
     {"online_preview_rung", "预览清晰度", "Preview clarity"},
     // The strip card's own failure line. It names what is missing (the cover, not the wallpaper) so
@@ -513,6 +512,10 @@ Bridge::Bridge(QObject* parent) : QObject(parent) {
             });
     connect(&online_, &OnlineFetcher::progress, this,
             [this](const QString& url, double fraction, qint64, qint64) {
+                if (!clipUrl_.isEmpty() && url == clipUrl_) {
+                    clipProgress_ = fraction;
+                    emit onlineClipProgressChanged();
+                }
                 for (const auto& v : onlineRows_)
                     if (v.toMap().value("image").toString() == url) {
                         // Only the card this download belongs to reads it, and nothing else rebuilds.
@@ -2004,12 +2007,15 @@ void Bridge::requestClip(const QString& key) {
     }
     clipInFlight_ = key;
     clipStartMs_ = QDateTime::currentMSecsSinceEpoch();
+    clipUrl_ = url;
+    clipProgress_ = 0.0;
     qWarning("online: clip asks key=%s row=%s want=%s file=%s (try %d of %d)", key.toUtf8().constData(),
              cur.toUtf8().constData(), rung.toUtf8().constData(),
              QFileInfo(dest).fileName().toUtf8().constData(), clipTries_ + 1, kHeroRetries + 1);
     setClipState(QStringLiteral("fetching"));
-    online_.download(*s, url, dest, [this, key, dest](const QString& error, const QString& type) {
+    online_.download(*s, url, dest, [this, key, url, dest](const QString& error, const QString& type) {
         if (clipInFlight_ == key) clipInFlight_.clear();
+        if (clipUrl_ == url) clipUrl_.clear();   // this answer is for the bar's owner, whoever it was
         if (!error.isEmpty()) {
             qWarning("online: clip %s: %s", key.toUtf8().constData(), error.toUtf8().constData());
             if (key != heroKey_) return;      // he moved on; nothing retries for a card nobody is on
@@ -2069,6 +2075,8 @@ void Bridge::clearClip() {
     clipPath_.clear();
     clipState_.clear();
     clipTries_ = 0;
+    clipUrl_.clear();
+    clipProgress_ = 0.0;
     emit onlineClipChanged();
 }
 
@@ -2216,10 +2224,13 @@ void Bridge::showPreview(const QString& id) {
 void Bridge::hidePreview() {
     // The clip belongs to the pass, not to this window's memory: once nothing is drawing it, the id it
     // was known by has to go, or the hero keeps asking for a feed the renderer no longer resolves.
-    // Wiped here and announced at the very end - emitting first would run this function again from the
-    // QML gate while the beat timer was still going, and the outer call would then skip the teardown.
-    const bool told = !clipKey_.isEmpty() || !clipId_.isEmpty() || !clipState_.isEmpty();
-    clipKey_.clear(); clipId_.clear(); clipPath_.clear(); clipState_.clear(); clipTries_ = 0;
+    // Only that triple - the download's own story stays, because this function is what the QML gate
+    // calls while a clip is still on its way (nothing is being fed yet), and wiping the state here is
+    // what made 取视频中 and its bar vanish a moment after they appeared.
+    // Announced at the very end: emitting first would run this function again from the QML gate while
+    // the beat timer was still going, and the outer call would then skip the teardown.
+    const bool told = !clipKey_.isEmpty() || !clipId_.isEmpty();
+    clipKey_.clear(); clipId_.clear(); clipPath_.clear();
     if (!previewTimer_->isActive()) {
         if (told) emit onlineClipChanged();
         return;

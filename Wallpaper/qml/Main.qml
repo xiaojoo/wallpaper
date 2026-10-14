@@ -1456,17 +1456,17 @@ ApplicationWindow {
                                 onClicked: Bridge.onlineHeroRetry()
                             }
                             // A clip's motion is its own download - 10 MB against the frame's 405 KB -
-                            // so the big picture can sit on one still frame for a while with nothing on
-                            // this bar saying why. Without this line a slow fetch reads as a wallpaper
-                            // that stopped moving, which is the complaint he can only make once.
+                            // so the big picture can sit on one still frame for a while. While it is
+                            // coming, the bar between the picture and the row says that; this line only
+                            // speaks when it will not arrive, because that is a decision he can make
+                            // (重试), not a wait.
                             Text {
                                 id: clipFetch
                                 readonly property string st: Bridge.onlineClipState
                                 visible: root.hero !== null && root.hero.online === true
-                                         && (st === "fetching" || st === "queued" || st === "retrying"
-                                             || st === "failed")
-                                text: st === "failed" ? trs("online_clip_failed") : trs("online_clip_fetching")
-                                color: st === "failed" ? "#F2A33C" : "#C6CEDA"
+                                         && st === "failed"
+                                text: trs("online_clip_failed")
+                                color: "#F2A33C"
                                 font.family: root.fontFamily; font.pixelSize: 12
                             }
                             Btn {
@@ -3970,6 +3970,42 @@ ApplicationWindow {
                     }
                 }
             }
+        }
+    }
+
+    // 取一张片子要几秒到几十秒（motionbgs 实测 1920x1080 一档 9.7-13.7 MB）。这段时间屏上只有一帧
+    // 不动的封面，说明行上一句"取视频中"答不了"还要多久"，所以在大图和轮播中间放一条短的：
+    // 窗口水平居中，压在轮播那一行上面 8 px，160 px 长——只要知道在走，不需要一根真正的滚动条。
+    Item {
+        id: clipBar
+        visible: root.hero !== null && root.hero.online === true
+                 && (Bridge.onlineClipState === "queued" || Bridge.onlineClipState === "fetching"
+                     || Bridge.onlineClipState === "retrying")
+        anchors.horizontalCenter: parent.horizontalCenter
+        // An explicit y, not `anchors.bottom: strip.top`: the strip lives inside a Rectangle several
+        // levels down, and an anchor across that boundary is silently not applied - measured, the bar
+        // sat at y=0, along the top edge of the window, while strip.y read 637. Asking the strip to
+        // map itself is refused too (`mapToY` and `mapTo` both TypeError on it), so the mapping goes
+        // the other way round, from the parent that does answer it. The bare `strip.y` in front of it
+        // is not decoration: a function call's own property reads are not tracked as binding
+        // dependencies, so without it this evaluates once, while the layout is still at y=0, and never
+        // again - measured, the bar stuck to the top of the window with mapFromItem answering 637.
+        y: (strip.y, parent.mapFromItem(strip, 0, 0).y - 12)
+        width: 160
+        height: 4
+        Rectangle {
+            anchors.fill: parent
+            radius: 2
+            color: Qt.alpha(th.line, 0.55)
+        }
+        Rectangle {
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            radius: 2
+            // 首字节之前留一小截，让"排队中"和"根本没在动"看得出不是一回事。
+            width: parent.width * Math.max(0.04, Bridge.onlineClipProgress)
+            color: th.accent
         }
     }
 
