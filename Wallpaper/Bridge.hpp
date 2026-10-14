@@ -176,6 +176,10 @@ class Bridge final : public QObject {
     Q_PROPERTY(QString onlineClipId READ onlineClipId NOTIFY onlineClipChanged)
     Q_PROPERTY(QString onlineClipKey READ onlineClipKey NOTIFY onlineClipChanged)
     Q_PROPERTY(QString onlineClipState READ onlineClipState NOTIFY onlineClipChanged)
+    // Bytes in, 0..1, for the clip the big picture is waiting on. Its own number - and its own NOTIFY -
+    // because the fetcher reports one tick per chunk: hanging it on onlineClipChanged would run the
+    // QML preview gate dozens of times a second.
+    Q_PROPERTY(double onlineClipProgress READ onlineClipProgress NOTIFY onlineClipProgressChanged)
     // Which rung of the site's own resolution list the preview asks for. It is a size the site
     // publishes ("960x540"), not a made-up low/mid/high: the only thing that has to be true is that
     // swapping the token in the url lands on a file the site actually has. Held in ui.ini, because it
@@ -313,6 +317,7 @@ public:
     QString onlineClipId() const { return clipId_; }
     QString onlineClipKey() const { return clipKey_; }
     QString onlineClipState() const { return clipState_; }
+    double onlineClipProgress() const { return clipProgress_; }
     QString previewRung() const { return previewRung_; }
     // Q_INVOKABLE because the drawer's pill row calls it by name, and a property's WRITE accessor is
     // not callable from QML under that name - measured: five presses on 低, five lines of
@@ -432,6 +437,7 @@ signals:
     void onlineHeroFileChanged();
     void onlineHeroStateChanged();
     void onlineClipChanged();
+    void onlineClipProgressChanged();
     void onlineClipWantedChanged();
     void previewRungChanged();
     void langChanged();
@@ -616,6 +622,11 @@ private:
     // one started. The interval gate reads this *and* the hero's, because a card asks for two files
     // from one site and the site counts both against its per-minute budget.
     QString clipKey_, clipId_, clipPath_, clipState_, clipInFlight_;
+    // The url the in-flight clip was asked for, and how much of it has landed. The fetcher reports
+    // progress by url, and a clip's url is the card's own with one token changed - so it is not the
+    // url the row loop in the constructor recognises.
+    QString clipUrl_;
+    double clipProgress_ = 0.0;
     qint64 clipStartMs_ = 0;
     int clipTries_ = 0;
     // Which card is currently in a backoff, and until when. Keyed rather than a flag: moving to a
