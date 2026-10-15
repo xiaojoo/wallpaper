@@ -3277,15 +3277,33 @@ void Application::SyncAudio() {
     // wallpapers playing two beds at once is not a mix, it is noise, and the rotation would
     // otherwise produce it every time two monitors disagree.
     //
-    // Mute takes the decoder down with the gain, not just the gain: a bed nobody can hear still costs
-    // a thread, a demuxer and a resampler, and the plugin's 10 ms fade means there is no click either
-    // way. The slider staying where he left it is why `muted` is a separate flag from `volume = 0`.
+    // 静音壁纸 is the desktop's switch, not the machine's: it takes the wallpaper's own bed down with
+    // the gain (a bed nobody can hear still costs a thread, a demuxer and a resampler, and the plugin's
+    // 10 ms fade means there is no click either way), and it leaves the preview alone - the preview has
+    // its own speaker on the card row. He drew that line on 2026-10-15, 这个静音还是会[静]预览界面 →
+    // 「只静桌面，预览照响」, the same 互不影响 he asked for on 暂停壁纸. The slider keeps its number
+    // either way, which is why mute is not `volume = 0`.
     const bool muted = wpm_.settings().audioMuted;
-    audio_.setVolume(muted ? 0.f : AudioGainFromSetting(wpm_.settings().audioVolume));
+    audio_.setVolume(AudioGainFromSetting(wpm_.settings().audioVolume));
     // The one writer of the hold flag, once around every lap: sound is wanted when something is
     // actually producing it and nothing has switched the seam off. Idempotent, so a lap that changes
     // nothing costs one store, and no other thread is allowed to touch it - see audioToneLive.
     audio_.setPaused(!(audioTrack_.running() || audioToneLive.load()));
+    // A track can die after it started: `Start` only opens the container, and "there is no audio
+    // stream in here" is discovered a moment later on its own thread. Without this the status block
+    // keeps naming the wallpaper whose sound stopped (measured 2026-10-16: `audio_playing:false`
+    // beside `audio_source:"预览 local_08 / video.mp4"` - the label outlived the thing it described),
+    // and the same lap would then re-open it at frame-loop rate. The backoff is what a failed start
+    // already gets; this gives a failed *run* the same treatment.
+    if (!audioNow_.empty() && !audioTrack_.running() && !audioTrack_.starting()
+        && !audioToneLive.load()) {
+        const std::string why = audioTrack_.error();
+        Warn("audio", "the track of {} stopped: {}", audioNow_, why.empty() ? "it ended" : why);
+        audioTried_ = audioNow_;
+        audioDeadFile_ = audioNowFile_;
+        audioRetryAt_ = GetTickCount64() + kAudioRetryMs;
+        audioNow_.clear(); audioFrom_.clear(); audioNowFile_.clear();
+    }
 
     std::string want;
     std::wstring file;
@@ -3296,7 +3314,7 @@ void Application::SyncAudio() {
     // are quiet both get named.
     const char* previewWhy = nullptr;
     const char* slotWhy = nullptr;
-    if (!muted && !audioSilenced_) {
+    if (!audioSilenced_) {
         // The preview is allowed to speak for itself. He asked to be able to hear a clip before
         // setting it as wallpaper, and the desktop behind this window is by definition covered - so
         // the slot rule below would mute exactly the thing he is trying to audition.
@@ -3312,7 +3330,7 @@ void Application::SyncAudio() {
             else if (!wpm_.settings().previewAudio) previewWhy = "the preview's speaker is off";
             else if (const WallpaperPackage* p = wpm_.find(preview_.id); p) {
                 const std::wstring src = AudioSourceOf(*p);
-                if (src.empty()) {
+                if (src.empty() || src == audioDeadFile_) {
                     previewWhy = "the previewed wallpaper carries no sound";
                 } else {
                     want = "预览 " + p->id() + " / " + ToUtf8(src.substr(src.find_last_of(L"\\/") + 1));
@@ -3321,11 +3339,11 @@ void Application::SyncAudio() {
                 }
             } else previewWhy = "the previewed wallpaper is not in the catalog";
         }
-        if (want.empty()) {
-            // 暂停壁纸 stops the *desktop's* sound and nothing else: it is not folded into `muted`
-            // above, because that took the preview's sound with it - his words on 2026-10-15 were
-            // 这个应该分开啊，互不影响. A paused desktop simply fails `mediaActive`, which is the gate
-            // below, so it goes silent on its own. 静音壁纸 stays global: one device, one switch.
+        if (want.empty() && !muted) {
+            // The desktop's own bed. Both of its switches live here: 暂停壁纸 (which zeroes the frame
+            // budget and so fails `mediaActive`) and 静音壁纸 (this `muted`), and neither of them
+            // reaches the preview above - one switch per surface, which is the line he drew twice on
+            // 2026-10-15: 这个应该分开啊，互不影响 / 只静桌面，预览照响.
             for (auto& s : slots_) {
                 if (!s.mediaActive || s.wallpaperId.empty()) continue;
                 const WallpaperPackage* p = wpm_.find(s.wallpaperId);
@@ -3338,8 +3356,9 @@ void Application::SyncAudio() {
                 break;
             }
             if (want.empty())
-                slotWhy = paused_.load() ? "the wallpaper is paused"
-                                         : "no audible slot carries a track";
+                slotWhy = muted            ? "the desktop is muted"
+                        : paused_.load()   ? "the wallpaper is paused"
+                                           : "no audible slot carries a track";
         }
     }
 
@@ -3356,8 +3375,7 @@ void Application::SyncAudio() {
     if (want == audioNow_) return;                 // nothing moved, including the silent case
     if (want.empty()) {
         std::string why = audioSilenced_ ? "audio switched off by command"
-                      : muted            ? "muted"
-                                         : std::string();
+                      : std::string();
         if (why.empty()) {
             if (previewWhy) why = previewWhy;
             if (slotWhy) why += why.empty() ? slotWhy : std::format(" while {}", slotWhy);
@@ -3373,10 +3391,18 @@ void Application::SyncAudio() {
     // A track that cannot start has to be left alone for a while. This function runs once around the
     // frame loop (~100 laps/s measured), and the first version of it called CoCreateInstance and
     // avformat_open_input at that rate for as long as a wallpaper carrying an unopenable file was up.
+    //
+    // The lockout is armed by the FAILURE only. It used to be armed before the attempt, so a
+    // successful start also locked its own label out for 5 s - and un-muting inside that window was
+    // held until it expired. Measured 2026-10-15 on local_11: three mute/unmute rounds, engine
+    // started the track at 23:36:34.111, 23:36:39.097, 23:36:44.097 - 4.99 s and 5.00 s apart, which
+    // is `kAudioRetryMs`, not the file opening. He called it 「关闭声音后，为什么要卡一会才出现声音」.
     const ULONGLONG now = GetTickCount64();
     if (want == audioTried_ && now < audioRetryAt_) return;
     audioTried_ = want;
-    audioRetryAt_ = now + kAudioRetryMs;
+    audioRetryAt_ = now + kAudioRetryMs;   // armed up front: every path below that returns has failed
+                                           // and must not be retried at frame-loop rate. Cleared
+                                           // again the moment the track is actually running.
 
     std::string note;
     if (!audio_.ready()) {
@@ -3388,6 +3414,7 @@ void Application::SyncAudio() {
         audioFrom_ = want;
         audioNowFile_ = file;
         audioNowLoop_ = loop;
+        audioRetryAt_ = 0;
         audioNote_.clear();
         Info("audio", "playing the track of {} ({})", want, note);
     } else {

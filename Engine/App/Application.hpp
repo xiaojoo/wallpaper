@@ -426,6 +426,16 @@ private:
     // device changed. Handing over the wallpaper the preview is sharing must not rewind the track to
     // 0 s in the middle of a sentence, so the two are compared separately.
     std::wstring audioNowFile_;
+    // NOT cleared when another track starts: the first version cleared it on success, so the desktop's
+    // own start wiped it and the next lap offered the dead file again - 1452 `[audio]` lines in 10 s,
+    // with the desktop's bed dying of a restart every lap. A clip with no audio stream in it stays
+    // that way; the marker is replaced when a different file dies.
+    // A file whose track opened and then died - "there is no audio stream in this clip" is only
+    // discoverable by opening it. While that is the reason, the preview does not get to hold the
+    // device with nothing to say: the desktop's own bed keeps playing (measured 2026-10-16, a
+    // silent card under the hero took the desktop's sound down with it: playing:false, source empty,
+    // while M0 was local_11 and audible).
+    std::wstring audioDeadFile_;
     bool audioNowLoop_ = true;
     // `--ctl audio off` is a master kill: after it nothing auto-starts until `auto` or `play` turns
     // the seam back on. Without this the lap after the command would start the audible slot's track

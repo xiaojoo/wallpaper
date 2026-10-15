@@ -12,6 +12,10 @@
 #include <QUrl>
 #include <QUrlQuery>
 
+#include <algorithm>
+#include <memory>
+#include <optional>
+
 namespace sw {
 namespace {
 
@@ -48,10 +52,16 @@ static constexpr int kIdleAbortMs = 20000;
 OnlineFetcher::OnlineFetcher(QObject* parent) : QObject(parent) {
     fileIdle_.setInterval(kIdleAbortMs);
     connect(&fileIdle_, &QTimer::timeout, this, [this] {
-        if (!fileReply_) return;
+        if (!cur_) return;
+        const qint64 now = bytesWritten();
+        if (now != cur_->bytesAtLastCheck) {      // somebody is still moving; that is not a stall
+            cur_->bytesAtLastCheck = now;
+            return;
+        }
         qWarning("online: file transfer moved no bytes for %d ms at %lld, aborting",
-                 kIdleAbortMs, static_cast<long long>(fileBytes_));
-        fileReply_->abort();
+                 kIdleAbortMs, static_cast<long long>(now));
+        for (auto& s : cur_->segs)
+            if (s.reply) s.reply->abort();
     });
     searchIdle_.setInterval(kIdleAbortMs);
     connect(&searchIdle_, &QTimer::timeout, this, [this] {
@@ -60,6 +70,16 @@ OnlineFetcher::OnlineFetcher(QObject* parent) : QObject(parent) {
                  kIdleAbortMs, static_cast<long long>(searchBytes_));
         searchReply_->abort();
     });
+}
+
+int OnlineFetcher::streamCount() {
+    static const int n = [] {
+        const QByteArray v = qgetenv("WALLPAPER_DL_STREAMS");
+        bool ok = false;
+        const int asked = int(v.toInt(&ok));
+        return ok && asked >= 1 && asked <= 8 ? asked : kSegments;
+    }();
+    return n;
 }
 
 OnlineSource* OnlineFetcher::source(const QString& name) {
@@ -188,75 +208,333 @@ void OnlineFetcher::download(OnlineSource& src, const QString& url, const QStrin
 }
 
 void OnlineFetcher::pumpFile() {
-    if (fileReply_ || fileQueue_.empty()) return;
+    if (cur_ || fileQueue_.empty()) return;
     const FileJob job = fileQueue_.front();
     fileQueue_.erase(fileQueue_.begin());
-    OnlineSource* src = source(QString::fromStdString(job.sourceName));
 
-    const QString part = job.dest + QStringLiteral(".part");
-    QFile::remove(part);
+    auto f = std::make_unique<SegFile>();
+    f->job = job;
+    f->part = job.dest + QStringLiteral(".part");
+    f->sidecar = f->part + QStringLiteral(".json");
     QDir().mkpath(QFileInfo(job.dest).absolutePath());
-    outFile_ = new QFile(part);
-    if (!outFile_->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        const QString why = outFile_->errorString();
-        delete outFile_;
-        outFile_ = nullptr;
+
+    f->file = new QFile(f->part);
+    // ReadWrite without Truncate is the whole resume story: what is already on disk stays, and every
+    // segment writes over the range it was handed. Yesterday's abandoned 11.7 MB part is exactly the
+    // bytes today's attempt would otherwise fetch a second time.
+    const bool there = QFileInfo::exists(f->part);
+    if (!f->file->open(QIODevice::ReadWrite)) {
+        const QString why = f->file->errorString();
+        const QString part = f->part;
+        delete f->file;
+        cur_.reset();
         job.done(QStringLiteral("cannot open %1: %2").arg(part, why), QString());
         pumpFile();
         return;
     }
+    f->startedMs = nowMs();
+    cur_ = std::move(f);
+    fileIdle_.start();           // a connection that never delivers a byte is the same failure
+    if (!there || !loadSidecar()) {
+        // No usable history: either nothing is on disk, or what is there is some other file's bytes
+        // (the same name under a new url, or a rung the site resized). Start over, and take the
+        // record with it so a later attempt cannot resume onto the wrong bytes.
+        cur_->file->resize(0);
+        QFile::remove(cur_->sidecar);
+        cur_->total = -1;
+        cur_->ranged = false;
+        cur_->segs.clear();
+    }
 
-    QNetworkRequest r(QUrl(job.url));
+    if (!cur_->segs.empty()) {
+        for (size_t i = 0; i < cur_->segs.size(); ++i) openSegment(i);
+        return;
+    }
+    openProbe();
+}
+
+// What the first request of an unknown file is for: how long is it, and does this host honour Range
+// at all. One byte answers both and costs nothing to throw away, which beats carrying a half-finished
+// stream into a plan that did not exist when it started. A host that ignores the header answers 200
+// with a length, and the file then goes down the one stream it always used.
+void OnlineFetcher::openProbe() {
+    QNetworkRequest r(QUrl(cur_->job.url));
+    OnlineSource* src = source(QString::fromStdString(cur_->job.sourceName));
     r.setRawHeader("User-Agent", src ? QByteArray::fromStdString(src->userAgent()) : QByteArray());
     r.setTransferTimeout(60000);
+    r.setRawHeader("Range", "bytes=0-0");
     QNetworkReply* reply = nam_.get(r);
-    fileReply_ = reply;
-    fileBytes_ = 0;
-    fileIdle_.start();           // a connection that never delivers a byte is the same failure
-
-    QObject::connect(reply, &QNetworkReply::downloadProgress, this,
-                     [this, url = job.url](qint64 done, qint64 total) {
-                         if (done != fileBytes_) { fileBytes_ = done; fileIdle_.start(); }
-                         emit progress(url, total > 0 ? double(done) / double(total) : 0.0, done, total);
-                     });
-    QObject::connect(reply, &QNetworkReply::readyRead, this, [this, reply] {
-        if (outFile_ && outFile_->isOpen()) outFile_->write(reply->readAll());
-    });
-    QObject::connect(reply, &QNetworkReply::finished, this, [this, reply, job, part]() {
+    cur_->probe = reply;
+    QObject::connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        if (!cur_) return;
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QString type = reply->header(QNetworkRequest::ContentTypeHeader).toString();
-        QString error;
-        if (reply->error() != QNetworkReply::NoError) error = reply->errorString();
-        else if (status < 200 || status >= 300) error = QStringLiteral("http %1").arg(status);
+        if (cur_->contentType.isEmpty()) cur_->contentType = type;
+        const QString netErr = reply->error() == QNetworkReply::NoError ? QString() : reply->errorString();
         reply->deleteLater();
-        fileReply_ = nullptr;
-        fileIdle_.stop();
-        if (outFile_) {
-            outFile_->flush();
-            outFile_->close();
-            delete outFile_;
-            outFile_ = nullptr;
-        }
-        // What actually reached the disk, not what the reply believes it received: a body that was cut
-        // off mid-transfer still counts up while nothing of it was written.
-        const qint64 got = QFileInfo(part).size();
-        if (!error.isEmpty()) {
-            QFile::remove(part);
-            job.done(error, type);
-        } else if (got <= 0) {
-            QFile::remove(part);
-            job.done(QStringLiteral("the site sent an empty body"), type);
-        } else if (QFile::exists(job.dest) && !QFile::remove(job.dest)) {
-            QFile::remove(part);
-            job.done(QStringLiteral("%1 exists and could not be replaced").arg(job.dest), type);
-        } else if (!QFile::rename(part, job.dest)) {
-            QFile::remove(part);
-            job.done(QStringLiteral("cannot move %1 into place").arg(part), type);
+        cur_->probe = nullptr;
+        if (status == 206) {
+            const QString cr = QString::fromUtf8(reply->rawHeader("Content-Range"));
+            const int slash = cr.lastIndexOf(QLatin1Char('/'));
+            cur_->ranged = true;
+            cur_->total = slash >= 0 ? cr.mid(slash + 1).toLongLong() : -1;
+        } else if (status >= 200 && status < 300) {
+            cur_->ranged = false;
+            cur_->total = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
+        } else if (!netErr.isEmpty()) {
+            finishFile(netErr);
+            return;
         } else {
-            job.done(QString(), type);
+            finishFile(QStringLiteral("http %1").arg(status));
+            return;
         }
-        pumpFile();
+        if (cur_->total <= 0) {
+            finishFile(QStringLiteral("the site would not say how long the file is"));
+            return;
+        }
+        planSegments();
+        for (size_t i = 0; i < cur_->segs.size(); ++i) openSegment(i);
     });
+}
+
+void OnlineFetcher::openSegment(size_t i) {
+    Segment& s = cur_->segs[i];
+    OnlineSource* src = source(QString::fromStdString(cur_->job.sourceName));
+    QNetworkRequest r(QUrl(cur_->job.url));
+    r.setRawHeader("User-Agent", src ? QByteArray::fromStdString(src->userAgent()) : QByteArray());
+    r.setTransferTimeout(60000);
+    // One manager would happily carry all four ranges down a single HTTP/2 connection, and four
+    // streams on one pipe is not four times the pipe: netstat on 2026-10-16 counted exactly 1
+    // established :443 connection while "taken in 4 ranges" was running. HTTP/1.1 per request is
+    // what makes the split real - the gain measured with python (148 KB/s on one connection,
+    // 385 KB/s on six) only exists when there are six connections.
+    r.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+    const qint64 from = s.begin + s.written;
+    // "bytes=" is part of the header, not decoration: sent without it the request is a Range header the
+    // server does not understand, answers 200 with the whole file, and every stream then writes the
+    // whole file at its own offset. Measured 2026-10-16 on cute-spooky: 4 streams, "got 11282188 of
+    // 2820547 bytes", and a 4.9 MB file where 2.8 MB was expected.
+    if (cur_->ranged)
+        r.setRawHeader("Range", "bytes=" + QByteArray::number(from) + "-" + QByteArray::number(s.end));
+
+    QNetworkReply* reply = nam_.get(r);
+    s.reply = reply;
+    QObject::connect(reply, &QNetworkReply::downloadProgress, this, [this](qint64, qint64) {
+        const qint64 got = bytesWritten();
+        // Flush the record on the clock, not only at segment boundaries: the case the record exists
+        // for is the process that gets killed with every stream still running, and that is exactly
+        // what left an 11.7 MB orphan here on 2026-10-14.
+        if (nowMs() - cur_->sidecarAtMs > 1000) { cur_->sidecarAtMs = nowMs(); saveSidecar(); }
+        if (got != cur_->bytesAtLastCheck) {
+            cur_->bytesAtLastCheck = got;
+            fileIdle_.start();
+        }
+        emit progress(cur_->job.url, cur_->total > 0 ? double(got) / double(cur_->total) : 0.0,
+                      got, cur_->total);
+    });
+    QObject::connect(reply, &QNetworkReply::readyRead, this, [this, i] { onSegmentBytes(i); });
+    QObject::connect(reply, &QNetworkReply::finished, this, [this, i] { onSegmentFinished(i); });
+}
+
+// The grid is a function of the total alone, so a resumed attempt lands its segments on the same
+// offsets the previous one wrote - which is what makes the cursors on disk mean anything.
+void OnlineFetcher::planSegments() {
+    const qint64 total = cur_->total;
+    const int n = (cur_->ranged && total >= kSegmentFromBytes) ? streamCount() : 1;
+    std::vector<Segment> plan;
+    plan.resize(size_t(n));
+    for (int i = 0; i < n; ++i) {
+        plan[size_t(i)].begin = total * i / n;
+        plan[size_t(i)].end = (i + 1 == n ? total : total * (i + 1) / n) - 1;
+    }
+    cur_->segs = std::move(plan);
+    qWarning("online: %s is %lld bytes, taken in %d range%s", cur_->job.url.toUtf8().constData(),
+             static_cast<long long>(cur_->total), int(cur_->segs.size()),
+             cur_->segs.size() == 1 ? "" : "s");
+}
+
+void OnlineFetcher::onSegmentBytes(size_t i) {
+    if (!cur_ || i >= cur_->segs.size()) return;
+    Segment& s = cur_->segs[i];
+    if (!s.reply) return;
+    const QByteArray chunk = s.reply->readAll();
+    if (chunk.isEmpty()) return;
+    if (!cur_->file || !cur_->file->isOpen()) return;
+    const qint64 room = (s.end - s.begin + 1) - s.written;
+    if (room <= 0) return;              // the range is full; anything else this stream sends is not ours
+    const qint64 take = std::min<qint64>(room, chunk.size());
+    cur_->file->seek(s.begin + s.written);
+    const qint64 wrote = cur_->file->write(chunk.data(), take);
+    if (wrote > 0) s.written += wrote;
+}
+
+void OnlineFetcher::onSegmentFinished(size_t i) {
+    if (!cur_ || i >= cur_->segs.size()) return;
+    Segment& s = cur_->segs[i];
+    QNetworkReply* reply = s.reply.data();
+    if (!reply) return;
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (cur_->contentType.isEmpty())
+        cur_->contentType = reply->header(QNetworkRequest::ContentTypeHeader).toString();
+    QString error;
+    if (reply->error() != QNetworkReply::NoError) error = reply->errorString();
+    else if (status >= 200 && status < 300) {
+        // 206 while the plan expects a range, or 200 for the whole body: anything else is a page,
+        // not the file, and it must not be renamed into the library.
+    } else if (status != 0) error = QStringLiteral("http %1").arg(status);
+    if (error.isEmpty() && cur_->ranged && status == 200)
+        error = QStringLiteral("the site sent the whole file for a range request");
+    onSegmentBytes(i);                  // whatever is still sitting in the socket
+    reply->deleteLater();
+    s.reply = nullptr;
+    s.done = true;
+
+    if (!error.isEmpty()) {
+        saveSidecar();
+        finishFile(error);
+        return;
+    }
+    const bool all = [this] {
+        for (const auto& x : cur_->segs)
+            if (!x.done) return false;
+        return true;
+    }();
+    if (!all) {
+        saveSidecar();
+        return;
+    }
+    // A segment that came up short is a hole, not a finished download: a file that is 15 MB of which
+    // 14.9 is real imports happily and then stops mid-loop on the desktop. Re-ask the ranges that
+    // are missing, and give up after three rounds rather than spinning against a server that keeps
+    // closing the stream early.
+    if (cur_->total > 0 && bytesWritten() < cur_->total) {
+        if (++cur_->holeRounds > 3) {
+            finishFile(QStringLiteral("the file stopped at %1 of %2 bytes")
+                           .arg(bytesWritten()).arg(cur_->total));
+            return;
+        }
+        for (size_t k = 0; k < cur_->segs.size(); ++k)
+            if (cur_->segs[k].written < cur_->segs[k].end - cur_->segs[k].begin + 1) {
+                cur_->segs[k].done = false;
+                openSegment(k);
+                return;
+            }
+        return;
+    }
+    finishFile(QString());
+}
+
+// Close the file, move it into place or keep the parts, and report once - whichever way this ends,
+// the queue behind it has to move.
+void OnlineFetcher::finishFile(const QString& error) {
+    if (!cur_) return;
+    SegFile& f = *cur_;
+    if (f.file) {
+        f.file->flush();
+        f.file->close();
+        delete f.file;
+        f.file = nullptr;
+    }
+    for (auto& s : f.segs)
+        if (s.reply) { s.reply->disconnect(this); s.reply->abort(); s.reply->deleteLater(); s.reply = nullptr; }
+    fileIdle_.stop();
+
+    const QString dest = f.job.dest;
+    const QString part = f.part, sidecar = f.sidecar, type = f.contentType;
+    auto done = f.job.done;
+    const qint64 total = f.total;
+    const qint64 got = bytesWritten();
+    const qint64 ms = nowMs() - f.startedMs;
+    const int streams = int(f.segs.size());
+    cur_.reset();
+    qWarning("online: %s %lld of %lld bytes in %lld ms over %d stream%s (%.0f KB/s)",
+             error.isEmpty() ? "got" : "stopped at", static_cast<long long>(got),
+             static_cast<long long>(total), static_cast<long long>(ms), streams,
+             streams == 1 ? "" : "s", ms > 0 ? got / 1024.0 / (ms / 1000.0) : 0.0);
+
+    if (!error.isEmpty()) {
+        // Keep the bytes: that is the point of the sidecar. Only a file we never opened can be
+        // nothing but garbage, and even then the record goes with it.
+        done(error, type);
+    } else if (total > 0 && got < total) {
+        QFile::remove(part);
+        QFile::remove(sidecar);
+        done(QStringLiteral("the site sent an empty body"), type);
+    } else if (total > 0 && QFileInfo(part).size() != total) {
+        QFile::remove(part);
+        QFile::remove(sidecar);
+        done(QStringLiteral("the file is %1 bytes, the site said %2")
+                 .arg(QFileInfo(part).size()).arg(total), type);
+    } else if (got <= 0) {
+        QFile::remove(part);
+        QFile::remove(sidecar);
+        done(QStringLiteral("the site sent an empty body"), type);
+    } else if (QFile::exists(dest) && !QFile::remove(dest)) {
+        done(QStringLiteral("%1 exists and could not be replaced").arg(dest), type);
+    } else if (!QFile::rename(part, dest)) {
+        done(QStringLiteral("cannot move %1 into place").arg(part), type);
+    } else {
+        QFile::remove(sidecar);
+        done(QString(), type);
+    }
+    pumpFile();
+}
+
+qint64 OnlineFetcher::bytesWritten() const {
+    if (!cur_) return 0;
+    qint64 n = 0;
+    for (const auto& s : cur_->segs) n += s.written;
+    return n;
+}
+
+// The resume record: which url these bytes are for, how long that file is (the split depends on it),
+// and how much of each segment is on disk. Written on every segment boundary and before every abort,
+// because the case it exists for is the process that gets killed - which is how the 11.7 MB orphan
+// happened in the first place.
+void OnlineFetcher::saveSidecar() {
+    if (!cur_ || !cur_->ranged || cur_->total <= 0) return;
+    Json j = Json::Object();
+    j.set("url", Json::Of(cur_->job.url.toStdString()));
+    j.set("total", Json::Of(static_cast<long long>(cur_->total)));
+    Json c = Json::Array();
+    for (const auto& s : cur_->segs) c.push(Json::Of(static_cast<long long>(s.written)));
+    j.set("cursors", std::move(c));
+    QFile out(cur_->sidecar);
+    if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) out.write(j.dump(0).c_str());
+}
+
+bool OnlineFetcher::loadSidecar() {
+    QFile in(cur_->sidecar);
+    if (!QFileInfo::exists(cur_->sidecar) || !in.open(QIODevice::ReadOnly)) return false;
+    std::string perr;
+    const auto parsed = Json::Parse(QString::fromUtf8(in.readAll()).toStdString(), perr);
+    if (!parsed) return false;
+    const Json& j = *parsed;
+    if (j.strOr("url") != cur_->job.url.toStdString()) return false;
+    const qint64 total = qint64(j.i64Or("total"));
+    const Json& c = j.at("cursors");
+    const int n = int(c.size());
+    if (total <= 0 || n <= 0) return false;
+
+    cur_->total = total;
+    cur_->ranged = true;
+    cur_->segs.clear();
+    cur_->segs.resize(size_t(n));
+    for (int i = 0; i < n; ++i) {
+        Segment& s = cur_->segs[size_t(i)];
+        s.begin = total * i / n;
+        s.end = (i + 1 == n ? total : total * (i + 1) / n) - 1;
+        s.written = std::min<qint64>(c.items()[size_t(i)].asInt64(), s.end - s.begin + 1);
+    }
+    if (QFileInfo(cur_->part).size() < bytesWritten()) {
+        cur_->total = -1;
+        cur_->ranged = false;
+        cur_->segs.clear();
+        return false;
+    }
+    qWarning("online: resuming %s at %lld of %lld bytes", cur_->job.url.toUtf8().constData(),
+             static_cast<long long>(bytesWritten()), static_cast<long long>(total));
+    return true;
 }
 
 } // namespace sw

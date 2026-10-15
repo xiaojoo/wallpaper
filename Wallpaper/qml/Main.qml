@@ -1759,10 +1759,32 @@ ApplicationWindow {
                     }
                     // The filters can empty the page without the renderer being empty; say so where
                     // the picture would have been, and leave the chips alone so it can be undone.
+                    //
+                    // The grid is a fixed picture, not the wallpaper that happens to be set: behind this
+                    // state the hero layers used to stay painted, so an empty page read as "the desktop
+                    // wallpaper, with a 无 stuck in the middle of it" - two different answers to two
+                    // different questions. placeholder-grid.png is 27 px cells on pure black with a
+                    // 1 px line at (32,32,40) and a short bloom either side (profile 7,34,7 across it),
+                    // tiled rather than scaled so the cell stays 27 px whatever the window does. Measured
+                    // on the rendered window: line centres 85 / 112 / 139 / 166 / 193 = pitch 27.0,
+                    // interior 0. The first version copied his sample exactly - a soft line peaking at
+                    // 17 - and he called it 不够高清, so the rhythm stayed and the line got hardened.
+                    Image {
+                        anchors.fill: parent
+                        visible: root.shown.length === 0
+                        source: "placeholder-grid.png"
+                        // `fillMode: Image.Tile` is the whole story in QML - the per-axis
+                        // horizontalTileMode/verticalTileMode pair is C++-only API, and asking for it
+                        // here fails the component load: "Cannot assign to non-existent property".
+                        fillMode: Image.Tile
+                        cache: false
+                    }
                     Text {
                         anchors.centerIn: parent
-                        visible: root.shown.length === 0
-                        text: trs("none")
+                        // The three-dot "在等" animation is pinned to the middle of the window, which is
+                        // exactly where this line sits - so while it is running, the words are not shown.
+                        visible: root.shown.length === 0 && !root.waiting
+                        text: trs("no_wallpaper_info")
                         color: th.muted; font.family: root.fontFamily; font.pixelSize: 13
                     }
 
@@ -2597,6 +2619,10 @@ ApplicationWindow {
                         IconBtn {
                             icon: "chevL"
                             tip: strip.sel > 0 ? trs("prev") : trs("online_prev")
+                            // Nothing to walk when the page has no cards: the strip's own delegates are
+                            // gone, and a lone pair of arrows floating over the placeholder grid is a
+                            // control that cannot do anything (he: 没有壁纸的时候，这 ‹ › 两个隐藏).
+                            visible: root.shown.length > 0
                             flat: true
                             box: 44
                             glyph: 34
@@ -2620,6 +2646,7 @@ ApplicationWindow {
                         IconBtn {
                             icon: "chevR"
                             tip: strip.sel < strip.n - 1 ? trs("next") : trs("online_next")
+                            visible: root.shown.length > 0
                             flat: true
                             box: 44
                             glyph: 34
@@ -4091,7 +4118,9 @@ ApplicationWindow {
         // is not decoration: a function call's own property reads are not tracked as binding
         // dependencies, so without it this evaluates once, while the layout is still at y=0, and never
         // again - measured, the bar stuck to the top of the window with mapFromItem answering 637.
-        y: (strip.y, parent.mapFromItem(strip, 0, 0).y - 12)
+        // 30, not 12: the line under the bar needs the room, and at 12 its 11 px text ran 8 px into
+        // the strip's top row.
+        y: (strip.y, parent.mapFromItem(strip, 0, 0).y - 30)
         width: 160
         height: 4
         Rectangle {
@@ -4107,6 +4136,26 @@ ApplicationWindow {
             // 首字节之前留一小截，让"排队中"和"根本没在动"看得出不是一回事。
             width: parent.width * Math.max(0.04, Bridge.onlineClipProgress)
             color: th.accent
+        }
+        // 一条 4 px 的线只回答"在动"，不回答"还要多久"，而这一步的真实代价是几十秒到几分钟
+        // （2026-10-15 实测一张 15.3 MB 的 1080p 切片在直连 24.6 KB/s 上要 4 分钟）。所以把
+        // 三个数摆出来：已到字节的 MB 数、站点自己报的总 MB 数、以及这半秒窗口里的平均速率。
+        // 速率是平滑过的，因为这条链路会当场从 400 KB/s 掉到 60 KB/s，用全程平均会一直骗人。
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.bottom
+            anchors.topMargin: 5
+            visible: Bridge.onlineClipTotal > 0
+            text: trs("dl_taken") + (Bridge.onlineClipBytes / 1048576).toFixed(1) + " / "
+                  + (Bridge.onlineClipTotal / 1048576).toFixed(1) + " MB · "
+                  + Bridge.onlineClipKbps.toFixed(0) + " KB/s"
+                  + (Bridge.onlineClipKbps > 5 && Bridge.onlineClipBytes < Bridge.onlineClipTotal
+                     ? " · " + trs("dl_eta_a")
+                       + ((Bridge.onlineClipTotal - Bridge.onlineClipBytes) / 1024.0
+                          / Bridge.onlineClipKbps).toFixed(0) + trs("dl_eta_b")
+                     : "")
+            color: th.muted
+            font.family: root.fontFamily; font.pixelSize: 11
         }
     }
 

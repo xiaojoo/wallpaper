@@ -236,13 +236,18 @@ const Entry kStrings[] = {
     {"audio_no_track", "当前壁纸没有音轨", "no track on this wallpaper"},
     {"audio_volume", "壁纸音量", "Wallpaper volume"},
     {"audio_mute", "静音壁纸", "Mute wallpaper"},
+    {"dl_taken", "已取 ", "Downloaded "},
+    {"dl_eta_a", "还要 ", "about "},
+    {"dl_eta_b", " 秒", " s left"},
     {"preview_sound_on", "预览出声：开", "Preview sound: on"},
     {"preview_sound_off", "预览出声：关", "Preview sound: off"},
     {"audio_desc", "只有真正设为壁纸、且包里带音轨的那一张会响；被全屏窗口盖住、锁屏或显示器熄灭时"
-                   "自动静音。此滑条是感知刻度，25 是默认。",
+                   "自动静音。这颗只管桌面那一遍：预览的声音是卡片行那个喇叭，两者互不影响。"
+                   "此滑条是感知刻度，25 是默认。",
      "Only the wallpaper actually on the desktop sounds, and only if its package carries a track. "
-     "It goes quiet under a fullscreen window, a locked session or a powered-down monitor. "
-     "The slider is perceptual; 25 is the default."},
+     "It goes quiet under a fullscreen window, a locked session or a powered-down monitor. This "
+     "switch covers the desktop only - the preview has its own speaker on the card row, and the two "
+     "do not touch each other. The slider is perceptual; 25 is the default."},
 
     {"state", "状态", "State"},
     {"measured", "实测帧率", "Measured"},
@@ -255,6 +260,9 @@ const Entry kStrings[] = {
     {"corner_static", "画面静止采样", "Frame-static samples"},
     {"error", "错误", "Error"},
     {"none", "无", "none"},
+    // The empty page's own words: `none` stays the value of a dropdown ("host layer: none"), this one
+    // says what is missing, because it sits where a wallpaper picture would have been.
+    {"no_wallpaper_info", "未获取到壁纸信息", "no wallpaper to show"},
     {"host_layer", "桌面层级", "Desktop layer"},
     {"cpu", "进程 CPU", "Process CPU"},
     // The three labels on the window's bottom line. CPU and GPU are the same letters in both languages
@@ -525,10 +533,25 @@ Bridge::Bridge(QObject* parent) : QObject(parent) {
                 emit onlineChanged();
             });
     connect(&online_, &OnlineFetcher::progress, this,
-            [this](const QString& url, double fraction, qint64, qint64) {
+            [this](const QString& url, double fraction, qint64 done, qint64 total) {
                 if (!clipUrl_.isEmpty() && url == clipUrl_) {
                     clipProgress_ = fraction;
                     emit onlineClipProgressChanged();
+                    clipBytes_ = done;
+                    if (total > 0) clipTotal_ = total;
+                    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+                    if (clipMeterAtMs_ != 0 && now - clipMeterAtMs_ >= 500) {
+                        const double inst = double(done - clipMeterBytes_) * 1000.0
+                                            / double(now - clipMeterAtMs_) / 1024.0;
+                        clipKbps_ = clipKbps_ > 0.0 ? 0.6 * clipKbps_ + 0.4 * inst : inst;
+                        clipMeterAtMs_ = now;
+                        clipMeterBytes_ = done;
+                        emit onlineClipChanged();
+                    } else if (clipMeterAtMs_ == 0) {
+                        clipMeterAtMs_ = now;
+                        clipMeterBytes_ = done;
+                        emit onlineClipChanged();
+                    }
                 }
                 for (const auto& v : onlineRows_)
                     if (v.toMap().value("image").toString() == url) {
@@ -2053,6 +2076,8 @@ void Bridge::requestClip(const QString& key) {
     clipStartMs_ = QDateTime::currentMSecsSinceEpoch();
     clipUrl_ = url;
     clipProgress_ = 0.0;
+    clipBytes_ = 0; clipTotal_ = 0; clipKbps_ = 0.0;
+    clipMeterAtMs_ = 0; clipMeterBytes_ = 0;
     qWarning("online: clip asks key=%s row=%s want=%s file=%s (try %d of %d)", key.toUtf8().constData(),
              cur.toUtf8().constData(), rung.toUtf8().constData(),
              QFileInfo(dest).fileName().toUtf8().constData(), clipTries_ + 1, kHeroRetries + 1);

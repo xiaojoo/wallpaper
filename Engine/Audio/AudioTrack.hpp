@@ -35,6 +35,9 @@ public:
     // container with no audio stream, a codec with no decoder. "playing" in the status block has to
     // mean the second thing, not the first, or a silent wallpaper reports itself as sounding.
     bool running() const { return state_.load() == 1; }
+    // Spawned, still inside avformat_open_input. `Start` returns true here, so a caller asking
+    // "is it dead" from `running` alone would call every fresh track dead for its first 20 ms.
+    bool starting() const { return state_.load() == 0; }
     // Why the thread stopped, empty while it is running or when the file simply reached its end.
     std::string error() const;
     // Frames handed to the backend, and how many times the track rewound. Together they say whether
