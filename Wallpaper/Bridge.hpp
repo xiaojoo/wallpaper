@@ -186,6 +186,11 @@ class Bridge final : public QObject {
     // because the fetcher reports one tick per chunk: hanging it on onlineClipChanged would run the
     // QML preview gate dozens of times a second.
     Q_PROPERTY(double onlineClipProgress READ onlineClipProgress NOTIFY onlineClipProgressChanged)
+    // What the wait actually costs, so 取视频 does not have to mean an unlabelled bar: the bytes on
+    // disk, the bytes the site said, and the smoothed rate they are arriving at.
+    Q_PROPERTY(qint64 onlineClipBytes READ onlineClipBytes NOTIFY onlineClipChanged)
+    Q_PROPERTY(qint64 onlineClipTotal READ onlineClipTotal NOTIFY onlineClipChanged)
+    Q_PROPERTY(double onlineClipKbps READ onlineClipKbps NOTIFY onlineClipChanged)
     // Which rung of the site's own resolution list the preview asks for. It is a size the site
     // publishes ("960x540"), not a made-up low/mid/high: the only thing that has to be true is that
     // swapping the token in the url lands on a file the site actually has. Held in ui.ini, because it
@@ -335,6 +340,9 @@ public:
     QString onlineClipKey() const { return clipKey_; }
     QString onlineClipState() const { return clipState_; }
     double onlineClipProgress() const { return clipProgress_; }
+    qint64 onlineClipBytes() const { return clipBytes_; }
+    qint64 onlineClipTotal() const { return clipTotal_; }
+    double onlineClipKbps() const { return clipKbps_; }
     QString previewRung() const { return previewRung_; }
     // Q_INVOKABLE because the drawer's pill row calls it by name, and a property's WRITE accessor is
     // not callable from QML under that name - measured: five presses on 低, five lines of
@@ -653,6 +661,10 @@ private:
     // url the row loop in the constructor recognises.
     QString clipUrl_;
     double clipProgress_ = 0.0;
+    // The rate meter is a window, not an average over the whole transfer: a clip that starts at
+    // 400 KB/s and falls to 60 KB/s should say 60, because that is what the remaining seconds cost.
+    qint64 clipBytes_ = 0, clipTotal_ = 0, clipMeterAtMs_ = 0, clipMeterBytes_ = 0;
+    double clipKbps_ = 0.0;
     qint64 clipStartMs_ = 0;
     int clipTries_ = 0;
     // Which card is currently in a backoff, and until when. Keyed rather than a flag: moving to a
