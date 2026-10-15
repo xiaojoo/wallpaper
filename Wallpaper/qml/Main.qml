@@ -375,6 +375,18 @@ ApplicationWindow {
             heroUncoverWatch.restart()
             return
         }
+        // A clip card's original is not the picture he ends on: the live pass takes the box over as
+        // soon as the file reaches the renderer, and that second change is the 抖 on 刚点完小图. So the
+        // cover stands down on the clip's first frame, not on the poster's. Measured on his click
+        // (8 ms timeline, 2026-10-15): uncover at t+380 onto the original, clip's first frame at
+        // t+510 - one pick, two changes. The cap stays the download's 1200 ms because a cold clip
+        // genuinely is not coming inside a decoder priming; past it the poster is the honest answer.
+        if (hero && clipWillTakeOver && !heroPictureIsHere()) {
+            heroWaitPicture = true
+            heroUncoverWatch.interval = 1200
+            heroUncoverWatch.restart()
+            return
+        }
         // An online still's first layer is the site's own thumbnail, and that thumbnail is 400x225
         // blown into a 3840-wide box: measured offline on two cards, 0.063 and 0.27 of the original's
         // edge detail at the same crop. The cover comes down ~280 ms after the click whatever is
@@ -479,6 +491,15 @@ ApplicationWindow {
                                          && String(hero.key) === Bridge.onlineClipKey
                                          ? Bridge.onlineClipId : ""
     readonly property bool heroIsClip: heroClipId.length > 0
+    // This card's big picture is going to be the moving clip rather than a frame of it, from the
+    // moment the card is picked - `heroIsClip` only turns on once the clip is on disk and handed to
+    // the renderer, which is ~350 ms of debounce plus the fetch after the swap. Measured on his own
+    // click (8 ms timeline, 2026-10-15): the cover came down onto the site's original at t+380 and
+    // the clip's first frame cut in at t+510, so one pick was two visible changes.
+    readonly property bool clipWillTakeOver: hero !== null && hero.online === true
+                                             && String(hero.mime).indexOf("video/") === 0
+                                             && useLivePreview && previewMotion
+                                             && Bridge.onlineClipWanted
     // A still photo has nothing for the second pass to animate that its own file does not show better:
     // the stream is a fixed 1920x1080 grab, the file is the resolution the package was imported at.
     // So the hero reads the file and the pass is not asked for - which also stops the window paying
@@ -1162,7 +1183,7 @@ ApplicationWindow {
                             // The other half of the gate in commitHeroSwap: the cover stands down the
                             // moment this layer has the current card's picture, not on a timer.
                             onStatusChanged: if (status === Image.Ready && root.heroWaitPicture
-                                                  && fullUp) root.heroUncoverNow()
+                                                  && fullUp && !root.clipWillTakeOver) root.heroUncoverNow()
                             onShownChanged: if (visible && Bridge.transition !== "none") heroDevelopRun.start()
                             onVisibleChanged: if (visible && Bridge.transition !== "none") heroDevelopRun.start()
                         }
