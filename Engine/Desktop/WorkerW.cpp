@@ -103,17 +103,31 @@ Rect DesktopHost::ToClient(const Rect& desktopPx) const {
 bool WorkerW::LocateLayer() {
     host_.defView = nullptr;
     host_.iconHost = nullptr;
-    HWND defViewOwner = nullptr;
 
     // DefView is a child window; search the top-levels that host it.
+    //
+    // Z-order matters here and class alone does not identify the shell: any dialog that shows a shell
+    // folder (a Save-As box, the volume mixer's list) has a child of the very same class
+    // `SHELLDLL_DefView`, and EnumWindows walks top-down, so a dialog open over the desktop used to be
+    // found first. The wallpaper layer was then "re-resolved" into a WorkerW belonging to that dialog,
+    // and when it closed our child window was destroyed with it - after which the desktop shows no
+    // wallpaper, `--ctl apply` keeps reporting success, and the frame loop logs an empty client area
+    // 25 times a second (measured: 18,579 lines in 13 minutes, probe-slot-window.ps1 finding no
+    // SmartWallpaperDesktop window at all). Only the shell's own hosts count: Progman first, WorkerW
+    // for the builds where the icon host is not Progman.
+    struct ShellHosts { HWND progman = nullptr; HWND workerw = nullptr; };
+    ShellHosts hosts;
     EnumWindows(
         [](HWND h, LPARAM l) -> BOOL {
-            auto* out = reinterpret_cast<HWND*>(l);
-            HWND child = FindWindowExW(h, nullptr, kDefView, nullptr);
-            if (child) { *out = h; return FALSE; }
-            return TRUE;
+            auto* f = reinterpret_cast<ShellHosts*>(l);
+            if (!FindWindowExW(h, nullptr, kDefView, nullptr)) return TRUE;
+            const std::string cls = ClassOf(h);
+            if (cls == "Progman" && !f->progman) f->progman = h;
+            else if (cls == "WorkerW" && !f->workerw) f->workerw = h;
+            return (f->progman || f->workerw) ? FALSE : TRUE;
         },
-        reinterpret_cast<LPARAM>(&defViewOwner));
+        reinterpret_cast<LPARAM>(&hosts));
+    HWND defViewOwner = hosts.progman ? hosts.progman : hosts.workerw;
 
     if (!defViewOwner) {
         host_.defView = nullptr;
