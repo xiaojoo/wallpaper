@@ -1184,8 +1184,10 @@ ApplicationWindow {
                             // moment this layer has the current card's picture, not on a timer.
                             onStatusChanged: if (status === Image.Ready && root.heroWaitPicture
                                                   && fullUp && !root.clipWillTakeOver) root.heroUncoverNow()
-                            onShownChanged: if (visible && Bridge.transition !== "none") heroDevelopRun.start()
-                            onVisibleChanged: if (visible && Bridge.transition !== "none") heroDevelopRun.start()
+                            onShownChanged: if (visible && Bridge.transition !== "none"
+                                                   && !root.clipWillTakeOver) heroDevelopRun.start()
+                            onVisibleChanged: if (visible && Bridge.transition !== "none"
+                                                      && !root.clipWillTakeOver) heroDevelopRun.start()
                         }
 
                         // The sharpness reveal: the original is drawn blurred and sharpened through a
