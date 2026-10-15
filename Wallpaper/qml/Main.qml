@@ -1549,6 +1549,22 @@ ApplicationWindow {
                                 onClicked: root.carouselPlaying = !root.carouselPlaying
                                 Hint { label: playBtn.tip; hovered: playBtn.hoverArea; place: "top" }
                             }
+                            // Whether this window is allowed to take the speakers. It is a per-card row
+                            // control rather than a page setting because the question is always asked
+                            // about one specific clip: "before I set this as wallpaper, what does it
+                            // sound like". Red means it is audible, like the motion button beside it.
+                            IconBtn {
+                                id: soundBtn
+                                icon: Bridge.previewAudio ? "sound" : "soundoff"
+                                tip: trs(Bridge.previewAudio ? "preview_sound_on" : "preview_sound_off")
+                                flat: true
+                                veil: "#40FFFFFF"
+                                glyph: 17
+                                enabled: Bridge.connected
+                                tint: Bridge.previewAudio ? th.err : th.text
+                                onClicked: Bridge.setPreviewAudio(!Bridge.previewAudio)
+                                Hint { label: soundBtn.tip; hovered: soundBtn.hoverArea; place: "top" }
+                            }
                             // A plain 28 px cell, same as the two icon buttons beside it. The bubble
                             // does not render when it is declared inside the Canvas.
                             Item {
@@ -3900,6 +3916,46 @@ ApplicationWindow {
                                 }
                             }
                         }
+
+                        // The ambient track. A wallpaper that can be heard has to be turned down from
+                        // the same place it is chosen - a config file is not a control - and both
+                        // numbers read back from the renderer's status block, so the row shows what the
+                        // engine is doing rather than what was last clicked.
+                        Group {
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("audio_volume")
+                                    color: th.text; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Range {
+                                    value: Bridge.audioVolume
+                                    enabled: Bridge.connected
+                                    onCommitted: function (v) { Bridge.setAudioVolume(v) }
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    text: trs("audio_mute")
+                                    color: th.text; font.family: root.fontFamily; font.pixelSize: 12
+                                    Layout.fillWidth: true
+                                }
+                                Slide {
+                                    checked: Bridge.audioMuted
+                                    enabled: Bridge.connected
+                                    onToggled: function (on) { Bridge.setAudioMuted(on) }
+                                }
+                            }
+                            Text {
+                                text: trs("audio_desc")
+                                wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                color: th.muted; font.family: root.fontFamily; font.pixelSize: 11
+                            }
+                        }
                     }
 
                     // ---------------------------------------------------------- 渲染器
@@ -3914,6 +3970,16 @@ ApplicationWindow {
                                                     + trs("cpu_over") + " "
                                                     + root.num(Bridge.cpuWindowS, 1) + " s" }
                             StatLine { k: trs("working_set"); v: root.num(Bridge.workingSetMb, 1) + " MB" }
+                            // Sound, named by what it is doing. The number after the name is the level
+                            // the backend is handing the device (post-gain, % of full scale) - the
+                            // reading that says "audible" rather than "a track thread exists".
+                            StatLine {
+                                k: trs("audio")
+                                v: Bridge.audioPlaying
+                                    ? Bridge.audioSource + " · " + trs("audio_peak") + " "
+                                      + root.num(Bridge.audioPeak / 10.0, 1) + " %"
+                                    : (Bridge.audioMuted ? trs("audio_muted_now") : trs("audio_no_track"))
+                            }
                             StatLine { visible: Bridge.gpuSelfPercent >= 0
                                 k: trs("gpu_self")
                                 v: root.num(Bridge.gpuSelfPercent, 1) + " % · " + trs("gpu_3d") + " "
@@ -4693,6 +4759,23 @@ ApplicationWindow {
                 c.beginPath(); c.arc(14.6, 12.0, 3.2, 0, tau); c.stroke()
                 c.beginPath(); c.arc(14.6, 12.0, 7.2, 2.50, 3.85); c.stroke()
                 c.beginPath(); c.arc(14.6, 12.0, 10.4, 2.62, 3.72); c.stroke()
+                break
+            case "sound":
+                // A cone and two waves. The waves are the point: this row is about whether the
+                // preview can be heard, and a cone alone reads as "volume" at 17 px.
+                c.beginPath(); c.moveTo(4.4, 9.4); c.lineTo(7.8, 9.4); c.lineTo(12.0, 5.2)
+                               c.lineTo(12.0, 18.8); c.lineTo(7.8, 14.6); c.lineTo(4.4, 14.6)
+                               c.closePath(); c.fill()
+                c.beginPath(); c.arc(13.0, 12.0, 4.4, -0.80, 0.80); c.stroke()
+                c.beginPath(); c.arc(13.0, 12.0, 7.8, -0.70, 0.70); c.stroke()
+                break
+            case "soundoff":
+                c.beginPath(); c.moveTo(4.4, 9.4); c.lineTo(7.8, 9.4); c.lineTo(12.0, 5.2)
+                               c.lineTo(12.0, 18.8); c.lineTo(7.8, 14.6); c.lineTo(4.4, 14.6)
+                               c.closePath(); c.fill()
+                c.lineCap = "round"
+                c.beginPath(); c.moveTo(15.4, 8.8); c.lineTo(21.2, 15.2); c.stroke()
+                c.beginPath(); c.moveTo(21.2, 8.8); c.lineTo(15.4, 15.2); c.stroke()
                 break
             }
         }

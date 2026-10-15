@@ -48,6 +48,9 @@ private:
     // Holds the desktop's own motion. Sits under the two rotation rows because it is the same kind of
     // thing - a switch about what plays - and greyed on a still, where there is nothing to hold.
     QAction* pauseWallpaper_ = nullptr;
+    // The ambient track's own row, next to the one that stops the picture: both are "the desktop is
+    // doing something you may not want right now", and neither should need the settings window.
+    QAction* muteAudio_ = nullptr;
     // The two desktop overlays that are worth turning on without opening the window: the ring, and
     // the shell's icon layer it stands in for. Both are checkable because both are states, and the
     // check is the only place they can be read from here.

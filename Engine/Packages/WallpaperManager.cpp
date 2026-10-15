@@ -78,6 +78,9 @@ bool WallpaperManager::Load(const std::wstring& exeDir, std::string& error) {
     s_.globalQuality = ParseQuality(r.strOr("quality", "high"), Quality::High);
     s_.imageFit = ParseImageFit(r.strOr("image_fit", "fill"));
     s_.trayAlpha = r.find("tray_alpha") ? r.find("tray_alpha")->asInt(0) : 0;
+    s_.audioVolume = std::max(0, std::min(100, r.find("audio_volume") ? r.find("audio_volume")->asInt(25) : 25));
+    s_.audioMuted = r.find("audio_muted") ? r.find("audio_muted")->asBool(false) : false;
+    s_.previewAudio = r.find("preview_audio") ? r.find("preview_audio")->asBool(true) : true;
     s_.hud = r.find("hud") ? r.find("hud")->asBool(false) : false;
     s_.hudCorner = r.find("hud_corner") ? ParseHudCorner(r.find("hud_corner")->asString(), 0) : 0;
     // A dragged position, if there is one. Anything malformed leaves both negative, which is what
@@ -146,6 +149,9 @@ std::string WallpaperManager::ConfigText() const {
     r.set("quality", Json::Of(s_.useGlobalQuality ? QualityName(s_.globalQuality) : std::string("package")));
     r.set("image_fit", Json::Of(std::string(ImageFitName(s_.imageFit))));
     r.set("tray_alpha", Json::Of(s_.trayAlpha));
+    r.set("audio_volume", Json::Of(s_.audioVolume));
+    r.set("audio_muted", Json::Of(s_.audioMuted));
+    r.set("preview_audio", Json::Of(s_.previewAudio));
     r.set("hud", Json::Of(s_.hud));
     r.set("hud_corner", Json::Of(std::string(HudCornerName(s_.hudCorner))));
     if (s_.hudX >= 0.f && s_.hudY >= 0.f) {
@@ -318,6 +324,14 @@ void WallpaperManager::SetTrayAlpha(int pct) {
     s_.trayAlpha = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
 }
 
+void WallpaperManager::SetAudioVolume(int pct) {
+    s_.audioVolume = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+}
+
+void WallpaperManager::SetAudioMuted(bool muted) { s_.audioMuted = muted; }
+
+void WallpaperManager::SetPreviewAudio(bool on) { s_.previewAudio = on; }
+
 void WallpaperManager::SetHud(bool on) { s_.hud = on; }
 
 int WallpaperManager::SetHudCorner(const std::string& name) {
@@ -473,6 +487,9 @@ Json WallpaperManager::StatusJson() const {
     r.set("quality", Json::Of(std::string(QualityName(s_.globalQuality))));
     r.set("quality_is_global", Json::Of(s_.useGlobalQuality));
     r.set("image_fit", Json::Of(std::string(ImageFitName(s_.imageFit))));
+    r.set("audio_volume", Json::Of(s_.audioVolume));
+    r.set("audio_muted", Json::Of(s_.audioMuted));
+    r.set("preview_audio", Json::Of(s_.previewAudio));
     Json mons = Json::Array();
     for (auto& a : s_.assignments) {
         Json m = Json::Object();

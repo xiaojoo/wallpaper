@@ -43,6 +43,8 @@ add_executable(WallpaperRenderer WIN32
   Engine/App/Tray.cpp
   Engine/App/IPCServer.cpp
   Engine/App/IPCClient.cpp
+  Engine/Audio/AudioOut.cpp
+  Engine/Audio/AudioTrack.cpp
 )
 
 target_include_directories(WallpaperRenderer PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -65,6 +67,27 @@ target_link_libraries(WallpaperRenderer PRIVATE
 )
 
 set_target_properties(WallpaperRenderer PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
+
+# ------------------------------------------------------------------ audio backend (pluggable)
+# A separate DLL that WallpaperRenderer does NOT link. The engine loads it at run time through the C
+# contract in Engine/Audio/IAudioPlugin.h and runs silently without it - no file, wrong ABI, no output
+# device, all mean "no sound", never "no wallpaper". That is what makes it a plugin rather than just a
+# folder: taking the file away is a supported configuration. Same shape as nvml.dll in
+# Engine/App/GpuMonitor.cpp, which has been optional since the GPU metrics landed.
+add_library(swaudio_wasapi SHARED Engine/Audio/WasapiPlugin.cpp)
+target_include_directories(swaudio_wasapi PRIVATE "${CMAKE_SOURCE_DIR}")
+target_compile_definitions(swaudio_wasapi PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+  _WIN32_WINNT=0x0A00 WINVER=0x0A00
+)
+target_compile_options(swaudio_wasapi PRIVATE /utf-8 /W4 /permissive- /Zc:__cplusplus /EHsc /MP
+  $<$<CONFIG:Release>:/O2 /Oi>)
+target_link_libraries(swaudio_wasapi PRIVATE ole32)
+set_target_properties(swaudio_wasapi PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
+add_dependencies(WallpaperRenderer swaudio_wasapi)
+add_custom_command(TARGET WallpaperRenderer POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:swaudio_wasapi>"
+    "$<TARGET_FILE_DIR:WallpaperRenderer>")
 
 # ---------------------------------------------------------------- FFmpeg video backend (required)
 # The only video path in the engine since 2026-10-07, when the Media Foundation decoder was deleted:
@@ -93,7 +116,10 @@ endif()
 message(STATUS "FFmpeg video backend: ${WALLPAPER_FFMPEG_DIR}")
 target_include_directories(WallpaperRenderer PRIVATE "${WALLPAPER_FFMPEG_DIR}/include")
 target_link_directories(WallpaperRenderer PRIVATE "${WALLPAPER_FFMPEG_DIR}/lib")
-target_link_libraries(WallpaperRenderer PRIVATE avformat avcodec avutil swscale)
+# swresample became a link-time dependency with the audio track (Engine/Audio/AudioTrack.cpp):
+# it used to arrive only as avcodec's own transitive DLL, which is why it was in the staging
+# loop below but not here.
+target_link_libraries(WallpaperRenderer PRIVATE avformat avcodec avutil swscale swresample)
 # The transitive closure of the four libraries we link, which is NOT the same list: dumpbin says
 # avcodec-63.dll needs swresample-7.dll even though we never call swresample, and once the exe has
 # import libs for any of these the loader resolves them at process start - so a missing one kills

@@ -51,6 +51,12 @@ public:
     bool isImage() const { return srcW_ > 0 && !isVideo(); }
     const std::wstring& videoFile() const { return videoFile_; }
     bool videoLoop() const { return videoLoop_; }
+    // An optional ambient track, named inside the package directory exactly like `video` is. A name
+    // with no file behind it is dropped at LoadFromDir with a warning rather than kept: a wallpaper
+    // that cannot be heard has to look exactly like one that has no track, not like a broken one.
+    bool hasAudio() const { return !audioFile_.empty(); }
+    const std::wstring& audioFile() const { return audioFile_; }
+    bool audioLoop() const { return audioLoop_; }
     // Length the importer measured, so a card can say how long the clip is before anything opens it.
     double srcDuration() const { return duration_; }
     const Json& params() const { return params_; }
@@ -65,6 +71,8 @@ private:
     std::wstring dir_, shaderFile_;
     std::wstring videoFile_;
     bool videoLoop_ = true;
+    std::wstring audioFile_;
+    bool audioLoop_ = true;
     double duration_ = 0.0;
     Shader::Entries entries_;
     UINT particleCount_ = 0;

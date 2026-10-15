@@ -135,6 +135,20 @@ std::optional<WallpaperPackage> WallpaperPackage::LoadFromDir(const std::wstring
         error = "a \"video\" entry needs renderer \"video\"";
         return std::nullopt;
     }
+    // An ambient track is allowed on any renderer - rain over a still, a tick over a shader - so
+    // unlike "video" it has no partner key to agree with. A name with no file behind it is dropped
+    // here rather than discovered at play time: a wallpaper that cannot be heard has to look exactly
+    // like one that carries no track, not like one that is broken.
+    if (const Json* a = j.find("audio"); a && a->isString() && !a->asString().empty()) {
+        const std::wstring cand = dir + L"\\" + ToWide(a->asString());
+        if (std::filesystem::exists(cand)) {
+            p.audioFile_ = ToWide(a->asString());
+            p.audioLoop_ = j.boolOr("audio_loop", true);
+        } else {
+            Warn("pkg", "{}: \"audio\" names {} which is not a file - the wallpaper stays silent",
+                 folderName, a->asString());
+        }
+    }
     // The renderer string and the particles block both have to agree, and textures are indexed from
     // t1 in a particle wallpaper because the buffer owns t0.
     if (wantsParticles && !p.particleCount_) {
