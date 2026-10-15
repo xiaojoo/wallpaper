@@ -387,20 +387,25 @@ ApplicationWindow {
             heroUncoverWatch.restart()
             return
         }
-        // An online still's first layer is the site's own thumbnail, and that thumbnail is 400x225
-        // blown into a 3840-wide box: measured offline on two cards, 0.063 and 0.27 of the original's
-        // edge detail at the same crop. The cover comes down ~280 ms after the click whatever is
-        // underneath, so he watched that stamp for as long as the original took to decode - which is
-        // the 闪 of his 06:10 recording, where all 8 switches fell to 0.04-0.12 of their settled
-        // detail. Waiting for the original means the thumbnail never reaches the screen at all.
-        // The wake-up is heroBig's own status, not the live pass: a still never runs the second pass,
-        // which is exactly why the last attempt at this gate could only ever exit on its timeout.
-        if (hero && hero.online === true && hero.type === "image" && !heroBigPictureIsHere()) {
+        // A still's first layer is the soft picture underneath - the site's 400x225 thumbnail for an
+        // online card (0.063-0.27 of the original's edge detail, measured offline on two cards), the
+        // 1280-wide `*_large`/thumb for a local one. The cover comes down ~280 ms after the click
+        // whatever is underneath, so he watched that stamp for as long as the real picture took to
+        // arrive - the 闪 of his 06:10 recording (all 8 switches at 0.04-0.12 of settled detail), and
+        // since 2026-10-15 the same thing on 本地图片 for `local_04` alone: 17.4 MB / 15.8 MP decodes
+        // in 196 ms where the other five cards need 29-68 ms, so it is the only one whose cover lands
+        // on the thumb (measured: thumb on screen 76 ms, then the original).
+        // This used to be gated on `hero.online === true`, which is why extending the wait to local
+        // cards on 2026-10-14 made every local switch freeze: the wake-up below read `fullUp`, and
+        // `fullUp` is online-only, so the wait could only ever end on its timeout. Both halves are
+        // keyed to the card now.
+        if (hero && hero.type === "image" && (hero.online === true || heroBig.stillFile)
+            && !heroBigPictureIsHere()) {
             heroWaitPicture = true
-            // Longer than the clip's 600 ms because this wait can be a multi-megabyte download rather
-            // than a decoder priming; past it the thumbnail is the only picture there is to show, so
-            // uncovering is the honest answer.
-            heroUncoverWatch.interval = 1200
+            // An online wait is a multi-megabyte download, so it gets 1200 ms; a local file is already
+            // on disk and the only cost is the decode, so 400 ms is the measured worst (196 ms) with
+            // room, and a wake-up that never comes costs 0.4 s instead of 1.2 s.
+            heroUncoverWatch.interval = hero.online === true ? 1200 : 400
             heroUncoverWatch.restart()
             return
         }
@@ -410,7 +415,14 @@ ApplicationWindow {
     // binding on the current hero, so it cannot answer for the previous card the way reading
     // `heroBig.source` would.
     function heroBigPictureIsHere() {
-        return heroBig.fullUp && heroBig.status === Image.Ready
+        if (heroBig.status !== Image.Ready) return false
+        // The downloaded original, and `fullUp` already carries the key match against this card.
+        if (heroBig.fullUp) return true
+        // A local package's own file. `status` alone is not enough: for the tick after `source` is
+        // re-aimed it still describes the *previous* picture and says Ready, which is how the first
+        // version of this gate skipped 23 switches out of 23 - so the file has to be named for the
+        // card that is up.
+        return heroBig.stillFile && hero !== null && String(heroBig.source) === String(hero.file)
     }
     // The preview URL a card would paint in the hero, for the online cards only.
     // What heroHold keeps underneath: the last picture the preview layer actually managed to paint.
@@ -1182,8 +1194,8 @@ ApplicationWindow {
                             readonly property string shown: visible ? String(source) : ""
                             // The other half of the gate in commitHeroSwap: the cover stands down the
                             // moment this layer has the current card's picture, not on a timer.
-                            onStatusChanged: if (status === Image.Ready && root.heroWaitPicture
-                                                  && fullUp && !root.clipWillTakeOver) root.heroUncoverNow()
+                            onStatusChanged: if (root.heroWaitPicture && !root.clipWillTakeOver
+                                                   && root.heroBigPictureIsHere()) root.heroUncoverNow()
                             onShownChanged: if (visible && Bridge.transition !== "none"
                                                    && !root.clipWillTakeOver) heroDevelopRun.start()
                             onVisibleChanged: if (visible && Bridge.transition !== "none"
