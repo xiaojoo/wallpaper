@@ -35,6 +35,17 @@ struct Settings {
     ImageFit imageFit = ImageFit::Fill; // how image wallpapers cover the screen
     // 0 = the taskbar keeps Windows' own material; 1..100 = how far past it to fade the bar.
     int trayAlpha = 0;
+    // Ambient audio: 0..100 of one core's worth of nothing - it is a gain, not a rate. The default is
+    // deliberately low because this sound comes out of the desktop, unasked, while the user is doing
+    // something else; 25 is a bed you can hear without it being on you. Muted is the same number
+    // reached by a different route, kept separate so the slider does not move when he unmutes.
+    int audioVolume = 25;
+    bool audioMuted = false;
+    // Whether the settings window's live preview is allowed to take the one output device. On by
+    // default: auditioning a clip you cannot hear is not auditioning. The card row's speaker icon and
+    // `--ctl previewaudio` turn it off, and while the preview is on it wins over the desktop's track -
+    // the desktop behind that window is covered anyway.
+    bool previewAudio = true;
     // The engine's own status card, composited over whichever wallpaper is on this monitor. It is a
     // renderer setting rather than a package one because that is the whole point of it: the readout
     // describes the machine, and the machine is the same behind a video, a shader or a photograph.
@@ -144,6 +155,13 @@ public:
     void SetGlobalQuality(const std::string& q);
     void SetImageFit(const std::string& f);
     void SetTrayAlpha(int pct);
+    // The ambient track's gain, 0..100. Applies without a restart because the frame loop hands the
+    // number to the backend every lap - which is what makes it measurable one level at a time.
+    void SetAudioVolume(int pct);
+    // Mute is a separate flag rather than volume 0 so the slider stays where he left it - the same
+    // reason a phone keeps "silent" apart from the ringtone level.
+    void SetAudioMuted(bool muted);
+    void SetPreviewAudio(bool on);
     void SetHud(bool on);
     // Returns the corner now in force, so an unrecognised name echoes what the desktop is doing
     // rather than what was asked for. Choosing a corner also drops a dragged position: the last thing

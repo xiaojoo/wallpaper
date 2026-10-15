@@ -229,6 +229,20 @@ const Entry kStrings[] = {
     {"hide_icons_desc", "让位给这一圈。桌面右键 > 查看 > 显示桌面图标 随时改回来。",
      "Gives the desktop to the ring. Right-click the desktop > View > Show desktop icons undoes it."},
     {"tray_alpha", "任务栏透明度", "Taskbar transparency"},
+    {"tray_mute_audio", "静音壁纸", "Mute wallpaper"},
+    {"audio", "声音", "Sound"},
+    {"audio_peak", "送出电平", "level out"},
+    {"audio_muted_now", "已静音", "muted"},
+    {"audio_no_track", "当前壁纸没有音轨", "no track on this wallpaper"},
+    {"audio_volume", "壁纸音量", "Wallpaper volume"},
+    {"audio_mute", "静音壁纸", "Mute wallpaper"},
+    {"preview_sound_on", "预览出声：开", "Preview sound: on"},
+    {"preview_sound_off", "预览出声：关", "Preview sound: off"},
+    {"audio_desc", "只有真正设为壁纸、且包里带音轨的那一张会响；被全屏窗口盖住、锁屏或显示器熄灭时"
+                   "自动静音。此滑条是感知刻度，25 是默认。",
+     "Only the wallpaper actually on the desktop sounds, and only if its package carries a track. "
+     "It goes quiet under a fullscreen window, a locked session or a powered-down monitor. "
+     "The slider is perceptual; 25 is the default."},
 
     {"state", "状态", "State"},
     {"measured", "实测帧率", "Measured"},
@@ -734,6 +748,12 @@ void Bridge::ingest(const Json& status, const Json& list) {
                                 : QStringLiteral("package");
     imageFit_ = QString::fromStdString(status.strOr("image_fit", "fill"));
     trayAlpha_ = status.intOr("tray_alpha", 0);
+    audioVolume_ = status.intOr("audio_volume", 25);
+    audioMuted_ = status.boolOr("audio_muted");
+    audioPlaying_ = status.boolOr("audio_playing");
+    audioSource_ = QString::fromStdString(status.strOr("audio_source", ""));
+    audioPeak_ = status.intOr("audio_peak", 0);
+    previewAudio_ = status.boolOr("preview_audio");
     hud_ = status.boolOr("hud");
     hudReady_ = status.boolOr("hud_ready");
     hudError_ = QString::fromStdString(status.strOr("hud_error", ""));
@@ -1316,6 +1336,30 @@ void Bridge::setTrayAlpha(int pct) {
     // The once-a-second snapshot still reads tray_alpha back, so a renderer that refused would show
     // up on the next tick.
     trayAlpha_ = clamped;
+    emit stateChanged();
+}
+
+void Bridge::setAudioVolume(int pct) {
+    Json out;
+    const int clamped = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+    request(std::format(R"({{"cmd":"volume","arg":"{}"}})", clamped).c_str(), 1500, &out);
+    // Echoed for the drag, read back from the status block every second - the same deal as the
+    // taskbar slider: a renderer that refused would correct itself on the next tick.
+    audioVolume_ = clamped;
+    emit stateChanged();
+}
+
+void Bridge::setAudioMuted(bool muted) {
+    Json out;
+    request(std::format(R"({{"cmd":"mute","arg":"{}"}})", muted ? "on" : "off").c_str(), 1500, &out);
+    audioMuted_ = muted;
+    emit stateChanged();
+}
+
+void Bridge::setPreviewAudio(bool on) {
+    Json out;
+    request(std::format(R"({{"cmd":"previewaudio","arg":"{}"}})", on ? "on" : "off").c_str(), 1500, &out);
+    previewAudio_ = on;
     emit stateChanged();
 }
 

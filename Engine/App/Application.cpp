@@ -86,6 +86,26 @@ MemSample SampleProcess(ULONGLONG& lastWallNs, ULONGLONG& lastCpuNs) {
     return m;
 }
 
+// Whether this monitor's power state still shows the desktop. `background` counts - another program
+// has focus but the wallpaper is still partly on screen, which is the ordinary working state - while
+// covered, fullscreen, locked and display-off are the four where nobody can see it, so the ambient
+// track has no business being heard there either.
+bool VisibleForAudio(PowerState s) {
+    return s == PowerState::Desktop || s == PowerState::Background;
+}
+
+// What a package sounds like: its own ambient file when it carries one, otherwise - for a video
+// package - the audio stream inside the clip. `AudioTrack` opens either the same way (it asks
+// libavformat for an audio stream and takes what it finds), so "a clip with sound" needs no importer
+// change, no extracted file and no new manifest key. A clip with no audio stream fails on its first
+// avformat call, reports `track_error:"no audio stream in it"`, and stays silent - the same outcome
+// as a package that carries nothing, just one log line to say why.
+std::wstring AudioSourceOf(const WallpaperPackage& p) {
+    if (p.hasAudio()) return p.dir() + L"\\" + p.audioFile();
+    if (p.isVideo() && !p.videoFile().empty()) return p.dir() + L"\\" + p.videoFile();
+    return {};
+}
+
 } // namespace
 
 bool Application::Start(const CommandLine& cl, std::string& error) {
@@ -1410,6 +1430,14 @@ void Application::UpdateSnapshot() {
     r.set("ffmpeg", Json::Of(FfmpegBuildNote()));
     r.set("root", Json::Of(ToUtf8(wpm_.settings().root)));
     r.set("paused", Json::Of(paused_.load()));
+    // What the desktop is doing with sound, in the same place it says what it is doing with frames.
+    // `audio_source` is empty when nothing is audible, which is a different fact from "muted" and both
+    // are different from "silent because the wallpaper carries no track" - the three readouts that made
+    // this hour long. `audio_peak` is the post-gain level in permille of full scale: the one field that
+    // cannot read healthy while the room is quiet.
+    r.set("audio_playing", Json::Of(audioTrack_.running()));
+    r.set("audio_source", Json::Of(audioFrom_));
+    r.set("audio_peak", Json::Of((long long)audio_.peak()));
     r.set("autostart", Json::Of(IsAutostartEnabled()));
     r.set("max_fps", Json::Of(wpm_.settings().globalMaxFps));
     // The settings window reads these two back to label the 画质档 field. Without them it always
@@ -1418,6 +1446,11 @@ void Application::UpdateSnapshot() {
     r.set("quality_is_global", Json::Of(wpm_.settings().useGlobalQuality));
     r.set("image_fit", Json::Of(std::string(ImageFitName(wpm_.settings().imageFit))));
     r.set("tray_alpha", Json::Of(wpm_.settings().trayAlpha));
+    // The slider and the mute switch read these back, so a change made from the tray shows up in the
+    // window within a second rather than looking like it did nothing.
+    r.set("audio_volume", Json::Of(wpm_.settings().audioVolume));
+    r.set("audio_muted", Json::Of(wpm_.settings().audioMuted));
+    r.set("preview_audio", Json::Of(wpm_.settings().previewAudio));
     r.set("hud", Json::Of(wpm_.settings().hud));
     r.set("hud_corner", Json::Of(std::string(HudCornerName(wpm_.settings().hudCorner))));
     r.set("hud_scale", Json::Of(wpm_.settings().hudScalePct));
@@ -2319,12 +2352,26 @@ int Application::Run() {
             pacer_.ConfigureSlot(s.clock, budget, m.refreshHz);
             // A video wallpaper that is not drawing must also stop decoding: left running it burns a
             // hardware decode session and a GPU slot behind a fullscreen game that asked for zero frames.
-            s.instance.SetMediaActive(budget > 0);
+            // The exception is a preview sharing this exact instance: the settings window has its own
+            // frame budget on purpose, so 暂停壁纸 must not freeze the picture he is auditioning - and
+            // an inactive decoder hands the preview a parked frame. Only the preview's own pause (which
+            // publishes nothing) may let it park.
+            const bool sharedByPreview =
+                preview_.on && preview_.shared && !preview_.held && preview_.inst == &s.instance;
+            s.instance.SetMediaActive(budget > 0 || sharedByPreview);
+            // Sound hangs on whether the wallpaper can be *seen*, which is not the same test as the
+            // frame budget: this machine's config caps a fullscreen app at 15 fps rather than 0
+            // (measured 2026-10-15 with a fullscreen window up - state fullscreen, cap_fps 15,
+            // eff 12), so "budget > 0" played the ambient bed straight over a game or a video call.
+            s.mediaActive = budget > 0 && (cl_.noPower || VisibleForAudio(s.decision.state));
             clocks.push_back(&s.clock);
         }
         // The preview has its own budget on purpose: while a fullscreen app has the desktop capped at
         // zero frames, the settings window is the foreground window and its preview must keep moving.
         if (preview_.on) clocks.push_back(&preview_.clock);
+        // Sound follows the same decision the frames already made, once per lap and only when the
+        // answer differs from last lap's.
+        SyncAudio();
 
         if (cl_.selftestSeconds > 0 && nowMs - startedAt >= ULONGLONG(cl_.selftestSeconds) * 1000) {
             // Checked before any continue below: a paused wallpaper (fullscreen game) must still
@@ -2452,6 +2499,95 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
     } else if (action == "resume") {
         paused_ = false;
         result = R"({"ok":true,"paused":false})";
+    } else if (action == "audio") {
+        // The plug-in seam, measured before a single package carries sound. `on [秒]` opens the
+        // backend and runs a tone through it, `off` stops it, anything else just reports. Every
+        // failure here means "no audio" and comes back as a reason, never as a crash: the wallpaper
+        // keeps running with the DLL deleted, with no output device, or with the ABI mismatched.
+        // The note carries a Windows path, so a backslash has to survive as an escaped one instead of
+        // being dropped: the first version deleted them and the reply said "H:wallpaperbuild...".
+        auto esc = [](std::string s) {
+            std::string o;
+            for (char c : s) {
+                if (c == '"' || c == '\\') { o += '\\'; o += c; }
+                else if ((unsigned char)c < 0x20) o += ' ';
+                else o += c;
+            }
+            return o;
+        };
+        if (arg == "on") {
+            const int secs = arg2.empty() ? 4 : std::max(1, std::min(30, std::atoi(arg2.c_str())));
+            if (audioThread_.joinable()) { audioStop = 1; audioThread_.join(); }
+            // The tone is meant to be the only thing on the device, and it has to be at the level the
+            // settings say, or a 6 s measurement is a mix of two sources at two gains. So `on` takes
+            // the seam over from the wallpaper (`auto` hands it back), instead of stopping the track
+            // and letting the next lap around the frame loop start it again beside the tone.
+            audioSilenced_ = true;
+            std::string note;
+            if (!audio_.ready() && !audio_.Open(note)) audioNote_ = note;
+            else if (!note.empty()) audioNote_ = note;
+            if (audio_.ready()) {
+                audioStop = 0;
+                audio_.setVolume(AudioGainFromSetting(wpm_.settings().audioVolume));
+                audioThread_ = std::thread([this, secs] { AudioToneRun(secs); });
+            }
+            result = std::format(R"JSON({{"ok":{},"ready":{},"backend":"{}","rate":{},"channels":{},"latency_ms":{},"seconds":{},"volume":{},"note":"{}"}})JSON",
+                audio_.ready() ? "true" : "false", audio_.ready() ? "true" : "false",
+                esc(audio_.backend()), audio_.rate(), audio_.channels(),
+                audio_.latencyMs(), secs, wpm_.settings().audioVolume, esc(audioNote_));
+        } else if (arg == "play") {
+            // arg2 is the file. The path arrives UTF-8 off the pipe and FFmpeg wants the same, so
+            // the wide string only exists to satisfy the engine's own path conventions.
+            const int wn = MultiByteToWideChar(CP_UTF8, 0, arg2.c_str(), -1, nullptr, 0);
+            std::wstring wpath((size_t)(wn > 0 ? wn - 1 : 0), L'\0');
+            if (wn > 1) MultiByteToWideChar(CP_UTF8, 0, arg2.c_str(), -1, wpath.data(), wn);
+            audioNow_.clear(); audioSilenced_ = false;
+            audioNowFile_ = wpath;      // this lap's own track, so SyncAudio() does not restart it
+            audioNowLoop_ = true;
+            std::string note;
+            if (!audio_.ready() && !audio_.Open(note)) audioNote_ = note;
+            const bool ok = audio_.ready() && audioTrack_.Start(audio_, wpath, true, note);
+            if (ok) {
+                audio_.setVolume(AudioGainFromSetting(wpm_.settings().audioVolume));
+                audioNote_ = note;
+            }
+            else if (!note.empty()) audioNote_ = note;
+            result = std::format(R"JSON({{"ok":true,"playing":{},"ready":{},"file":"{}","note":"{}"}})JSON",
+                                 ok ? "true" : "false", audio_.ready() ? "true" : "false",
+                                 esc(arg2), esc(audioNote_));
+        } else if (arg == "off") {
+            audioStop = 1;
+            if (audioThread_.joinable()) audioThread_.join();
+            audioTrack_.Stop();
+            // And stay off: SyncAudio() would otherwise hand the audible slot's track back on its
+            // next lap. `audio auto` is the way back to following the wallpaper.
+            audioSilenced_ = true;
+            audioNow_.clear(); audioFrom_.clear(); audioNowFile_.clear();
+            result = std::format(R"JSON({{"ok":true,"ready":{},"silenced":true,"underruns":{},"tone_frames":{},"track_frames":{},"loops":{}}})JSON",
+                                 audio_.ready() ? "true" : "false", audio_.underruns(),
+                                 audioFramesWritten.load(), audioTrack_.framesWritten(),
+                                 audioTrack_.loops());
+        } else if (arg == "auto") {
+            audioSilenced_ = false;
+            audioTried_.clear();          // so this lap is allowed to try again immediately
+            audioRetryAt_ = 0;
+            result = std::format(R"JSON({{"ok":true,"silenced":false,"volume":{},"muted":{}}})JSON",
+                                 wpm_.settings().audioVolume,
+                                 wpm_.settings().audioMuted ? "true" : "false");
+        } else {
+            // `route` is read again on every ask, unlike `note` which is what the backend said when it
+            // opened: "我调了音量之后又没有了" is a question about the level *now*, and the endpoint
+            // answers that without us having to believe anyone's memory of where the slider was.
+            result = std::format(R"JSON({{"ok":true,"ready":{},"playing":{},"silenced":{},"source":"{}","volume":{},"muted":{},"route":"{}","out_peak_permille":{},"backend":"{}","rate":{},"channels":{},"underruns":{},"frames_written":{},"track_frames":{},"loops":{},"track_error":"{}","note":"{}"}})JSON",
+                audio_.ready() ? "true" : "false", audioTrack_.running() ? "true" : "false",
+                audioSilenced_ ? "true" : "false", esc(audioFrom_),
+                wpm_.settings().audioVolume, wpm_.settings().audioMuted ? "true" : "false",
+                esc(audio_.route()), audio_.peak(),
+                esc(audio_.backend()), audio_.rate(),
+                audio_.channels(), audio_.underruns(),
+                audioFramesWritten.load(), audioTrack_.framesWritten(), audioTrack_.loops(),
+                esc(audioTrack_.error()), esc(audioNote_));
+        }
     } else if (action == "quality") {
         wpm_.SetGlobalQuality(arg);
         std::string e;
@@ -2475,6 +2611,42 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         trayFx_.Apply(wpm_.settings().trayAlpha);
         result = std::format(R"({{"ok":true,"tray_alpha":{},"window_alpha":{}}})",
                              wpm_.settings().trayAlpha, TrayTransparency::ToAlpha(wpm_.settings().trayAlpha));
+    } else if (action == "volume") {
+        // 0..100 of the ambient track's gain, applied live: SyncAudio hands the number to the backend
+        // once around the frame loop, so a level can be walked one step at a time instead of one
+        // restart per step. The mapping is linear amplitude - 25 is -12 dB, not "a quarter as loud" -
+        // and whether the slider should instead be perceptual is the decision this verb exists to test.
+        const int pct = arg == "off" ? 0 : std::atoi(arg.c_str());
+        wpm_.SetAudioVolume(pct);
+        std::string e;
+        wpm_.Save(e);
+        result = std::format(R"({{"ok":true,"asked":{},"audio_volume":{},"gain_db":"{:.1f}","audio_muted":{}}})",
+                             pct, wpm_.settings().audioVolume,
+                             20.0 * std::log10(AudioGainFromSetting(wpm_.settings().audioVolume) > 0
+                                                   ? AudioGainFromSetting(wpm_.settings().audioVolume)
+                                                   : 1e-4),
+                             wpm_.settings().audioMuted ? "true" : "false");
+    } else if (action == "mute") {
+        // The tray's item and the settings window's switch both land here. It is not `volume 0`:
+        // mute also takes the decoder down (SyncAudio stops the track), so a muted desktop is not
+        // quietly burning a core, and the slider keeps its number for when he unmutes.
+        const bool on = arg == "on" || arg == "true" || arg == "1";
+        wpm_.SetAudioMuted(on);
+        std::string e;
+        wpm_.Save(e);
+        result = std::format(R"({{"ok":true,"audio_muted":{},"audio_volume":{}}})",
+                             wpm_.settings().audioMuted ? "true" : "false",
+                             wpm_.settings().audioVolume);
+    } else if (action == "previewaudio") {
+        // The card row's speaker icon. Turning it off while the preview holds the device hands the
+        // sound back to the desktop within a lap, so this is not just a UI flag.
+        const bool on = arg == "on" || arg == "true" || arg == "1";
+        wpm_.SetPreviewAudio(on);
+        std::string e;
+        wpm_.Save(e);
+        result = std::format(R"({{"ok":true,"preview_audio":{},"preview_on":{}}})",
+                             wpm_.settings().previewAudio ? "true" : "false",
+                             preview_.on ? "true" : "false");
     } else if (action == "hud") {
         // On/off only. `arg` is read the way the tray reads it - "on", "true", "1" - because a
         // command line user types one of those and a config editor writes the other.
@@ -3036,6 +3208,11 @@ void Application::Stop(const std::string& why) {
 void Application::Shutdown() {
     if (shutdown_) return;
     shutdown_ = true;
+    // Before the log closes: the track decodes on its own thread and would otherwise be logging into
+    // a file that has gone, and the device has to be handed back rather than left playing while the
+    // rest of the process tears down.
+    audioTrack_.Stop();
+    audio_.setPaused(true);
     // First thing, before anything else is torn down: this process borrowed the desktop's icons and
     // they go back on the way out. If it does not get to run this at all, the note in
     // HealIconLayer() puts them back on the next start, and the desktop's own context menu puts them
@@ -3074,7 +3251,186 @@ void Application::Shutdown() {
     log::Close();
 }
 
-Application::~Application() { Shutdown(); }
+Application::~Application() {
+    // The tone thread touches audio_, so it has to be gone before this object is.
+    audioStop = 1;
+    if (audioThread_.joinable()) audioThread_.join();
+    Shutdown();
+}
+
+// The setting (0..100) turned into the gain the backend applies.
+//
+// Not linear. A linear slider puts the whole useful range of a desktop bed into its top quarter - the
+// level he picked out of a 20/40/70 walk is amplitude 0.21, which a linear slider calls 21 and a
+// perceptual one can call 25 while still leaving somewhere to go. So the travel is 18 dB: 1 % = -18 dB,
+// 100 % = 0 dB, and 25 % lands on -13.6 dB = 0.209, the level the room approved. Zero means zero, and
+// "off" is the separate mute switch rather than the bottom of a slider that cannot reach silence anyway.
+float Application::AudioGainFromSetting(int pct) {    if (pct <= 0) return 0.f;
+    if (pct >= 100) return 1.f;
+    const double db = -18.0 + 18.0 * (pct - 1) / 99.0;
+    return (float)std::pow(10.0, db / 20.0);
+}
+
+void Application::SyncAudio() {
+    // One output device means one track. Who owns it: the preview while it has something to play,
+    // otherwise the first slot, in tag order, that is both being seen and carries sound. Two
+    // wallpapers playing two beds at once is not a mix, it is noise, and the rotation would
+    // otherwise produce it every time two monitors disagree.
+    //
+    // Mute takes the decoder down with the gain, not just the gain: a bed nobody can hear still costs
+    // a thread, a demuxer and a resampler, and the plugin's 10 ms fade means there is no click either
+    // way. The slider staying where he left it is why `muted` is a separate flag from `volume = 0`.
+    const bool muted = wpm_.settings().audioMuted;
+    audio_.setVolume(muted ? 0.f : AudioGainFromSetting(wpm_.settings().audioVolume));
+    // The one writer of the hold flag, once around every lap: sound is wanted when something is
+    // actually producing it and nothing has switched the seam off. Idempotent, so a lap that changes
+    // nothing costs one store, and no other thread is allowed to touch it - see audioToneLive.
+    audio_.setPaused(!(audioTrack_.running() || audioToneLive.load()));
+
+    std::string want;
+    std::wstring file;
+    bool loop = true;
+    // Which of the silences it is, in the words the log and the status block show: "no track", "the
+    // preview is paused", "muted", "paused" and "switched off by command" are different things to
+    // someone deciding whether the feature is broken. Each surface answers for itself, and when both
+    // are quiet both get named.
+    const char* previewWhy = nullptr;
+    const char* slotWhy = nullptr;
+    if (!muted && !audioSilenced_) {
+        // The preview is allowed to speak for itself. He asked to be able to hear a clip before
+        // setting it as wallpaper, and the desktop behind this window is by definition covered - so
+        // the slot rule below would mute exactly the thing he is trying to audition.
+        //
+        // Pausing the preview (or turning its speaker off) does not take the desktop's sound down
+        // with it: 「预览一暂停就把桌面的声音放回来」, 2026-10-15. What the preview's own switch stops
+        // is the preview's *track*, and the device goes to whoever else has one - which is the same
+        // bytes when the previewed card is the wallpaper on the desktop, so nothing there restarts.
+        if (preview_.on && !preview_.id.empty()) {
+            const bool previewFrozen = preview_.held
+                || (preview_.inst && preview_.inst->video() && preview_.inst->video()->paused());
+            if (previewFrozen) previewWhy = "the preview is paused";
+            else if (!wpm_.settings().previewAudio) previewWhy = "the preview's speaker is off";
+            else if (const WallpaperPackage* p = wpm_.find(preview_.id); p) {
+                const std::wstring src = AudioSourceOf(*p);
+                if (src.empty()) {
+                    previewWhy = "the previewed wallpaper carries no sound";
+                } else {
+                    want = "预览 " + p->id() + " / " + ToUtf8(src.substr(src.find_last_of(L"\\/") + 1));
+                    file = src;
+                    loop = p->audioLoop();
+                }
+            } else previewWhy = "the previewed wallpaper is not in the catalog";
+        }
+        if (want.empty()) {
+            // 暂停壁纸 stops the *desktop's* sound and nothing else: it is not folded into `muted`
+            // above, because that took the preview's sound with it - his words on 2026-10-15 were
+            // 这个应该分开啊，互不影响. A paused desktop simply fails `mediaActive`, which is the gate
+            // below, so it goes silent on its own. 静音壁纸 stays global: one device, one switch.
+            for (auto& s : slots_) {
+                if (!s.mediaActive || s.wallpaperId.empty()) continue;
+                const WallpaperPackage* p = wpm_.find(s.wallpaperId);
+                if (!p) continue;
+                const std::wstring src = AudioSourceOf(*p);
+                if (src.empty()) continue;
+                want = p->id() + " / " + ToUtf8(src.substr(src.find_last_of(L"\\/") + 1));
+                file = src;
+                loop = p->audioLoop();
+                break;
+            }
+            if (want.empty())
+                slotWhy = paused_.load() ? "the wallpaper is paused"
+                                         : "no audible slot carries a track";
+        }
+    }
+
+    // Handover, not restart: the preview and the desktop just asked for the same bytes.
+    if (!audioNowFile_.empty() && file == audioNowFile_ && loop == audioNowLoop_
+        && !audioNow_.empty() && audioTrack_.running()) {
+        if (want != audioNow_) {
+            Info("audio", "the same track changed hands: {} -> {}", audioNow_, want);
+            audioNow_ = want;
+            audioFrom_ = want;
+        }
+        return;
+    }
+    if (want == audioNow_) return;                 // nothing moved, including the silent case
+    if (want.empty()) {
+        std::string why = audioSilenced_ ? "audio switched off by command"
+                      : muted            ? "muted"
+                                         : std::string();
+        if (why.empty()) {
+            if (previewWhy) why = previewWhy;
+            if (slotWhy) why += why.empty() ? slotWhy : std::format(" while {}", slotWhy);
+        }
+        if (!audioNow_.empty()) {
+            audioTrack_.Stop();
+            Info("audio", "silent ({}, was {})", why, audioNow_);
+            audioNow_.clear(); audioFrom_.clear(); audioNowFile_.clear();
+        }
+        return;
+    }
+
+    // A track that cannot start has to be left alone for a while. This function runs once around the
+    // frame loop (~100 laps/s measured), and the first version of it called CoCreateInstance and
+    // avformat_open_input at that rate for as long as a wallpaper carrying an unopenable file was up.
+    const ULONGLONG now = GetTickCount64();
+    if (want == audioTried_ && now < audioRetryAt_) return;
+    audioTried_ = want;
+    audioRetryAt_ = now + kAudioRetryMs;
+
+    std::string note;
+    if (!audio_.ready()) {
+        std::string open;
+        if (!audio_.Open(open)) { audioNote_ = open; Warn("audio", "{}", open); return; }
+    }
+    if (audioTrack_.Start(audio_, file, loop, note)) {
+        audioNow_ = want;
+        audioFrom_ = want;
+        audioNowFile_ = file;
+        audioNowLoop_ = loop;
+        audioNote_.clear();
+        Info("audio", "playing the track of {} ({})", want, note);
+    } else {
+        audioNow_.clear();
+        audioNowFile_.clear();
+        audioNote_ = note;
+        Warn("audio", "cannot play the track of {}: {}", want, note);
+    }
+}
+
+void Application::AudioToneRun(int seconds) {
+    const unsigned rate = audio_.rate() ? audio_.rate() : 48000u;
+    const unsigned ch = audio_.channels() ? audio_.channels() : 2u;
+    std::vector<float> blk(1024u * ch, 0.f);
+    double phase = 0.0;
+    const ULONGLONG until = GetTickCount64() + (ULONGLONG)seconds * 1000ull;
+    // Says "a producer is here" and nothing else. The hold flag itself belongs to SyncAudio, which
+    // reads this; writing it from here is what muted a wallpaper that started between our first line
+    // and our last.
+    audioToneLive = true;
+    while (!audioStop.load() && GetTickCount64() < until) {
+        for (unsigned i = 0; i < 1024; ++i) {
+            // Full scale: the gain belongs to the backend, which applies it once to everything after
+            // the ring. Scaling here as well made the tone's level the square of the setting - 25 %
+            // measured -24 dBFS at the device instead of the -12 dBFS the status block reported.
+            const float v = (float)std::sin(phase * 6.283185307179586);
+            for (unsigned c = 0; c < ch; ++c) blk[(size_t)i * ch + c] = v;
+            phase += 440.0 / (double)rate;
+            if (phase >= 1.0) phase -= 1.0;
+        }
+        // Backpressure is the pacing: the backend takes what its ring can hold and the producer
+        // waits, which is what keeps a stalled device from turning into unbounded memory here.
+        unsigned off = 0;
+        while (off < 1024 && !audioStop.load()) {
+            const int took = audio_.write(blk.data() + (size_t)off * ch, 1024 - off);
+            if (took <= 0) { Sleep(5); continue; }
+            off += (unsigned)took;
+            audioFramesWritten += (unsigned long long)took;
+        }
+    }
+    audioToneLive = false;
+    audioStop = 1;
+}
 
 void Application::LoadRotation(const Json& j) {
     if (!j.isObject()) return;

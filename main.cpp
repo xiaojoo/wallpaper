@@ -77,6 +77,8 @@ void Usage() {
         "  WallpaperRenderer.exe --ctl list\n"
         "  WallpaperRenderer.exe --ctl apply aurora [M0|all]\n"
         "  WallpaperRenderer.exe --ctl pause | resume | reload | quit\n"
+        "  WallpaperRenderer.exe --ctl audio on 6 | off | auto\n"
+        "  WallpaperRenderer.exe --ctl volume 25          环境音音量（0..100，实时生效并保存）\n"
         "  WallpaperRenderer.exe --ctl quality battery\n"
         "  WallpaperRenderer.exe --ctl fps 30\n"
         "  WallpaperRenderer.exe --ctl taskbar 40\n"
@@ -145,7 +147,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                                 ? L"\\\\.\\pipe\\SmartWallpaper.Renderer"
                                 : ToWide(pipeOverride);
         if (ctlCmd.empty()) {
-            PrintToParentConsole("--ctl needs a command: status|list|apply|pause|resume|quality|fit|fps|taskbar|hud|hudpos|hudscale|hudframe|huddrag|hudmove|hudhome|reload|quit\n");
+            PrintToParentConsole("--ctl needs a command: status|list|apply|pause|resume|quality|fit|fps|taskbar|hud|hudpos|hudscale|hudframe|huddrag|hudmove|hudhome|audio|volume|reload|quit\n");
             return 2;
         }
         Json q = Json::Object();

@@ -32,6 +32,12 @@ class Bridge final : public QObject {
     Q_PROPERTY(QStringList transitionLevels READ transitionLevels CONSTANT)
     Q_PROPERTY(QString transition READ transition WRITE setTransition NOTIFY transitionChanged)
     Q_PROPERTY(int trayAlpha READ trayAlpha NOTIFY stateChanged)
+    Q_PROPERTY(int audioVolume READ audioVolume NOTIFY stateChanged)
+    Q_PROPERTY(bool audioMuted READ audioMuted NOTIFY stateChanged)
+    Q_PROPERTY(bool audioPlaying READ audioPlaying NOTIFY stateChanged)
+    Q_PROPERTY(QString audioSource READ audioSource NOTIFY stateChanged)
+    Q_PROPERTY(int audioPeak READ audioPeak NOTIFY stateChanged)
+    Q_PROPERTY(bool previewAudio READ previewAudio NOTIFY stateChanged)
     // The engine's own status card. `hudReady` is reported apart from `hud` because a card the user
     // switched on that the renderer could not prepare would otherwise read as working, with nothing
     // on the screen and no reason why.
@@ -260,6 +266,17 @@ public:
     bool chartDrag() const { return chartDrag_; }
     int chartHistory() const { return chartHistory_; }
     int trayAlpha() const { return trayAlpha_; }
+    // The ambient track's level and the mute switch. Read back from the renderer's status block, so
+    // what the slider shows is what the engine is doing, not what was last clicked.
+    int audioVolume() const { return audioVolume_; }
+    bool audioMuted() const { return audioMuted_; }
+    // Which wallpaper's track is on the desktop right now (empty = nothing audible), and the level the
+    // backend says it is actually handing the device. The level is the one field that cannot look
+    // healthy while the room is silent, which is exactly the case that took an hour to find.
+    bool audioPlaying() const { return audioPlaying_; }
+    QString audioSource() const { return audioSource_; }
+    int audioPeak() const { return audioPeak_; }
+    bool previewAudio() const { return previewAudio_; }
     int maxFps() const { return maxFps_; }
     bool paused() const { return paused_; }
     bool orbitHeld() const { return orbitHeld_; }
@@ -375,6 +392,9 @@ public:
     Q_INVOKABLE void setChartDrag(bool on);
     Q_INVOKABLE void resetChartPos();
     Q_INVOKABLE void setTrayAlpha(int pct);
+    Q_INVOKABLE void setAudioVolume(int pct);
+    Q_INVOKABLE void setAudioMuted(bool muted);
+    Q_INVOKABLE void setPreviewAudio(bool on);
     Q_INVOKABLE void setMaxFps(int fps);
     Q_INVOKABLE void setPowerCap(const QString& key, int value);
     Q_INVOKABLE void setMonitorFps(const QString& tag, int fps);
@@ -560,6 +580,12 @@ private:
     int chartHistory_ = 0;
     QString transition_ = QStringLiteral("liquid");
     int trayAlpha_ = 0;
+    int audioVolume_ = 25;
+    bool audioMuted_ = false;
+    bool audioPlaying_ = false;
+    QString audioSource_;
+    int audioPeak_ = 0;
+    bool previewAudio_ = true;
     bool qualityIsGlobal_ = false, paused_ = false, autostart_ = false;
     bool orbitHeld_ = false;
     bool rotateOn_ = false;

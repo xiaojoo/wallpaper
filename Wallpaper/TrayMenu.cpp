@@ -60,6 +60,7 @@ void TrayMenu::attach(QWindow* window) {
     autoPlay_ = menu_->addAction(QString());
     stopPlay_ = menu_->addAction(QString());
     pauseWallpaper_ = menu_->addAction(QString());
+    muteAudio_ = menu_->addAction(QString());
     menu_->addSeparator();
     orbit_ = menu_->addAction(QString());
     pauseRing_ = menu_->addAction(QString());
@@ -71,6 +72,7 @@ void TrayMenu::attach(QWindow* window) {
     autoPlay_->setCheckable(true);
     stopPlay_->setCheckable(true);
     pauseWallpaper_->setCheckable(true);
+    muteAudio_->setCheckable(true);
     orbit_->setCheckable(true);
     pauseRing_->setCheckable(true);
     hideIcons_->setCheckable(true);
@@ -82,6 +84,8 @@ void TrayMenu::attach(QWindow* window) {
     connect(stopPlay_, &QAction::triggered, this, [this] { bridge_.setRotate(false); });
     connect(pauseWallpaper_, &QAction::triggered, this,
             [this] { bridge_.setPaused(!bridge_.paused()); });
+    connect(muteAudio_, &QAction::triggered, this,
+            [this] { bridge_.setAudioMuted(!bridge_.audioMuted()); });
     connect(orbit_, &QAction::triggered, this, [this] { bridge_.setOrbit(!bridge_.orbit()); });
     connect(pauseRing_, &QAction::triggered, this,
             [this] { bridge_.setOrbitHeld(!bridge_.orbitHeld()); });
@@ -124,6 +128,7 @@ void TrayMenu::retranslate() {
     orbit_->setText(bridge_.t(QStringLiteral("orbit_ring")));
     pauseRing_->setText(bridge_.t(QStringLiteral("tray_pause_ring")));
     pauseWallpaper_->setText(bridge_.t(QStringLiteral("tray_pause_wallpaper")));
+    muteAudio_->setText(bridge_.t(QStringLiteral("tray_mute_audio")));
     hideIcons_->setText(bridge_.t(QStringLiteral("hide_icons")));
 }
 
@@ -141,12 +146,17 @@ void TrayMenu::syncStates() {
     // off it, and the still is exactly what makes it invisible: the hold zeroes the frame budget, so the
     // picture he just applied never draws a frame. Grey it only when there is genuinely nothing to undo.
     pauseWallpaper_->setEnabled(up && (bridge_.showingDynamic() || bridge_.paused()));
+    // Unlike the pause row, this one is never dead: muting is a persisted decision that applies to
+    // whichever wallpaper is on the desktop now and to the next one, so it is actionable even when
+    // nothing is currently audible. The tick is the state, read back from the renderer.
+    muteAudio_->setEnabled(up);
     // Nothing is turning when the ring is off, so there is nothing to hold either.
     pauseRing_->setEnabled(up && bridge_.orbit());
     hideIcons_->setEnabled(up);
     orbit_->setChecked(up && bridge_.orbit());
     pauseRing_->setChecked(up && bridge_.orbitHeld());
     pauseWallpaper_->setChecked(up && bridge_.paused());
+    muteAudio_->setChecked(up && bridge_.audioMuted());
     hideIcons_->setChecked(up && bridge_.iconsHidden());
     // The check mark is the state, so both rows go blank rather than claim "stopped" on a renderer
     // this window cannot read.

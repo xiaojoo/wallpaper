@@ -3,6 +3,8 @@
 #include "Engine/App/PreviewStream.hpp"
 #include "Engine/App/GpuMonitor.hpp"
 #include "Engine/App/Tray.hpp"
+#include "Engine/Audio/AudioOut.hpp"
+#include "Engine/Audio/AudioTrack.hpp"
 #include "Engine/System/MachineMetrics.hpp"
 #include "Engine/Desktop/DesktopWindow.hpp"
 #include "Engine/Desktop/HudDragWindow.hpp"
@@ -94,6 +96,11 @@ private:
         unsigned particleMovedSamples_ = 0, particleStaticSamples_ = 0;
         unsigned particleOutOfBounds_ = 0;
         bool visible = true;
+        // Whether this slot's wallpaper can be seen and drawn right now: frame budget above zero and
+        // a power state that still shows the desktop. The ambient track hangs on exactly this, so a
+        // fullscreen game, a lock screen or a powered-down monitor takes the sound away - not just
+        // the frames, which is what the 15 fps cap on covered screens would have left behind.
+        bool mediaActive = true;
         // A power state has to hold this long before it is allowed to move the frame budget. The raw
         // classifier follows every foreground-window change, and each step 60 -> 30 -> 15 -> 60 changes
         // how much motion one drawn frame carries, which is what reads as a hitch on screen. Measured
@@ -383,6 +390,11 @@ private:
         float stack = 0.f;
     };
     RingShape RingFor(const MonitorInfo& m) const;
+    // Feeds a full-scale tone through the audio backend for `seconds`, on its own thread, for the seam
+    // test behind `--ctl audio on`. The backend applies the gain, so the level is one number in one
+    // place. Bounded by design: it exits on its own so no command can leave a thread running past the
+    // point anyone is measuring.
+    void AudioToneRun(int seconds);
     RECT OrbitScreenRect(const MonitorInfo& m) const;
     bool ArmOrbitDrag(bool on, std::string& error);
     // The chart panel's history, one row of four per sampled second. Every slot starts at -1 rather
@@ -391,6 +403,43 @@ private:
     DiskTemp diskTemp_;
     ULONGLONG diskTempAtMs_ = 0;
     std::string diskTempWhy_;
+    // The audio seam. Right now only the plug-in test path uses it (`--ctl audio on` runs a tone
+    // through the backend) so that load / open / ring / underrun behaviour is measured on real
+    // hardware before any wallpaper package carries sound at all.
+    AudioOut audio_;
+    std::thread audioThread_;
+    std::atomic<long> audioStop{0};
+    std::string audioNote_;
+    std::atomic<unsigned long long> audioFramesWritten{0};
+    AudioTrack audioTrack_;   // the ambient track of whichever wallpaper is audible
+    // Whether the tone thread is currently producing. It exists so the hold flag has one owner: the
+    // tone used to clear `paused` on its way in and set it on its way out, and a bed started between
+    // those two moments was muted by a thread that had already finished - which is how four rounds of
+    // "playing:true, underruns:0, 48 000 frames a second" all coexisted with a silent room.
+    std::atomic<bool> audioToneLive{false};
+    // Which wallpaper's track is playing right now, empty when nothing is. Compared against
+    // what the slots want, so SyncAudio() only touches the decoder when something changed.
+    std::string audioNow_;
+    std::string audioFrom_;   // what the status card says the sound is coming from
+    // The same fact as a path. The label says *who* is playing it (「预览 local_11」 or 「local_11」) and
+    // changes when the preview hands the device to the desktop; the path says whether the bytes on the
+    // device changed. Handing over the wallpaper the preview is sharing must not rewind the track to
+    // 0 s in the middle of a sentence, so the two are compared separately.
+    std::wstring audioNowFile_;
+    bool audioNowLoop_ = true;
+    // `--ctl audio off` is a master kill: after it nothing auto-starts until `auto` or `play` turns
+    // the seam back on. Without this the lap after the command would start the audible slot's track
+    // again, and "I stopped it and it came back on its own" would be the honest report.
+    bool audioSilenced_ = false;
+    // The last package whose track failed to start, and when. A device that is not there or a file
+    // nothing can decode must not be retried once around the frame loop; see SyncAudio().
+    std::string audioTried_;
+    unsigned long long audioRetryAt_ = 0;
+    static constexpr unsigned long long kAudioRetryMs = 5000;
+    void SyncAudio();
+    // The 0..100 setting as the gain the backend applies: 18 dB of slider travel, 25 % landing on the
+    // level the room actually approved. One function so the slider, the tone and the track agree.
+    static float AudioGainFromSetting(int pct);
     std::array<float, 4 * kChartSamples> chartRing_ = [] {
         std::array<float, 4 * kChartSamples> r;
         r.fill(-1.f);

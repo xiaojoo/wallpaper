@@ -37,6 +37,9 @@ WallpaperRenderer.exe --no-power               忽略遮挡/全屏降帧（开�
 WallpaperRenderer.exe --ctl status             读运行中实例的真实状态（JSON）
 WallpaperRenderer.exe --ctl apply matrixclock M0  换壁纸（M0/M1/all）
 WallpaperRenderer.exe --ctl pause | resume | reload | quit
+WallpaperRenderer.exe --ctl audio on 6           测音频后端：开设备、放 6 秒提示音（`off` 停并交还设备，
+                                                 `auto` 交还给壁纸自己决定，光 `audio` 读回状态）
+WallpaperRenderer.exe --ctl volume 25            环境音音量（0..100，实时生效并写回 config.json）
 WallpaperRenderer.exe --ctl quality battery
 WallpaperRenderer.exe --ctl fps 30
 WallpaperRenderer.exe --ctl fps 30 M0            只给这一块屏设上限
@@ -978,6 +981,29 @@ Wallpapers/snowfall/
 支持 float / int / bool / float2 / float3 / float4 / 标量数组；JSON 里有、着色器里没声明的键会在
 日志里点名（`params.xxx is in wallpaper.json but not in the shader`）。
 
+**环境音 `audio` / `audio_loop`**（可选，任何 renderer 都能带，不限于片子）：
+
+```
+"audio": "ambient.ogg",      // 包目录里的一个音频文件，雨声、滴答、风声
+"audio_loop": true           // 默认 true；false 就放一遍
+```
+
+放音的规则：一台机器一个输出设备，所以同时只有一条轨道——预览（点开的那张）先用它自己的音轨，它没得放
+（暂停了、喇叭关了、这张本身没声音）就把设备交回桌面：按显示器顺序取第一个"正在被看见、且包里带音轨"
+的槽；两边是同一条音轨（预览的就是桌面那张）时**接着放**，不倒回 0 秒。桌面被全屏窗口盖住、遮挡、锁屏、
+显示器熄灭，声音和画面一起没（判据是电源状态，不是帧预算：遮挡时预算还有 15 fps）。**暂停壁纸**只静
+桌面，预览照动照响；**静音壁纸**是全局的，因为只有一台设备。界面上有三处控制：**设置 → 通用 → 壁纸音量**（0-100 滑条）
+和**静音壁纸**开关、**托盘右键菜单 → 静音壁纸**（和 暂停壁纸 同族）、**设置 → 状态 → 声音** 一行
+（写着声音来自哪张、以及后端真正交给设备的电平）。引擎那张状态卡**没有**这一行：它是纯数字面板
+（所有内容来自 `uStats`，字段没答就画空格），塞不进"哪张壁纸在响"这种字符串，所以读数放在设置窗。
+`audio_volume`（0-100，默认 25）走 **18 dB 行程的感知曲线**：
+1% = -18 dB、100% = 0 dB、0 = 静音，25 落在 -13.6 dB（振幅 0.21）——线性滑条会把桌面环境音的可用范围
+全挤进顶上四分之一；`audio_muted` 是另一个开关，滑条位置不动。两个都是持久项，在 `config.json`。
+解码走 FFmpeg，输出走 `swaudio_wasapi.dll`——**引擎不链接它**，运行时加载：删掉这个文件、
+或者机器没有输出设备，壁纸照跑、只是不出声，日志与 `--ctl audio` 会说清是哪一种（那一行还带
+设备名、端点音量、我们进程在混音器里的那一格、后端实际生效的增益、以及设备自己报的已播放帧数）。
+`audio` 写了但文件不在，这个包在载入时就等同"没有音轨"（`pkg` 警告一条，不是坏包）。
+
 引擎契约在 `Shaders/Fullscreen.hlsl`：一个覆盖全屏的三角形（`SV_VertexID`，无顶点缓冲），
 `uTime / uRes / uMouse / uScene / uPerf` 五个 `float4`，外加 hash / 值噪声 / fbm / 色调映射 / sRGB。
 共享头用 `#ifndef` 包含保护而不是 `#pragma once`：引擎的 `ID3DInclude` 每次 `Open()` 都交给编译器
@@ -1757,3 +1783,6 @@ Shaders/           Contract.hlsl（帧常量 + 噪声/色调工具）、Fullscre
                    ParticleCommon.hlsl（48 字节粒子布局）
 tools/             构建、桌面层级探针、屏幕截图与逐像素对比
 ```
+
+配套文档：`BACKLOG.md` 是待办，每条写了"怎么算做完"；`问题与解法.md` 是过程记录
+（症状 → 走过的弯路 → 根因 → 解法 → 判据 → 遗留），量具自己的坑也记在那一份里。
