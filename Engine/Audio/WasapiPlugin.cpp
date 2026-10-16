@@ -371,7 +371,9 @@ static HRESULT OpenClient() {
         char dumpPath[260] = "";
         if (GetEnvironmentVariableA("SWAUDIO_DUMP", dumpPath, sizeof(dumpPath)) > 0
             && strlen(dumpPath) < sizeof(dumpPath)) {
-            g.dump = fopen(dumpPath, "wb");
+            // fopen_s rather than fopen: /W4 flags the latter as C4996. It leaves the pointer null on
+            // failure, which is what the setvbuf gate below already assumes.
+            fopen_s(&g.dump, dumpPath, "wb");
             // Unbuffered on purpose: the capture has to survive the process being killed, and the
             // whole point is to look at bytes that were really handed over.
             if (g.dump) setvbuf(g.dump, nullptr, _IONBF, 0);
