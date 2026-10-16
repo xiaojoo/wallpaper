@@ -446,6 +446,12 @@ private:
     std::string audioTried_;
     unsigned long long audioRetryAt_ = 0;
     static constexpr unsigned long long kAudioRetryMs = 5000;
+    // Where the picture that owns the track was last lap. A lap is ~10 ms and a running clip moves its
+    // position by ~0.04 s, so anything past half a second is a seek or the loop seam - the two moments
+    // the track has to be told about or it keeps playing where its own clock left it. -1 = no anchor
+    // yet (fresh track, or nothing audible).
+    double audioAnchorPos_ = -1.0;
+    static constexpr double kAudioFollowJumpS = 0.5;
     void SyncAudio();
     // The 0..100 setting as the gain the backend applies: 18 dB of slider travel, 25 % landing on the
     // level the room actually approved. One function so the slider, the tone and the track agree.

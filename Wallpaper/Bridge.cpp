@@ -419,8 +419,9 @@ QVariant toVariant(const Json& j) {
 // extension-agnostic - it probes the file with FFmpeg, keeps the real suffix in the package and lets
 // the manifest's "renderer": "video" decide how it is drawn - so this list exists only to tell a clip
 // from a picture, which WIC cannot do for a video. The bundled avcodec registers the matroska/webm
-// demuxer and vp8 / vp9 / av1 decoders, so a webm needs nothing but the name here.
-const QStringList kVideoExt { "mp4", "webm" };
+// demuxer and vp8 / vp9 / av1 decoders, so .webm and .mkv - same demuxer, different container name -
+// need nothing but the name here.
+const QStringList kVideoExt { "mp4", "webm", "mkv" };
 
 } // namespace
 
@@ -521,7 +522,8 @@ Bridge::Bridge(QObject* parent) : QObject(parent) {
                     // picture the tile just showed - so it is refused on the card, not after a press.
                     const QString mime = row.value("mime").toString().toLower();
                     static const QStringList accept { "image/jpeg", "image/png", "image/webp",
-                                                      "image/bmp", "image/tiff", "video/mp4", "video/webm" };
+                                                      "image/bmp", "image/tiff", "video/mp4",
+                                                      "video/webm", "video/x-matroska" };
                     const bool can = accept.contains(mime);
                     const QString why = mime == QLatin1String("image/gif") ? t("online_gif")
                                   : can ? QString() : t("online_unsupported") + QStringLiteral(": ") + mime;
@@ -1479,7 +1481,7 @@ void Bridge::reportStep() {
 void Bridge::addImageFile() {
     const QString file = QFileDialog::getOpenFileName(
         nullptr, t("add_image"), QDir::homePath(),
-        "Images and video (*.png *.jpg *.jpeg *.bmp *.webp *.tiff *.mp4 *.webm)");
+        "Images and video (*.png *.jpg *.jpeg *.bmp *.webp *.tiff *.mp4 *.webm *.mkv)");
     if (file.isEmpty()) return;
     // One picker for both kinds, but two different packages: addimage hands the file to WIC, which
     // answers "not a decodable image" for a clip, so the extension decides which command to send.

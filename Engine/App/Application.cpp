@@ -2578,14 +2578,15 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
             // `route` is read again on every ask, unlike `note` which is what the backend said when it
             // opened: "我调了音量之后又没有了" is a question about the level *now*, and the endpoint
             // answers that without us having to believe anyone's memory of where the slider was.
-            result = std::format(R"JSON({{"ok":true,"ready":{},"playing":{},"silenced":{},"source":"{}","volume":{},"muted":{},"route":"{}","out_peak_permille":{},"backend":"{}","rate":{},"channels":{},"underruns":{},"frames_written":{},"track_frames":{},"loops":{},"track_error":"{}","note":"{}"}})JSON",
+            result = std::format(R"JSON({{"ok":true,"ready":{},"playing":{},"silenced":{},"source":"{}","volume":{},"muted":{},"route":"{}","out_peak_permille":{},"backend":"{}","rate":{},"channels":{},"underruns":{},"frames_written":{},"track_frames":{},"track_pos":{},"loops":{},"track_error":"{}","note":"{}"}})JSON",
                 audio_.ready() ? "true" : "false", audioTrack_.running() ? "true" : "false",
                 audioSilenced_ ? "true" : "false", esc(audioFrom_),
                 wpm_.settings().audioVolume, wpm_.settings().audioMuted ? "true" : "false",
                 esc(audio_.route()), audio_.peak(),
                 esc(audio_.backend()), audio_.rate(),
                 audio_.channels(), audio_.underruns(),
-                audioFramesWritten.load(), audioTrack_.framesWritten(), audioTrack_.loops(),
+                audioFramesWritten.load(), audioTrack_.framesWritten(),
+                audioTrack_.mediaPos_s(), audioTrack_.loops(),
                 esc(audioTrack_.error()), esc(audioNote_));
         }
     } else if (action == "quality") {
@@ -3308,6 +3309,7 @@ void Application::SyncAudio() {
     std::string want;
     std::wstring file;
     bool loop = true;
+    VideoSource* owner = nullptr;      // the picture whose sound this would be, if any
     // Which of the silences it is, in the words the log and the status block show: "no track", "the
     // preview is paused", "muted", "paused" and "switched off by command" are different things to
     // someone deciding whether the feature is broken. Each surface answers for itself, and when both
@@ -3336,6 +3338,7 @@ void Application::SyncAudio() {
                     want = "预览 " + p->id() + " / " + ToUtf8(src.substr(src.find_last_of(L"\\/") + 1));
                     file = src;
                     loop = p->audioLoop();
+                    owner = preview_.inst ? preview_.inst->video() : nullptr;
                 }
             } else previewWhy = "the previewed wallpaper is not in the catalog";
         }
@@ -3353,6 +3356,7 @@ void Application::SyncAudio() {
                 want = p->id() + " / " + ToUtf8(src.substr(src.find_last_of(L"\\/") + 1));
                 file = src;
                 loop = p->audioLoop();
+                owner = s.instance.video();
                 break;
             }
             if (want.empty())
@@ -3360,6 +3364,20 @@ void Application::SyncAudio() {
                         : paused_.load()   ? "the wallpaper is paused"
                                            : "no audible slot carries a track";
         }
+    }
+
+    // Follow the picture's jumps. This runs once around the frame loop, so a running clip moves
+    // `pos` by ~0.04 s and the test below never fires; a seek or the loop seam moves it by seconds
+    // and the track is retimed to wherever the picture now is. A card whose sound has no picture to
+    // ride (an ambient bed on a still) has no `owner` and keeps free-running, which is what it was
+    // designed to do.
+    if (owner && audioTrack_.running()) {
+        const double pos = owner->position_s();
+        if (audioAnchorPos_ >= 0.0 && std::fabs(pos - audioAnchorPos_) > kAudioFollowJumpS)
+            audioTrack_.Seek(pos);
+        audioAnchorPos_ = pos;
+    } else {
+        audioAnchorPos_ = -1.0;
     }
 
     // Handover, not restart: the preview and the desktop just asked for the same bytes.
