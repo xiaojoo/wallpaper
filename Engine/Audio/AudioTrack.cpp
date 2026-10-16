@@ -50,6 +50,8 @@ bool AudioTrack::Start(AudioOut& out, const std::wstring& file, bool loop, std::
     stop_ = 0;
     written_ = 0;
     loops_ = 0;
+    seekUs_ = -1;         // a jump owed to a previous file belongs to no one
+    mediaUs_ = -1;
     state_ = 0;
     { std::lock_guard lk(errMtx_); err_.clear(); }
     thread_ = std::thread([this] { Run(); });
@@ -149,8 +151,25 @@ void AudioTrack::Run() {
          outRate, outCh);
 
     AVPacket* pkt = av_packet_alloc();
+    long long seekTargetUs = -1;   // where a pending seek wants the demuxer to actually be
     state_ = 1;                       // from here on, "running" means it is really producing samples
     while (!stop_.load()) {
+        // The picture jumped (a seek, or its loop seam) and this track owns its sound. `stream_index
+        // -1` seeks on the global timeline in AV_TIME_BASE units, which is microseconds - the same
+        // unit the request carries. Whatever swresample was still holding has to go with it, or the
+        // first thing heard after the jump is the tail of where we came from.
+        const long long su = seekUs_.exchange(-1, std::memory_order_acq_rel);
+        if (su >= 0) {
+            if (avformat_seek_file(fmt, -1, INT64_MIN, su, INT64_MAX, 0) < 0) {
+                Fail("cannot seek to the picture's position");
+                break;
+            }
+            avcodec_flush_buffers(dec);
+            if (swr_init(swr) < 0) { Fail("cannot reset the resampler after a seek"); break; }
+            av_frame_unref(frame);
+            seekTargetUs = su;       // the demuxer lands early; fast-forward to the request below
+            continue;
+        }
         const int rr = av_read_frame(fmt, pkt);
         if (rr < 0) {
             if (!loop_) break;
@@ -163,6 +182,16 @@ void AudioTrack::Run() {
             continue;
         }
         if (pkt->stream_index != idx) { av_packet_unref(pkt); continue; }
+        const long long pu = pkt->pts != AV_NOPTS_VALUE
+            ? (long long)(pkt->pts * av_q2d(fmt->streams[idx]->time_base) * 1e6) : -1;
+        // A backward container seek lands on the cluster that starts before the target - measured
+        // 3.9 / 1.1 / 5.9 s early on a two-hour Matroska. Playing forward from there at realtime would
+        // leave the sound exactly that far behind the picture for the rest of the lap, so the packets
+        // before the request are dropped unread. 40 ms of tolerance is wider than one audio frame
+        // (E-AC3 hands over 32 ms at a time), so this never overshoots the target.
+        if (seekTargetUs >= 0 && pu >= 0 && pu + 40000 < seekTargetUs) { av_packet_unref(pkt); continue; }
+        seekTargetUs = -1;
+        if (pu >= 0) mediaUs_.store(pu, std::memory_order_relaxed);
         const int spr = avcodec_send_packet(dec, pkt);
         av_packet_unref(pkt);
         if (spr < 0 && spr != AVERROR(EAGAIN)) continue;

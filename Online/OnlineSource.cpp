@@ -61,7 +61,7 @@ const char* MimeForExtension(const std::string& ext) {
         {"jpg", "image/jpeg"},  {"jpeg", "image/jpeg"}, {"png", "image/png"},
         {"webp", "image/webp"}, {"bmp", "image/bmp"},   {"tif", "image/tiff"},
         {"tiff", "image/tiff"}, {"gif", "image/gif"},   {"mp4", "video/mp4"},
-        {"m4v", "video/mp4"},   {"webm", "video/webm"},
+        {"m4v", "video/mp4"},   {"webm", "video/webm"}, {"mkv", "video/x-matroska"},
     };
     for (const auto& [suffix, mime] : table)
         if (ext == suffix) return mime;

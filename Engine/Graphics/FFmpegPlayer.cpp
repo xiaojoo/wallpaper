@@ -252,8 +252,9 @@ public:
         }
         const double codecMs = msSince(tStart) - demuxMs;
         pkt_ = av_packet_alloc();
+        retryPkt_ = av_packet_alloc();
         frm_ = av_frame_alloc();
-        if (!pkt_ || !frm_) {
+        if (!pkt_ || !retryPkt_ || !frm_) {
             error = "packet/frame alloc";
             return false;
         }
@@ -446,6 +447,7 @@ private:
     void Free() {
         if (frm_) av_frame_free(&frm_);
         if (pkt_) av_packet_free(&pkt_);
+        if (retryPkt_) av_packet_free(&retryPkt_);
         if (pendingAv_) av_frame_free(&pendingAv_);
         for (auto& f : shownRing_) if (f) av_frame_free(&f);
         if (ctx_) avcodec_free_context(&ctx_);
@@ -495,6 +497,7 @@ private:
     AVCodecContext* ctx_ = nullptr;
     const AVCodec* dec_ = nullptr;
     AVPacket* pkt_ = nullptr;
+    AVPacket* retryPkt_ = nullptr;   // the packet held back while the decoder refuses input
     AVFrame* frm_ = nullptr;
     int vIdx_ = -1;
     AVRational tb_{};
@@ -516,6 +519,7 @@ private:
     bool holdAfterFrame_ = false;
     bool ensureWarned_ = false;
     bool adoptWarned_ = false;           // the decoder surface failed to bind, once per player
+    bool sendErrWarned_ = false;         // a send that is not EAGAIN, once per player, with its code
     int noFrameSeconds_ = 0;    // consecutive stats lines with no step and no frame at all
     double holdTarget_ = 0.0;
     double seekTo_ = 0.0;
@@ -693,6 +697,10 @@ private:
         std::atomic<unsigned long long> frameUsSum{0}, frameUsMax{0};
         std::atomic<unsigned> steps{0}, empty{0}, dropped{0}, taken{0}, notPacked{0}, packSteps{0},
                                     tookNothing{0}, gpuTaken{0};
+        // Which door the step went out of. `sendFull` is a queue that is merely full (drainable);
+        // `stuckBoth` is send refusing AND receive having no completed picture - the exhaustion shape
+        // that draining cannot answer; `sendErr` is a real failure, whose code is logged once.
+        std::atomic<unsigned> sendFull{0}, sendErr{0}, stuckBoth{0};
         std::atomic<unsigned> lumaMean{0}, chromaMean{0}, haveBytes{0}, needBytes{0};
     } st_;
     std::chrono::steady_clock::time_point lastStats_;
@@ -706,6 +714,8 @@ void FFmpegPlayer::LogStats() {
     const auto packSteps = st_.packSteps.exchange(0);
     const auto gpuTaken = st_.gpuTaken.exchange(0);
     const auto tookNothing = st_.tookNothing.exchange(0);
+    const auto sendFull = st_.sendFull.exchange(0), sendErr = st_.sendErr.exchange(0);
+    const auto stuckBoth = st_.stuckBoth.exchange(0);
     const auto pSum = st_.packUsSum.exchange(0), pMax = st_.packUsMax.exchange(0);
     const auto dSum = st_.decodeUsSum.exchange(0), dMax = st_.decodeUsMax.exchange(0);
     const auto cSum = st_.copyUsSum.exchange(0), cMax = st_.copyUsMax.exchange(0);
@@ -714,11 +724,13 @@ void FFmpegPlayer::LogStats() {
     Info(MOD, "{}: FFmpeg decode {} steps in 1 s ({} empty), step mean {:.1f} max {:.1f} ms | "
               "render took {} frame(s), FrameY mean {:.2f} max {:.2f} ms (upload {:.2f}/{:.2f}) | "
               "{} produced but never displayed, {} decoded and not copied, packed {} frame(s) mean {:.2f} "
-              "max {:.2f} ms, {} presents took nothing, {} drawn straight off the decoder surface",
+              "max {:.2f} ms, {} presents took nothing, {} drawn straight off the decoder surface | "
+              "send refused {}, send error {}, refused with nothing out {}",
          ToUtf8(file_), steps, empty, steps ? dSum * k / steps : 0.0, dMax * k, taken,
          taken ? fSum * k / taken : 0.0, fMax * k,
          taken ? cSum * k / taken : 0.0, cMax * k, dropped, notPacked, packSteps,
-         packSteps ? pSum * k / packSteps : 0.0, pMax * k, tookNothing, gpuTaken);
+         packSteps ? pSum * k / packSteps : 0.0, pMax * k, tookNothing, gpuTaken,
+         sendFull, sendErr, stuckBoth);
     if (gpuOut_) {
         // Not a measurement of the picture. This path never calls Upload(), so the two means would keep
         // reporting the video-black clear of plane textures nobody writes - a green-looking number with
@@ -780,6 +792,8 @@ void FFmpegPlayer::Thread() {
             const bool rewinding = seamOpen_;
             const int64_t target = int64_t(seekSeconds / av_q2d(tb_));
             av_seek_frame(fmt_, vIdx_, target, AVSEEK_FLAG_BACKWARD);
+            // Whatever packet was held back belongs to the position we just left.
+            av_packet_unref(retryPkt_);
             std::vector<BYTE> retired;
             {
                 std::lock_guard lk(mtx_);
@@ -814,27 +828,57 @@ void FFmpegPlayer::Thread() {
         bool gotFrame = false;
         bool skipped = false;
         for (;;) {
-            const int rr = av_read_frame(fmt_, pkt_);
-            if (rr < 0) {
-                if (rr == AVERROR_EOF) {
-                    ended_ = true;
-                    if (loop_) seamOpen_ = true;
-                    {
-                        std::lock_guard lk(mtx_);
-                        if (loop_) { seekPending_ = true; seekTo_ = 0.0; ended_ = false; }
-                        else holding_ = true;
+            // The packet this step feeds the decoder is either the one the previous step had to hold
+            // back because the decoder was full, or a fresh one from the demuxer.
+            if (!retryPkt_->data) {
+                const int rr = av_read_frame(fmt_, pkt_);
+                if (rr < 0) {
+                    if (rr == AVERROR_EOF) {
+                        ended_ = true;
+                        if (loop_) seamOpen_ = true;
+                        {
+                            std::lock_guard lk(mtx_);
+                            if (loop_) { seekPending_ = true; seekTo_ = 0.0; ended_ = false; }
+                            else holding_ = true;
+                        }
+                        cv_.notify_all();
                     }
-                    cv_.notify_all();
+                    ++st_.empty;
+                    break;
                 }
+                if (int(pkt_->stream_index) != vIdx_) { av_packet_unref(pkt_); continue; }
+                av_packet_move_ref(retryPkt_, pkt_);
+            }
+            const int sr = avcodec_send_packet(ctx_, retryPkt_);
+            if (sr == AVERROR(EAGAIN)) {
+                // The decoder will not take input until its output is taken: keep the packet and fall
+                // through to receive. The shape this replaces unref'd the packet and broke, then burned a
+                // NEW one on every step - a one-way door. Measured 2026-10-16 on a 4K HEVC clip: send
+                // returned EAGAIN from frame 12 onwards, every step discarded a packet, and nothing but a
+                // flush reopened the player (`0 decoder surface(s) bound`, step 0.0 ms, forever).
+                ++st_.sendFull;
+            } else if (sr < 0) {
+                av_packet_unref(retryPkt_);
+                if (!sendErrWarned_) {
+                    sendErrWarned_ = true;
+                    Warn(MOD, "{}: avcodec_send_packet failed: {}", ToUtf8(file_), errcode(sr));
+                }
+                ++st_.sendErr;
                 ++st_.empty;
                 break;
+            } else {
+                av_packet_unref(retryPkt_);
             }
-            if (int(pkt_->stream_index) != vIdx_) { av_packet_unref(pkt_); continue; }
-            if (avcodec_send_packet(ctx_, pkt_) < 0) { av_packet_unref(pkt_); ++st_.empty; break; }
-            av_packet_unref(pkt_);
             const int rc = avcodec_receive_frame(ctx_, frm_);
-            if (rc == AVERROR(EAGAIN)) { ++st_.empty; continue; }
-            if (rc < 0) { ++st_.empty; break; }
+            if (rc == AVERROR(EAGAIN)) {
+                // Nothing out yet. If this step's send was refused as well, the decoder is holding every
+                // surface it has and still has no completed picture to give - that is exhaustion, not a
+                // full queue, and draining cannot answer it. Pace and retry the same packet next step.
+                if (sr == AVERROR(EAGAIN)) { ++st_.stuckBoth; ++st_.empty; break; }
+                ++st_.empty;
+                continue;
+            }
+            if (rc < 0) { av_packet_unref(retryPkt_); ++st_.empty; break; }
             const int64_t pts = frm_->best_effort_timestamp != AV_NOPTS_VALUE ? frm_->best_effort_timestamp
                                                                              : frm_->pts;
             outTs = pts != AV_NOPTS_VALUE ? int64_t(pts * av_q2d(tb_) * 1e7) : 0;

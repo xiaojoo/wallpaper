@@ -29,7 +29,13 @@
 
 namespace {
 
-constexpr unsigned long long kRingFrames = 1ull << 16;   // 65536 frames: ~1.4 s at 48 kHz
+// How far the producer is allowed to run ahead of the device. This is a latency budget, not a
+// throughput buffer: whatever sits here is sound that has not been heard yet. The old 1<<16 = 1.365 s
+// added that much late audio to every wallpaper with a track (measured 2026-10-17 on a 2-hour movie:
+// `track_frames - played` read 1.372 s and 1.367 s sixty seconds apart, so a constant offset, not a
+// drift). The device side already asks GetCurrentPadding and takes only `bufFrames - padding`, so
+// this ring is the whole of the queue between "decoded" and "heard".
+constexpr unsigned long long kRingFrames = 1ull << 12;   // 4096 frames: ~85 ms at 48 kHz
 constexpr unsigned long long kRingMask   = kRingFrames - 1;
 // 0 = take the endpoint's own default period. This used to ask for 100 ms (GetBufferSize then handed
 // back 4800 frames), and every counter said the stream was healthy - written at 48 000 frames/s, zero
