@@ -2221,6 +2221,9 @@ ApplicationWindow {
                                     title: trs("online_preview_rung")
                                     items: Bridge.onlineRungs
                                     current: Bridge.previewRung
+                                    // 站点没公布尺寸表（wallspic 就是）时这一组一个选项都没有，那就不
+                                    // 该留一个光秃秃的标题在上面：标题是给选项做说明的。
+                                    visible: Bridge.onlineRungs.length > 0
                                     onPicked: function (v) { Bridge.setPreviewRung(v) }
                                 }
 
