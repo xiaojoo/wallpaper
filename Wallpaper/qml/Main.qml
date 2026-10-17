@@ -357,11 +357,16 @@ ApplicationWindow {
     }
     function commitHeroSwap() {
         heroSnapFresh = snapUrl !== ""
-        // Raise the cover *before* the swap, not after it. Both branches used to lean on their own
-        // first value arriving with the next animation tick (the fade's `from: 1`, the morph's
-        // opacity), which leaves the new picture as the thing on screen for that frame.
-        if (heroSnapFresh) heroSnap.opacity = 1
         hero = pendingHero
+        // Raise the cover in the same tick as the swap, not on a later animation frame: both
+        // branches used to lean on their own first value arriving with the next animation tick
+        // (the fade's `from: 1`, the morph's opacity), which left the new picture as the thing on
+        // screen for that frame. QML renders only after this function returns, so reading
+        // `plateShown` *after* the assignment is still the same tick - and it is the only way to
+        // ask the question about the incoming card rather than the one just left.
+        // 网格该铺的那一拍不抬盖帧：它抓的是"离开上一拍时大图表面长什么样"，而那一拍表面正是还在播的
+        // 桌面。只靠 `heroSnap.visible` 那道闸挡不住被抬起来的第一帧 - 他 22:20 报的"还是有，只是快了"。
+        if (heroSnapFresh && !plateShown) heroSnap.opacity = 1
         // No capture means nothing to dissolve: cutting is the only honest remaining option, and an
         // overlay with an empty texture would show the box's base colour.
         if (!heroSnapFresh) { heroFxStop(); return }
@@ -437,10 +442,35 @@ ApplicationWindow {
     readonly property bool onlinePlateWanted: onlineMode && (shown.length === 0
         || !(hero !== null && hero.online === true
              && (heroBigPictureIsHere() || heroImg.status === Image.Ready || heroHeld.length > 0)))
+    // 视频卡在引擎里有一张抽好的静帧（cache/thumbs/<id>_large.png，卡片条画的就是它）。有它可铺的
+    // 那一拍就不铺网格：他要的是"这张卡片的样子"，不是"还没有这张卡片"。
+    readonly property bool heroHasStill: hero !== null
+        && String(hero.thumb_large !== undefined ? hero.thumb_large : hero.thumb).length > 0
     // 网格到底铺不铺，只有这一个出处：`EmptyPlate` 的 visible、三点的 working、超时计时器都读它。
     // 提成根属性而不是让 Timer 去绑 `plateItem.visible`：根上的绑定看不到后面才创建出来的 id，
     // 实测计时器一次没响，三点转到底、那句话一次没出现。
+    // 四种"这张卡片自己的东西还没到"：整页被筛空、在线页卡片图在路上、实时流画的是别的卡片
+    // （那一拍有静帧就让给静帧，见上）、hero 还落在上一页。
     readonly property bool plateShown: shown.length === 0 || onlinePlateWanted
+                                       || (liveIsForeign && !heroHasStill) || heroOffPage
+                                       || (heroIsFallback && !coverUp)
+    // 大图区手上这张就是"桌面正在显示的那张"，而这一页选中的已经是别的卡片 —— 空页的
+    // `pendingHero` 回落会造出这个形状。它不是外来的（`matching` 诚实），所以三条判据都不认，
+    // 于是露一帧桌面。只在接棒的盖帧还没起来的那一拍补上网格。
+    // 读 `heroSnapFresh` + `opacity` 而不是 `heroSnap.visible`：后者已经被 `plateShown` 闸住，
+    // 用它就会绕成一个自引用绑定。
+    readonly property bool heroIsFallback: hero !== null && applied !== null
+        && hero.id === applied.id && (current === null || current.id !== hero.id)
+    readonly property bool coverUp: heroSnapFresh && heroSnap.opacity > 0.001
+    // 页签换了、这一页的列表里已经没有大图区这张卡片，而 `hero` 要下一拍才跟过去 —— 这 0.28 秒
+    // 屏上还是上一张壁纸。他 21:36 的录制里三次都是这个形状（0.27 / 0.30 / 0.27 秒），而且说明行
+    // 和"正在显示"都还写着 Matrix Clock：不是误盖章，是 hero 落在旧页上。
+    readonly property bool heroOffPage: {
+        if (shown.length === 0 || hero === null) return false
+        for (var i = 0; i < shown.length; ++i)
+            if (shown[i].id === hero.id) return false
+        return true
+    }
     // 网格铺着的那一拍只准出现一样东西：先转三点，三点连续转满 1200 ms 还没等到东西，才换成那句
     // "未获取到壁纸信息"。两个都钉在窗口正中，同屏就是互相压在对方身上（他 10-17 的截图）。
     // 1200 不是新数：在线卡片等原图落地的兜底就是这一档（`commitHeroSwap` 里 `hero.online` 那一支）。
@@ -583,6 +613,12 @@ ApplicationWindow {
     property bool liveHeld: false
     property string liveHeldFor: ""
     readonly property bool heroLive: liveFed && (liveView.matching || liveHeld)
+    // 实时流手上这一帧不是这张卡片 —— 那就是上一张（往往是桌面当前壁纸）还留着。判据只用
+    // `matching`：引擎现在按"真正画出这一帧的那个实例"盖章（Application.cpp 的 slotHash），
+    // 所以这个值是可信的。以前这里用的是帧计数 `frames <= liveFramesAtSwap`，而桌面壁纸一直在动、
+    // 帧号一直往前涨，判据当场自己失效 —— 他 23:14 报的"点过收藏夹再点别的 tab 就出现桌面那一帧"
+    // 就是这条：空页让 `pendingHero` 回落到 applied（桌面那张），换页时实时流还播着它。
+    readonly property bool liveIsForeign: heroLive && !liveView.matching
     // The saved strip is 1280x720 whatever the package was imported at, so for a still photo the
     // frames have nothing to show that its own file does not show better: measured on 2026-10-12,
     // a 3840-wide hero playing those frames carries 0.21 of the original file's high-pass energy
@@ -1091,7 +1127,10 @@ ApplicationWindow {
                             anchors.margins: 0
                             fillMode: Image.PreserveAspectCrop
                             asynchronous: true
-                            visible: !root.heroMotion && !root.heroLive
+                            // 实时流还画着别的卡片那一拍，这一层顶上去：视频卡在引擎里有一张抽好的
+                            // 静帧（cache/thumbs/<id>_large.png，卡片条用的就是它），铺它比铺网格诚实。
+                            visible: !root.heroMotion && (!root.heroLive
+                                     || (root.liveIsForeign && root.heroHasStill))
                             // What this layer last managed to paint, kept for heroHold. Read from the
                             // signal rather than from a binding: at the moment the swap happens a
                             // binding on `source` still answers with the *previous* card's URL, which
@@ -1366,9 +1405,12 @@ ApplicationWindow {
                         // the effect is opaque over the same rect, so painting both is for nothing.
                         // 无: it paints while the swap is still waiting for the new card's picture,
                         // and heroStartFx drops it in the frame that wait ends.
-                        visible: root.heroFx === root.fxDissolve ? opacity > 0.001
-                                 : root.heroFx === root.fxLiquid ? (!root.heroLiquidArmed && root.heroSnapFresh)
-                                 : (root.heroWaitPicture && root.heroSnapFresh)
+                        // 网格铺着的时候它一律不上屏：盖帧抓的是"离开那一页时大图表面的样子"，而
+                        // 那一拍表面本该是网格。量到的一次（他 22:06 录制）：`cat=fav n=0 plate=true`
+                        // 网格在铺，屏上却是 22:06:02 的桌面时钟 - 画在网格之上的只有这一层。
+                        visible: !root.plateShown && (root.heroFx === root.fxDissolve ? opacity > 0.001
+                                       : root.heroFx === root.fxLiquid ? (!root.heroLiquidArmed && root.heroSnapFresh)
+                                       : (root.heroWaitPicture && root.heroSnapFresh))
                         opacity: 0
                         source: root.snapUrl
                         NumberAnimation {

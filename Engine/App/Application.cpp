@@ -2149,7 +2149,14 @@ void Application::DrawPreview(double nowSeconds) {
     dev_.ctx->Begin(p.q[i].Get());
     dev_.ctx->CopyResource(p.stg[i].Get(), p.rt.Get());
     dev_.ctx->End(p.q[i].Get());
-    p.slotHash[i] = p.idHash;   // what is in this copy, as of the frame that produced it
+    // The instance that actually produced these pixels, not the id we were asked to show. The two
+    // differ after a switch for as long as the render target still holds the outgoing surface, and a
+    // reader that trusts `idHash` is then left with nothing to refuse - that is the desktop's own
+    // picture painted under a caption naming another card (his 22:06 recording: `plate=true`,
+    // `lm=true`, 0.13-0.20 s of the matrix clock on every one of three page switches). `MakeArgs`
+    // above and the draw below are both `p.inst`, so its own id is the only honest label for this
+    // copy; a shared instance is the applied wallpaper's, which is the id we were asked for anyway.
+    p.slotHash[i] = IdHash(p.inst->id().c_str());
     p.slotState[i] = Preview::CopyPending;
     ++p.drew;
     p.error.clear();

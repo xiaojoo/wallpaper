@@ -131,6 +131,9 @@ void LivePreview::dropFrame() {
     // 733 ms under a caption naming the forest card).
     if (!haveFrame_) return;
     haveFrame_ = false;
+    // `running` is a Q_PROPERTY on this very flag, and the frame-resize site drops it without any
+    // emit of its own - so the notify belongs here, or QML keeps binding on a frame that is gone.
+    emit frameArrived();
     update();
 }
 
