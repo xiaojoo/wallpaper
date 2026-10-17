@@ -56,6 +56,10 @@ signals:
 
 private:
     void poll();
+    // Take the last delivered frame off screen. See LivePreview.cpp: clearing the flag alone leaves
+    // the pixels painted, because a QQuickPaintedItem keeps its backing image until it is asked to
+    // draw again.
+    void dropFrame();
 
     PreviewReader reader_;
     QImage frame_;

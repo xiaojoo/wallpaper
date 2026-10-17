@@ -431,6 +431,33 @@ ApplicationWindow {
     property string heroHeld: ""
     readonly property bool heroHoldWanted: hero !== null && hero.online === true && hero.type === "image"
                                            && !heroMotion && !heroLive
+    // 在线页的大图区在"这张卡片自己的图还没落地"期间只能铺网格。以前这段露的是桌面：实时流在
+    // `hero` 还没对准卡片时画的就是当前壁纸，`heroHold` 也可能留着壁纸的静帧 - 两条都不是卡片。
+    // 只在在线页生效：本地页那张大图本来就该跟着桌面一起动。
+    readonly property bool onlinePlateWanted: onlineMode && (shown.length === 0
+        || !(hero !== null && hero.online === true
+             && (heroBigPictureIsHere() || heroImg.status === Image.Ready || heroHeld.length > 0)))
+    // 网格到底铺不铺，只有这一个出处：`EmptyPlate` 的 visible、三点的 working、超时计时器都读它。
+    // 提成根属性而不是让 Timer 去绑 `plateItem.visible`：根上的绑定看不到后面才创建出来的 id，
+    // 实测计时器一次没响，三点转到底、那句话一次没出现。
+    readonly property bool plateShown: shown.length === 0 || onlinePlateWanted
+    // 网格铺着的那一拍只准出现一样东西：先转三点，三点连续转满 1200 ms 还没等到东西，才换成那句
+    // "未获取到壁纸信息"。两个都钉在窗口正中，同屏就是互相压在对方身上（他 10-17 的截图）。
+    // 1200 不是新数：在线卡片等原图落地的兜底就是这一档（`commitHeroSwap` 里 `hero.online` 那一支）。
+    // 清零挂在 `plateShown` 的变更上，不挂 `runningChanged`：不 repeat 的 Timer 触发完会自己把
+    // running 落回 false，那样刚置上的超时会被同一拍清掉（量的就是这一串：fired 紧跟 run=false）。
+    property bool plateTimedOut: false
+    onPlateShownChanged: plateTimedOut = false
+    Timer {
+        interval: 1200
+        running: root.plateShown && !root.plateTimedOut
+        onTriggered: root.plateTimedOut = true
+    }
+    // 任何一处"图/片子还没出现"垫的底色，整窗口只有这一个出处：换那张填充图，只改这一行。
+    // 用平铺而不是缩放，是为了格子在任何窗口尺寸下都还是 27 px 一格（量的就是真实渲染出来的窗：
+    // 线心 85 / 112 / 139 / 166 / 193 = 间距 27.0，内部 0）；第一版照抄他给的样，线是软的、峰值只
+    // 到 17，被他判成"不够高清"，于是节奏留下、线收硬。
+    readonly property string emptyPlateSrc: "placeholder-grid.png"
     function startHeroSwap() {
         const nid = heroIdOf(pendingHero), cid = heroIdOf(hero)
         if (nid === cid) { hero = pendingHero; return }      // same wallpaper, new object: no fade
@@ -1069,7 +1096,8 @@ ApplicationWindow {
                             // signal rather than from a binding: at the moment the swap happens a
                             // binding on `source` still answers with the *previous* card's URL, which
                             // is what made the earlier version of this gate skip 23 times out of 23.
-                            onStatusChanged: if (status === Image.Ready) root.heroHeld = String(source)
+                            onStatusChanged: if (status === Image.Ready && root.hero
+                                                 && root.hero.online === true) root.heroHeld = String(source)
                             // Always the small layer: the site's preview for a remote card, the
                             // 1280x720 `*_large.png` for a local one. The full-size picture is a second
                             // image on top of this one, never a re-aim of this one - changing `source`
@@ -1297,6 +1325,18 @@ ApplicationWindow {
                                     source: modelData
                                 }
                             }
+                        }
+
+                        // 铺这张固定网格底的两种情况：整页被筛空（一张卡都没有），以及在线页已经
+                        // 点上一张卡片、但它自己的图还没落地。后一种以前露的是桌面壁纸（他 10-17
+                        // 的录制：结果落地后大图区被当前壁纸占了 0.73 s，标题已经写着新卡片的名字）。
+                        // 只是盖，不关任何层 - 关了会把 10-14 那条"糊→清"的显影拆成移动。
+                        // 声明在 heroContent 的最后一个孩子，而不是 heroBox 上它的兄弟：切换时那张
+                        // 快照抓的是 heroContent，放在外面就等于让盖帧把桌面壁纸抓下来再淡出 - 网格
+                        // 撤掉后仍然会闪 0.13 s 的壁纸（量到：snap 1→0.99 那一拍）。
+                        EmptyPlate {
+                            id: plateItem
+                            visible: root.plateShown
                         }
                     }
 
@@ -1763,27 +1803,13 @@ ApplicationWindow {
                     // The grid is a fixed picture, not the wallpaper that happens to be set: behind this
                     // state the hero layers used to stay painted, so an empty page read as "the desktop
                     // wallpaper, with a 无 stuck in the middle of it" - two different answers to two
-                    // different questions. placeholder-grid.png is 27 px cells on pure black with a
-                    // 1 px line at (32,32,40) and a short bloom either side (profile 7,34,7 across it),
-                    // tiled rather than scaled so the cell stays 27 px whatever the window does. Measured
-                    // on the rendered window: line centres 85 / 112 / 139 / 166 / 193 = pitch 27.0,
-                    // interior 0. The first version copied his sample exactly - a soft line peaking at
-                    // 17 - and he called it 不够高清, so the rhythm stayed and the line got hardened.
-                    Image {
-                        anchors.fill: parent
-                        visible: root.shown.length === 0
-                        source: "placeholder-grid.png"
-                        // `fillMode: Image.Tile` is the whole story in QML - the per-axis
-                        // horizontalTileMode/verticalTileMode pair is C++-only API, and asking for it
-                        // here fails the component load: "Cannot assign to non-existent property".
-                        fillMode: Image.Tile
-                        cache: false
-                    }
+                    // different questions. What the tile is and why it is tiled: `root.emptyPlateSrc`.
                     Text {
                         anchors.centerIn: parent
                         // The three-dot "在等" animation is pinned to the middle of the window, which is
-                        // exactly where this line sits - so while it is running, the words are not shown.
-                        visible: root.shown.length === 0 && !root.waiting
+                        // exactly where this line sits - so the two take turns: the dots while the wait
+                        // is still short, these words once `plateTimeout` says it has run long enough.
+                        visible: root.shown.length === 0 && root.plateTimedOut
                         text: trs("no_wallpaper_info")
                         color: th.muted; font.family: root.fontFamily; font.pixelSize: 13
                     }
@@ -2731,7 +2757,9 @@ ApplicationWindow {
     // 但在两个整窗覆盖层之下——对话框开着的时候不该还有一个东西在中间闪。
     LoadingDots {
         anchors.centerIn: parent
-        working: root.waiting
+        // 网格铺着的地方就是"还在等"的地方：卡片已经点上、图还在路上那一拍，三点也得继续转，
+        // 否则屏上是一块没有解释的网格。转满 1200 ms 就交班给那句话，两个不同屏。
+        working: (root.waiting || root.plateShown) && !root.plateTimedOut
     }
 
     // A dialog over the page, not a fourth column: opening it must not move the grid. The left
@@ -5246,6 +5274,16 @@ ApplicationWindow {
     }
 
     // 一组药丸：标题 + 药丸流，超过 5 行折起来，折不动就不出现那枚箭头（一条点不动的箭头是许诺）。
+    // 公用的"还没出现"底板：谁用谁给 `visible`，画什么、怎么铺只在这里定义一次。
+    // `fillMode: Image.Tile` 是 QML 里平铺的全部——按轴的那一对 horizontalTileMode/verticalTileMode
+    // 是 C++ API，写在这里会让整个组件加载失败（"Cannot assign to non-existent property"）。
+    component EmptyPlate: Image {
+        anchors.fill: parent
+        source: root.emptyPlateSrc
+        fillMode: Image.Tile
+        cache: false
+    }
+
     component PillGroup: ColumnLayout {
         id: pg
         property string title: ""
