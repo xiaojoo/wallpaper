@@ -20,7 +20,7 @@ void LivePreview::setActive(bool on) {
     emit activeChanged();
     if (!on) {
         timer_.stop();
-        haveFrame_ = false;
+        dropFrame();
         fps_ = 0;
         emit fpsChanged();
         emit frameArrived();
@@ -59,8 +59,8 @@ void LivePreview::poll() {
     // to the saved strip. Not while this window paused the pass itself - that hold is the whole
     // point of `paused`, and resuming shows the frame it stopped on instead of the wallpaper's still.
     if (haveFrame_ && !paused_ && QDateTime::currentMSecsSinceEpoch() - lastSeenMs_ > 1200) {
-        haveFrame_ = false;
         matching_ = false;
+        dropFrame();
         fps_ = 0;
         emit fpsChanged();
         emit frameArrived();
@@ -69,7 +69,7 @@ void LivePreview::poll() {
     if (w == 0 || h == 0 || w > kPreviewMaxW || h > kPreviewMaxH) return;
     if (frame_.size() != QSize(int(w), int(h))) {
         frame_ = QImage(int(w), int(h), QImage::Format_ARGB32);
-        haveFrame_ = false;
+        dropFrame();
     }
     UINT rw = 0, rh = 0;
     UINT32 seq = 0;
@@ -119,8 +119,19 @@ void LivePreview::setWantedId(const QString& id) {
     // keeping it painted would keep painting the *previous* wallpaper on screen. Outside a pause the
     // frame is not dropped here: the handover onto a newly picked wallpaper deliberately keeps the
     // outgoing live frame painted until its own first frame lands.
-    if (paused_ && !matching_) haveFrame_ = false;
+    if (paused_ && !matching_) dropFrame();
     emit frameArrived();
+}
+
+void LivePreview::dropFrame() {
+    // paint() draws nothing once the flag is down, but QQuickPaintedItem renders into a backing
+    // image it owns and only redraws that image when asked - so clearing the flag on its own leaves
+    // the previous wallpaper on screen. That is what showed the desktop's live picture over an
+    // online card that has no picture of its own yet (his 18:58 recording: matrixclock painted for
+    // 733 ms under a caption naming the forest card).
+    if (!haveFrame_) return;
+    haveFrame_ = false;
+    update();
 }
 
 void LivePreview::paint(QPainter* painter) {
