@@ -22,6 +22,15 @@ VP9 / AV1 走 cuvid，设置界面能导入也能在线下载预览）、3D 与�
 
 详细一点的实现说明、这台机器上的实测数、以及已知缺点，都在 `docs/实现与量测.md`。
 
+## 环境要求
+
+- Windows 10 / 11 x64：`_WIN32_WINNT=0x0A00`（`CMakeLists.txt:54`），DirectComposition 和挂 Progman/WorkerW
+  那条桌面层级都是这一条线上的。
+- Visual Studio 2022（MSVC）+ CMake ≥ 3.24。
+- **FFmpeg 的 LGPL shared 构建：编译的硬依赖**，下面「编译」写了怎么取。
+- Qt 6.11（`msvc2022_64`）：**可选**，`find_package` 找不到就只出渲染器，设置窗那个 target 自动跳过。
+- NVML：随 NVIDIA 驱动而来，运行时加载；取不到的那格指标不画，壁纸照跑。
+
 ## 编译
 
 ```
@@ -42,6 +51,17 @@ bash tools/ffmpeg-notice.sh     # 由真实二进制生成 licenses/FFmpeg.txt�
 
 CMake 找 SDK 的顺序：`-DWALLPAPER_FFMPEG_DIR=<路径>` → 环境变量 `FFMPEG_DIR` → `build/ffm-lgpl`。
 两个许可证文件（`LICENSE-FFmpeg.txt` 与 `NOTICE-FFmpeg.txt`）由构建自动拷到 exe 目录，跟着程序一起分发。
+
+设置窗（`Wallpaper.exe`）是同一份 CMake 里的第二个 target，Qt 用**环境变量** `QT_DIR` 指过去
+（`CMakeLists.txt:154` 把它追加进 `CMAKE_PREFIX_PATH`）：
+
+```
+QT_DIR="D:/Qt/6.11.0/msvc2022_64" cmake -S . -B bld -G "Visual Studio 17 2022" -A x64
+```
+
+产物在 `bld/bin/RelWithDebInfo/Wallpaper.exe`，构建会把 `qml/`、`Online/sources/` 那排站点 json、
+两颗 `.qsb` 和 `Wallpaper.ico` 拷到它旁边，开发时不用 install。找不到 Qt 时 configure 不失败，只打一行
+`Qt6 not found: skipping the Wallpaper settings window`，渲染器照编。
 
 ## 运行与控制
 
@@ -91,8 +111,9 @@ WallpaperRenderer.exe --ctl addimage "D:\pics\a.jpg"   把一张图片变成壁�
 
 ## 声明（第三方与许可）
 
-- **本项目自己的许可证还没有**：仓库里只有 `licenses/FFmpeg.txt`，根目录没有 LICENSE 文件。
-  这份代码要发出去之前得先补上，别把"没有"当成"默认允许"。
+- **本项目自己写的代码与文档用 CC0 1.0 Universal 奉献到公有领域**，全文在根目录 `LICENSE`
+  （7048 字节，与 creativecommons.org 的 `zero/1.0/legalcode.txt` 逐字节相同，一个字没改）。
+  拿去用不用署名、不用通知，本项目也不提供任何保证。下面几条是这份许可**盖不到**的东西。
 - 视频解码用 FFmpeg 的 **LGPL** 构建：不复制任何 FFmpeg 源码进本仓库，只通过公开头文件链接它的 DLL。
   `tools/get-ffmpeg.sh` 见到 `--enable-gpl` / `--enable-nonfree` 的构建会拒绝下载。
 - 随程序分发的说明由**真实二进制**生成，不要手改：`bash tools/ffmpeg-notice.sh` → `licenses/FFmpeg.txt`；
@@ -100,6 +121,13 @@ WallpaperRenderer.exe --ctl addimage "D:\pics\a.jpg"   把一张图片变成壁�
 - 用的是哪个 FFmpeg 可以从运行中的程序读回来：`--ctl status` 的 `ffmpeg` 字段来自
   `av_version_info` / `avcodec_version` / `avcodec_license`，换了 DLL 它跟着变。
 - 音频后端 `swaudio_wasapi.dll` 是本仓库自己写的，运行时加载：删掉它壁纸照跑，只是不出声。
+- 设置界面链接 Qt 6 的 **LGPLv3** 构建（Quick / Qml / Gui / Widgets / Network）。这一条目前只做到"用的是
+  LGPL 构建"，分发那半边还没做：构建只自动拷 FFmpeg 的两份说明，Qt 的许可证文本和"能换回自己的 DLL
+  重新链接"没进任何打包步骤（仓库里没有 installer，也没调 `windeployqt`）。自己编译着用不受影响，
+  要往外发设置窗得先补这一步。
+- `Wallpaper/shaders/HeroLiquid.frag`（液态切换）不属于上面那句"本仓库自己写的"：它是从 Codrops
+  "Liquid Distortion" demo 3 逐条移植的，文件头写明了参考页和抄自哪几段。参考站自己的条款这次没抓到
+  （那一页在 Cloudflare 后面，要 JavaScript 才打得开），所以这一格按它自己的来源走，CC0 那句不覆盖它。
 
 ## 目录
 
@@ -110,15 +138,34 @@ Engine/Desktop     显示器枚举（物理像素/DPI/刷新率）、WorkerW 层
 Engine/Packages   壁纸包、实例（编译后）、配置与分配
 Engine/Performance 帧率分配（每屏一路）、降功耗状态机
 Engine/App         应用外壳、托盘、命名管道服务端/客户端
+Wallpaper/         Qt 设置窗：Bridge（管道 ↔ QML）、LivePreview（大图那块的第二路实时流）、TrayMenu、
+                   OnlineSelfTest；`qml/` 是界面本体，`shaders/` 是两颗要 `qsb` 预编译的 .frag
+Online/            在线壁纸源：`OnlineSource` 读 `sources/*.json`（一家站一个文件），`OnlineFetcher`
+                   走网络；渲染器一点网络代码都没有
 Wallpapers/        matrixclock、snowfall（GPU 粒子）。2026-10-11 他点名只留这两张，其余十张
                    （aurora、binarydrift、datarain、embers、machinedrift、neonfall、ironwalk、
                    ironstand、ironline、ironwire）已删除。下面各表里以那些名字出现的读数都是
                    删除之前量下的历史证据，保留原样，照做会复现不了。
 Shaders/           Contract.hlsl（帧常量 + 噪声/色调工具）、Fullscreen.hlsl（全屏三角形）、
                    ParticleCommon.hlsl（48 字节粒子布局）
+resources/         应用图标（Wallpaper.ico / .png / app.rc）
 tools/             构建、桌面层级探针、屏幕截图与逐像素对比
+licenses/          由真实二进制生成的第三方随附说明（`tools/ffmpeg-notice.sh` 写它，别手改）
+LICENSE            本项目自己的代码：CC0 1.0 Universal 全文
 ```
 
 配套文档：`docs/实现与量测.md` 是实现的细节、这台机器上的实测与已知缺点（2026-10-16 从本文件搬出去，
 逐字未改）；`BACKLOG.md` 是待办，每条写了"怎么算做完"；`问题与解法.md` 是过程记录
 （症状 → 走过的弯路 → 根因 → 解法 → 判据 → 遗留），量具自己的坑也记在那一份里。
+
+## 许可证
+
+本项目自己写的代码与文档按 **CC0 1.0 Universal** 奉献到公有领域：随便用、改、商用、闭源再分发，
+不需要署名，也不需要通知。全文在根目录 [`LICENSE`](LICENSE)（官方原文，未改一字），人话版在
+<https://creativecommons.org/publicdomain/zero/1.0/>。
+
+三件 CC0 管不到的事，用之前先知道：
+
+- **专利和商标不在 CC0 里**（`LICENSE` 第 4.a 条明确写了这点）。
+- 程序跑起来还带着 **FFmpeg / Qt 各自的 LGPL 义务**，那两家的条款不由这句奉献改变 —— 见上面「声明」。
+- `Wallpaper/shaders/HeroLiquid.frag` 是从 Codrops 的参考页移植的，那一格按它自己的来源走。
