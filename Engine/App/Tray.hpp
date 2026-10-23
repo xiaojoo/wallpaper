@@ -67,7 +67,7 @@ public:
     bool installed() const { return installed_; }
     // Safe from any thread; the menu reads it when it opens.
     void Publish(const TrayState& s);
-    // Runs on the renderer's thread. n is 1..10, the row order the menu was built in.
+    // Runs on the renderer's thread. n is 1..9, the row order the menu was built in.
     bool HandleCommand(UINT n);
 
 private:

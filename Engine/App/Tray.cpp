@@ -48,7 +48,6 @@ struct Word { const wchar_t* zh; const wchar_t* en; };
 const Word wNext{L"下一张", L"Next"};
 const Word wPrev{L"上一张", L"Previous"};
 const Word wAuto{L"自动播放", L"Auto play"};
-const Word wStop{L"停止播放", L"Stop playing"};
 const Word wPauseWall{L"暂停壁纸", L"Pause the wallpaper"};
 const Word wMute{L"静音壁纸", L"Mute wallpaper"};
 const Word wRing{L"快捷键环", L"Shortcut ring"};
@@ -193,16 +192,18 @@ std::vector<Tray::Item> Tray::Build(const TrayState& s) const {
     add(wNext, 1, false, true);
     add(wPrev, 2, false, true);
     sep();
+    // One row, ticked when the rotation runs: two rows that are each other's opposite meant a click
+    // on 自动播放 while it was already on looked like nothing happened, and the tick that answers is
+    // on the other row. Every other switch here is one row.
     add(wAuto, 3, s.rotateOn, true);
-    add(wStop, 4, !s.rotateOn, true);
-    add(wPauseWall, 5, s.paused, s.pauseActionable);
-    add(wMute, 6, s.audioMuted, true);
+    add(wPauseWall, 4, s.paused, s.pauseActionable);
+    add(wMute, 5, s.audioMuted, true);
     sep();
-    add(wRing, 7, s.orbitOn, s.orbitActionable);
-    add(wPauseRing, 8, s.orbitHeld, s.orbitOn);
-    add(wHideIcons, 9, s.iconsHidden, true);
+    add(wRing, 6, s.orbitOn, s.orbitActionable);
+    add(wPauseRing, 7, s.orbitHeld, s.orbitOn);
+    add(wHideIcons, 8, s.iconsHidden, true);
     sep();
-    add(wQuit, 10, false, true);
+    add(wQuit, 9, false, true);
     return v;
 }
 
@@ -672,23 +673,23 @@ void Tray::ThreadMain() {
 // ------------------------------------------------------------------ the picks, on the main thread
 
 bool Tray::HandleCommand(UINT n) {
-    if (!app_ || n < 1 || n > 10) return false;
+    if (!app_ || n < 1 || n > 9) return false;
     const TrayState s = Snapshot();
     std::string line;
 
     switch (n) {
         case 1: line = R"({"cmd":"rotate","arg":"next"})"; break;
         case 2: line = R"({"cmd":"rotate","arg":"prev"})"; break;
-        case 3: line = R"({"cmd":"rotate","arg":"on"})"; break;
-        case 4: line = R"({"cmd":"rotate","arg":"off"})"; break;
-        // Every toggle is sent as an explicit on/off: these verbs do not understand "toggle", and
-        // the state the menu just showed is the state the user judged against.
-        case 5: line = s.paused ? R"({"cmd":"resume"})" : R"({"cmd":"pause"})"; break;
-        case 6: line = std::format(R"({{"cmd":"mute","arg":"{}"}})", s.audioMuted ? "off" : "on"); break;
-        case 7: line = std::format(R"({{"cmd":"orbit","arg":"{}"}})", s.orbitOn ? "off" : "on"); break;
-        case 8: line = std::format(R"({{"cmd":"orbithold","arg":"{}"}})", s.orbitHeld ? "off" : "on"); break;
-        case 9: line = std::format(R"({{"cmd":"icons","arg":"{}"}})", s.iconsHidden ? "off" : "on"); break;
-        case 10: line = R"({"cmd":"quit"})"; break;
+        // Every switch reads as on/off of its own row, decided from the state the menu just showed -
+        // these verbs do not understand "toggle", and a row whose tick moved while nothing else did is
+        // a dead control.
+        case 3: line = std::format(R"({{"cmd":"rotate","arg":"{}"}})", s.rotateOn ? "off" : "on"); break;
+        case 4: line = s.paused ? R"({"cmd":"resume"})" : R"({"cmd":"pause"})"; break;
+        case 5: line = std::format(R"({{"cmd":"mute","arg":"{}"}})", s.audioMuted ? "off" : "on"); break;
+        case 6: line = std::format(R"({{"cmd":"orbit","arg":"{}"}})", s.orbitOn ? "off" : "on"); break;
+        case 7: line = std::format(R"({{"cmd":"orbithold","arg":"{}"}})", s.orbitHeld ? "off" : "on"); break;
+        case 8: line = std::format(R"({{"cmd":"icons","arg":"{}"}})", s.iconsHidden ? "off" : "on"); break;
+        case 9: line = R"({"cmd":"quit"})"; break;
         default: return false;
     }
     // The row that was clicked and the command it turned into, both in the log: whether a pick
