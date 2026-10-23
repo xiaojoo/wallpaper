@@ -72,9 +72,17 @@ public:
 
 private:
     static LRESULT CALLBACK MenuWndProc(HWND h, UINT m, WPARAM w, LPARAM l);
+    // The popup's own window procedure. The menu is not a system menu any more: the shell's draws a
+    // 1 px #A0A0A0 frame with square corners and sizes its rows from the system font, and neither can
+    // be given the frame or the rows his reference has.
+    static LRESULT CALLBACK PopupWndProc(HWND h, UINT m, WPARAM w, LPARAM l);
     void ThreadMain();
     std::vector<Item> Build(const TrayState& s) const;
-    void Paint(LPDRAWITEMSTRUCT dis, const Item& it) const;
+    // The plate's colours: rows, ticks, group lines, the one-pixel frame.
+    void PaintPopup(HDC dc, const RECT& plate, const std::vector<Item>& items, int hover) const;
+    // Colours plus a computed alpha channel, handed to the compositor as one layered frame. This is
+    // what makes the corner a curve and the area outside it transparent instead of black.
+    void RebuildLayer(HWND h, const std::vector<Item>& items, int hover);
     TrayState Snapshot() const;
 
     NOTIFYICONDATAW nid_{};
@@ -82,6 +90,12 @@ private:
     // This thread's window; the icon is registered to IT. Atomic because Install() waits on it
     // from the renderer's thread while the menu thread is the one that creates it.
     std::atomic<HWND> menuWnd_{nullptr};
+    // The open popup, or null. The menu thread's own - Remove() asks that thread to close it instead
+    // of destroying it from the renderer's thread, which is the one thing a window cannot tolerate.
+    HWND popup_ = nullptr;
+    // Where the pointer was when the icon was clicked, handed from the tray callback to the message
+    // that actually opens the popup. The menu thread's own; no lock.
+    POINT pendingPt_{};
     Application* app_ = nullptr;
     std::wstring exeDir_;
     std::thread thread_;
