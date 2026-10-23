@@ -48,7 +48,13 @@ public:
     // the site, the speed to the clip.
     // `done` gets the error (empty on success) and the content type the site claimed, which is what
     // lets the caller refuse an html error page saved under a picture's name.
+    // `page` is the wallpaper's own page on the site. A source that only prints its full-size file
+    // there (OnlineSource::original) needs one more request: the page is fetched first, the regex
+    // picks the file out of it, and that url is what gets downloaded - with `page` as the Referer,
+    // because several sites answer 403 to their own image otherwise. Passing it costs nothing for a
+    // site that has no `original` rule.
     void download(OnlineSource& src, const QString& url, const QString& dest,
+                  const QString& page,
                   std::function<void(QString error, QString contentType)> done);
 
     // A source description may only talk to the host it names, and to the hosts its own urls use.
@@ -63,7 +69,7 @@ signals:
 private:
     struct FileJob {
         std::string sourceName;   // looked up again per job, so a rebuilt vector cannot dangle
-        QString url, dest;
+        QString url, dest, page;
         std::function<void(QString, QString)> done;
     };
 
@@ -81,6 +87,7 @@ private:
     struct SegFile {
         FileJob job;
         QString part, sidecar, contentType;
+        QString referer;        // what to send as Referer: some sites 403 their own images without it
         qint64 total = -1;      // what the site says the whole file is
         bool ranged = false;    // the site answered 206; a 200 means one plain stream
         QPointer<QNetworkReply> probe;   // the 1-byte ask that found out which of the two it is
@@ -97,6 +104,7 @@ private:
     void pumpFile();
     void openProbe();                   // the 1-byte ask that says how long the file is and whether
                                         // this host honours Range
+    void resolveOriginal();             // the detail page that names the full-size file, when there is one
     void planSegments();                  // after the first reply's headers: how many streams is it
     void openSegment(size_t i);           // one Range request for segment i
     void onSegmentBytes(size_t i);        // readyRead: move it into the file at its own offset

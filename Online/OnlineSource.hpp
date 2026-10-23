@@ -43,6 +43,9 @@ struct OnlineMeta {
     // and page 1 prints nothing but a Next arrow). The window draws a bare page number instead of a
     // numbered window when this is false, because the last cell of that window would be a lie.
     bool pagesKnown = true;
+    // Records this page carried but this side refused to name a file after - see KeyIsSafe in the .cpp.
+    int skippedKeys = 0;
+    std::string skippedExample;     // the first key that was refused, so the log line is diagnosable
 };
 
 // One of the choices a site offers (a resolution floor, a sort order). `values` is in the order the
@@ -55,6 +58,14 @@ struct OnlineOption {
     // these names come from the site, so they are data in the description rather than strings to
     // translate in the program.
     std::vector<std::pair<std::string, std::string>> labels;
+    // Some orders only exist once the reader has typed something. wallhaven answers an empty box with
+    // an EMPTY page while `meta.total` still claims 480208 matches on 20009 pages, for `relevance`,
+    // `newest` and `top` alike (measured 2026-10-17) - a relevance order has nothing to be relevant
+    // to. `needsQuery` names those values in the source file, and `withoutQuery` is what goes out
+    // while the box is empty. The chip keeps showing his choice; the substitution is reported where
+    // a page really does come back empty, not hidden behind a grid that looks merely small.
+    std::vector<std::string> needsQuery;
+    std::string withoutQuery;
     std::string labelFor(const std::string& value) const {
         for (const auto& [v, l] : labels)
             if (v == value) return l;
@@ -85,6 +96,9 @@ public:
     bool rollingPages() const { return rollingPages_; }
     // Non-empty when this site is read out of a web page instead of a JSON reply.
     const std::string& record() const { return recordRe_; }
+    // Non-empty when the full-size file is only written on the wallpaper's own page: one regex, one
+    // capture group, run against `OnlineItem::page` before the download. See `OnlineFetcher::download`.
+    const std::string& original() const { return originalRe_; }
     const std::vector<OnlineOption>& options() const { return options_; }
     bool setOption(const std::string& key, const std::string& value);
     std::string optionValue(const std::string& key) const;
@@ -99,7 +113,7 @@ public:
 
     // Reads one search reply into items. `error` says which part of the reply was missing, so a site
     // that changed its JSON fails with a name instead of an empty grid.
-    bool ParseSearch(const Json& root, std::vector<OnlineItem>& items, OnlineMeta& meta,
+    bool ParseSearch(const Json& root, int askedPage, std::vector<OnlineItem>& items, OnlineMeta& meta,
                      std::string& error) const;
     // A site that answers with a web page instead of JSON. `record` is one regex with capture groups;
     // a field whose description starts with '$' is one of those groups, and anything else is a
@@ -123,7 +137,7 @@ private:
     int minIntervalMs_ = 2000;
     bool acceptsQuery_ = true;
     bool rollingPages_ = false;
-    std::string recordRe_, lastPageRe_, slugFrom_, slugCut_, sizeFrom_;
+    std::string recordRe_, lastPageRe_, slugFrom_, slugCut_, sizeFrom_, originalRe_;
     bool slugBasename_ = false;
     std::vector<std::pair<std::string, std::string>> params_;      // name -> value template
     std::vector<std::pair<std::string, std::string>> fields_;      // item field -> path in the reply

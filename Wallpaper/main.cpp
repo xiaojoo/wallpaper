@@ -1,6 +1,7 @@
 // Wallpaper/main.cpp - the Qt settings window. It owns no wallpaper state: everything it
 // shows and changes goes through the renderer's control pipe.
 #include "Wallpaper/Bridge.hpp"
+#include "Wallpaper/CoverAccess.hpp"
 #include "Wallpaper/LivePreview.hpp"
 #include "Wallpaper/OnlineSelfTest.hpp"
 
@@ -33,9 +34,14 @@ int main(int argc, char* argv[]) {
     // the exe and takes the exit code. Scanned here, before anything is built, so the run opens no
     // window, no tray icon and no second poller on the pipe while he is using the real one.
     QString selfTest, selfSource;
+    // Presence of the flag is what asks for the self-test, not a non-empty word: the empty box is a
+    // case worth being able to run headlessly (it is the one where wallhaven returns no rows at all),
+    // and `--online-selftest ""` used to fall through and open the real window instead.
+    bool selfTestAsked = false;
     for (int i = 1; i + 1 < argc; ++i)
         if (QString::fromLocal8Bit(argv[i]) == QLatin1String("--online-selftest")) {
             selfTest = QString::fromLocal8Bit(argv[i + 1]);
+            selfTestAsked = true;
             if (i + 2 < argc) selfSource = QString::fromLocal8Bit(argv[i + 2]);
         }
     // QApplication, not QGuiApplication: the import button opens QFileDialog, which is a QWidget, and
@@ -45,7 +51,7 @@ int main(int argc, char* argv[]) {
     qInstallMessageHandler(logMessage);
     app.setOrganizationName(QStringLiteral("SmartWallpaper"));
     app.setApplicationName(QStringLiteral("SmartWallpaper"));
-    if (!selfTest.isEmpty()) {
+    if (selfTestAsked) {
         sw::Bridge probe;
         const QString out = QDir(QCoreApplication::applicationDirPath())
                                 .absoluteFilePath(QStringLiteral("online-selftest.txt"));
@@ -80,9 +86,17 @@ int main(int argc, char* argv[]) {
         // 在线 mode and asks the site, and nothing here imports, which stays the one click.
         else if (a == "--online-search" && i + 1 < argc)
             bridge.setOnlineQuery(QString::fromLocal8Bit(argv[++i]));
+        // Which site the 在线 page opens on. There is more than one now, and the picker that switches
+        // between them is a self-drawn control the click harness cannot reach, so a regression check
+        // on a named source would otherwise have to aim at that menu blind.
+        else if (a == "--online-source" && i + 1 < argc)
+            bridge.setOnlineSource(QString::fromLocal8Bit(argv[++i]));
     }
 
     QQmlApplicationEngine engine;
+    // QML's own image loader gets the network manager that knows about Referers, so a site whose CDN
+    // rejects a bare request still answers the card strip. See Wallpaper/CoverAccess.hpp.
+    engine.setNetworkAccessManagerFactory(new sw::CoverAccessFactory);
     engine.rootContext()->setContextProperty(QStringLiteral("Bridge"), &bridge);
     qmlRegisterType<sw::LivePreview>("SW", 1, 0, "LivePreview");
     // Loaded from disk next to the exe: editing Main.qml then restarting is enough to see the

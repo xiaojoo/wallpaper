@@ -1727,7 +1727,7 @@ ApplicationWindow {
                                       ? (st === "imported" ? trs("online_imported") + " " + card.detail
                                          : st === "downloading"
                                               ? trs("online_downloading") + " "
-                                                + Math.round(Bridge.onlineProgress * 100) + "%"
+                                                + Bridge.onlineProgressText
                                          : st === "importing" ? trs("online_importing")
                                          : trs("online_import"))
                                       : up ? trs("current") : trs("set_as_wallpaper")
@@ -2226,6 +2226,9 @@ ApplicationWindow {
                                     visible: Bridge.onlineRungs.length > 0
                                     onPicked: function (v) { Bridge.setPreviewRung(v) }
                                 }
+                                // 代理不在这里出现：程序里既没有可填的地址，也没有需要看一眼的状态。
+                                // 走的就是 Windows 自己那一条（Bridge::applyOnlineProxy 问
+                                // systemProxyForQuery 拿到的答案），要改去系统设置里改。
 
                             }
                         }
@@ -2313,7 +2316,7 @@ ApplicationWindow {
                                 visible: text.length > 0
                                 text: Bridge.onlinePendingState === "downloading"
                                           ? trs("online_downloading") + " "
-                                            + Math.round(Bridge.onlineProgress * 100) + "%"
+                                            + Bridge.onlineProgressText
                                   : Bridge.onlinePendingState === "importing" ? trs("online_importing")
                                   : Bridge.onlinePendingState === "failed"
                                         ? trs("online_download_failed") + ": " + Bridge.onlinePendingDetail
@@ -3894,7 +3897,10 @@ ApplicationWindow {
                                     color: "#0A0D12"
                                     clip: true
 
+                                    // 这一格也是"图还没到"的地方：以前是 #0A0D12 一块死色。
+                                    EmptyPlate { visible: slidePic.status !== Image.Ready }
                                     Image {
+                                        id: slidePic
                                         anchors.fill: parent
                                         source: car.item && car.item.thumb !== undefined ? car.item.thumb : ""
                                         fillMode: Image.PreserveAspectCrop

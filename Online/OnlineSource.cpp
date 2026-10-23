@@ -8,6 +8,23 @@
 namespace sw {
 namespace {
 
+// A card's key is not just a label: it becomes the file name the picture is downloaded to
+// (`<source>-<key>.<ext>` under cache/online) and the id the card is addressed by. `key` is whatever
+// the site printed - numeric ids for five of them, an arbitrary slug for wallpapers.com - and
+// `QDir::absoluteFilePath` concatenates without cleaning, so `../../..` in a slug would be a write
+// outside the cache, with this user's rights, triggered by nothing but browsing a page. Same allowlist
+// the hand-typed source *name* already gets, applied to what arrives over the network: a `/` or `\`
+// cannot match, and the first character has to be alphanumeric, so no prefix of the name can be `..`.
+//
+// The length bound is 120 because the first page measured (2026-10-16) carries one real wallpaper whose
+// slug is 94 characters - at 80 this function ate it and the grid quietly showed 58 of 59. The cap only
+// has to keep `<root>\cache\online\<source>-<key>.<ext>` inside MAX_PATH, and 120 does that with room
+// for a long install path.
+bool KeyIsSafe(const std::string& k) {
+    static const std::regex re("^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$", std::regex_constants::optimize);
+    return std::regex_match(k, re);
+}
+
 // `a.b.c` through nested objects. nullptr when any step is missing or is not an object. Arrays are
 // not walked by index on purpose: every reply this is used against hands back named members, and a
 // rule nobody has to satisfy is a rule that will quietly rot.
@@ -93,8 +110,15 @@ std::string OnlineSource::Expand(const std::string& value, const std::string& us
     // dropped because it is empty is exactly what BuildSearch already knows how to do.
     out = ReplaceAll(out, "{nextpage}", page <= 1 ? std::string() : std::to_string(page));
     out = ReplaceAll(out, "{page}", std::to_string(page));
-    for (const auto& o : options_)
-        out = ReplaceAll(out, "{" + o.key + "}", o.current);
+    for (const auto& o : options_) {
+        std::string v = o.current;
+        // The box is empty and his order only means something with a term: ask the site the way it
+        // can answer instead of showing him a grid that says "no picture".
+        if (userQuery.empty() && !o.withoutQuery.empty()
+            && std::find(o.needsQuery.begin(), o.needsQuery.end(), v) != o.needsQuery.end())
+            v = o.withoutQuery;
+        out = ReplaceAll(out, "{" + o.key + "}", v);
+    }
     return out;
 }
 
@@ -147,6 +171,8 @@ bool OnlineSource::ParseHtml(const std::string& body, int askedPage, std::vector
         if (f.empty()) return std::string();
         return f[0] == '$' ? group(m, f) : ExpandItem(f, vars);
     };
+    int unsafeKeys = 0;
+    std::string unsafeExample;
     for (auto it = first; it != end; ++it) {
         const std::smatch& m = *it;
         std::vector<std::pair<std::string, std::string>> vars;
@@ -169,6 +195,7 @@ bool OnlineSource::ParseHtml(const std::string& body, int askedPage, std::vector
         OnlineItem o;
         o.key = keyGroup < int(m.size()) ? m[keyGroup].str() : std::string();
         if (o.key.empty()) continue;
+        if (!KeyIsSafe(o.key)) { ++unsafeKeys; if (unsafeExample.empty()) unsafeExample = o.key; continue; }
         o.title = itemField(m, vars, "title");
         if (o.title.empty()) o.title = o.key;
         o.page = itemField(m, vars, "page");
@@ -206,7 +233,15 @@ bool OnlineSource::ParseHtml(const std::string& body, int askedPage, std::vector
     // A site that links only its neighbour page can never say how many there are; `lastPage` above is
     // then just "there is one more", which is enough for the arrows and not enough for a number.
     meta.pagesKnown = !rollingPages_;
-    if (items.empty()) error = "the site returned no picture on this page";
+    // A record dropped for an unsafe key has to leave a number behind: "the grid shows 58 instead of
+    // 59" with nothing saying why is exactly the shape of the motionbgs bug, where a too-narrow
+    // matcher quietly ate two thirds of a page and the grid just looked smaller.
+    meta.skippedKeys = unsafeKeys;
+    meta.skippedExample = unsafeExample;
+    if (items.empty()) error = unsafeKeys > 0
+        ? std::format("the site put {} picture(s) on this page and named {} of them with something "
+                      "that is not a file name", int(items.size()) + unsafeKeys, unsafeKeys)
+        : std::string("the site returned no picture on this page");
     return !items.empty();
 }
 
@@ -225,9 +260,12 @@ OnlineSource::Request OnlineSource::BuildSearch(const std::string& userQuery, in
     return r;
 }
 
-bool OnlineSource::ParseSearch(const Json& root, std::vector<OnlineItem>& items, OnlineMeta& meta,
+bool OnlineSource::ParseSearch(const Json& root, int askedPage, std::vector<OnlineItem>& items, OnlineMeta& meta,
                                std::string& error) const {
-    const Json* list = root.find(listPath_);
+    // `list: "."` means the reply *is* the array - which is how a Danbooru-ish `/post.json` answers:
+    // twenty objects at the top level and no envelope to name a path through.
+    const bool rootIsList = listPath_ == "." || listPath_.empty();
+    const Json* list = rootIsList ? &root : root.find(listPath_);
     if (!list || !list->isArray()) {
         error = std::format("the reply has no list under '{}'", listPath_);
         return false;
@@ -245,27 +283,64 @@ bool OnlineSource::ParseSearch(const Json& root, std::vector<OnlineItem>& items,
         error = std::format("{} names no 'key' and 'image' field", name_);
         return false;
     }
+    int unsafeKeys = 0;
+    std::string unsafeExample;
     for (const Json& it : list->items()) {
         if (!it.isObject()) continue;
+        // A field that contains `{` is a template rather than a path into the reply, and the only
+        // per-item name it can use is the key. konachan needs this and nothing else does: its JSON
+        // carries the pictures, the sizes and the md5, but never the url of the post they belong to,
+        // and that url is `https://konachan.com/post/show/<id>` with the id it does give.
+        const auto V = [&it, this](const std::string& f, const std::string& key) {
+            return f.find('{') == std::string::npos ? Text(it, f)
+                                                    : ExpandItem(f, { { "key", key } });
+        };
         OnlineItem o;
         o.key = Text(it, fKey);
-        o.image = Text(it, fImage);
-        if (o.key.empty() || o.image.empty()) continue;   // not a wallpaper, whatever it is
-        o.title = fTitle.empty() ? o.key : Text(it, fTitle);
-        o.thumb = fThumb.empty() ? o.image : Text(it, fThumb);
+        if (o.key.empty()) continue;
+        o.image = V(fImage, o.key);
+        if (o.image.empty()) continue;   // not a wallpaper, whatever it is
+        if (!KeyIsSafe(o.key)) { ++unsafeKeys; if (unsafeExample.empty()) unsafeExample = o.key; continue; }
+        o.title = fTitle.empty() ? o.key : V(fTitle, o.key);
+        if (o.title.empty()) o.title = o.key;
+        o.thumb = fThumb.empty() ? o.image : V(fThumb, o.key);
         if (o.thumb.empty()) o.thumb = o.image;
-        o.hero = fHero.empty() ? std::string() : Text(it, fHero);
-        o.page = fPage.empty() ? std::string() : Text(it, fPage);
+        o.hero = fHero.empty() ? std::string() : V(fHero, o.key);
+        o.page = fPage.empty() ? std::string() : V(fPage, o.key);
         o.width = int(Number(it, fW));
         o.height = int(Number(it, fH));
         o.bytes = fBytes.empty() ? 0 : Number(it, fBytes);
         o.mime = fMime.empty() ? std::string() : Text(it, fMime);
+        if (o.mime.empty())
+            // Not every API prints a content type next to the file. konachan gives `file_ext` and
+            // nothing else, and a card with no mime is a card the window cannot tell picture from
+            // clip - so read it off the url being fetched, which is the same rule the HTML path uses.
+            if (const char* m = MimeForExtension(ExtensionFor(o.image))) o.mime = m;
         items.push_back(std::move(o));
     }
-    meta.page = int(Number(root, pagePath_, 1));
+    // The page the site is answering is the page that was asked for unless the reply names it: an API
+    // that returns a bare array names nothing, and defaulting to 1 there would snap the pager back to
+    // the first page on every later one.
+    meta.page = int(Number(root, pagePath_, askedPage));
     meta.lastPage = int(Number(root, lastPagePath_, 1));
+    if (rollingPages_) {
+        // Same deal as the HTML path: an API that answers with a bare array cannot say how many pages
+        // there are, and a page count taken from "this one had 20 items" would be 1 - which the pager
+        // draws as a dead-end and he reads as "the site only has twenty pictures".
+        meta.pagesKnown = false;
+        meta.lastPage = meta.page;
+    }
     meta.total = Number(root, totalPath_, long long(items.size()));
-    if (items.empty()) error = "the site returned no picture for this search";
+    meta.skippedKeys = unsafeKeys;
+    meta.skippedExample = unsafeExample;
+    if (items.empty())
+        // "no picture for this search" is a lie when the site just said how many there are. wallhaven
+        // answers an empty page with `meta.total` still at 480208 on 20009 pages, and the honest
+        // sentence is that contradiction, not a shrug about the keyword.
+        error = meta.total > 0
+            ? std::format("the site says there are {} matches on {} page(s) but sent none on page {}",
+                          meta.total, meta.lastPage, meta.page)
+            : std::string("the site returned no picture for this search");
     return !items.empty();
 }
 
@@ -318,6 +393,19 @@ std::vector<OnlineSource> OnlineSource::LoadAll(const std::wstring& dir, std::ve
         s.slugBasename_ = j.boolOr("slug_basename", false);
         s.slugCut_ = j.strOr("slug_cut");
         s.sizeFrom_ = j.strOr("size");
+        // Some sites only print the full-size file on the wallpaper's own page. `original` is one
+        // regex with one capture group, run against that page; a relative hit is resolved against the
+        // page url. Declaring it also makes the download carry that page as its `Referer`, which is
+        // not decoration: wallpapershome answers 403 to the 4K file without it and 200 / 4,036,543
+        // bytes / 3840x2160 with it (measured 2026-10-16).
+        s.originalRe_ = j.strOr("original");
+        if (!s.originalRe_.empty()) {
+            try { std::regex probe{s.originalRe_}; }
+            catch (const std::regex_error& e) {
+                skipped.push_back(name + ": bad 'original': " + e.what());
+                continue;
+            }
+        }
         if (!s.recordRe_.empty()) {
             // The page url is the listing, and the page number rides on it as a query the site itself
             // links to - `params` would put it in the query string of a search endpoint that is not here.
@@ -349,6 +437,9 @@ std::vector<OnlineSource> OnlineSource::LoadAll(const std::wstring& dir, std::ve
             o.current = v.strOr("default", o.values.empty() ? std::string() : o.values.front());
             for (const auto& [lname, lab] : v.at("labels").members())
                 if (lab.isString()) o.labels.emplace_back(lname, lab.asString());
+            for (const auto& it : v.at("needs_query").items())
+                if (it.isString()) o.needsQuery.push_back(it.asString());
+            o.withoutQuery = v.strOr("without_query", std::string());
             if (o.values.empty()) continue;
             if (std::find(o.values.begin(), o.values.end(), o.current) == o.values.end())
                 o.current = o.values.front();

@@ -159,6 +159,7 @@ if(Qt6_FOUND)
     Wallpaper/main.cpp
     resources/app.rc
     Wallpaper/Bridge.cpp
+    Wallpaper/CoverAccess.cpp
     Wallpaper/LivePreview.cpp
     Wallpaper/OnlineSelfTest.cpp
     Online/OnlineSource.cpp

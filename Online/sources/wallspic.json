@@ -1,0 +1,70 @@
+{
+  "_comment": [
+    "wallspic.com, described 2026-10-16 from the site as it answers from this machine.",
+    "",
+    "WHY THE HOMEPAGE LOOKED LIKE A JS SHELL AND IS NOT: the homepage carries 2 <img> tags, both site",
+    "chrome. The album pages are a different story - each one publishes a schema.org ImageObject array in",
+    "a <script type=\"application/ld+json\"> block: 30 items, each with description, datePublished,",
+    "contentUrl (the full-size file), fileFormat and a thumbnail object. That is the site declaring its",
+    "own pictures for crawlers, so this file reads the declaration instead of guessing at markup.",
+    "",
+    "ROBOTS: /album/* is allowed; /upload, /search, /profile, /account and /api are disallowed under",
+    "every language prefix - so ask=false (the search box would be a disallowed path) and the album list",
+    "below is exactly what the site's own album page links, resolution albums first.",
+    "",
+    "page: the album url, not a per-wallpaper page. The JSON-LD names no such page and the album page",
+    "links no per-item url we could read, so the origin written into the package points at the album the",
+    "picture was taken from rather than at an invented one.",
+    "key: the numeric id the file path repeats twice (/181827/181827-christmas_tree-...-3840x2160.jpg).",
+    "size: taken from the file name's own rung, so the card claims what the file actually is.",
+    "ext: fileFormat is image/jpeg today; the field is captured so a png album shows up honestly.",
+    "min_interval_ms 3000: one page is 30 pictures and 4 MB each; nothing here needs to be faster.",
+    "key: the numeric id the path repeats twice (/crops/7/2/8/1/8/181827/181827-<name>-3840x2160.jpg) -",
+    "the id is the last of the crop directories and again the file's own stem.",
+    "The file name's own parts are hyphen-separated, so the character class that eats it has to allow '-'; leaving it out matched 0 records while Python and the browser both show the page fine, which is the kind of failure that reads as 'the site changed'.",
+    "The CDN host in the pattern is img<N>.wallspic.com with one digit - if they ever add img10 the",
+    "record stops matching and the grid fails with 'no records', which is the loud kind of failure.",
+    "",
+    "FILES HAVE NO LENGTH: img1.wallspic.com answers a Range probe with 200 and 'Transfer-Encoding:",
+    "chunked' and never a Content-Length; HEAD returns an empty body (measured 2026-10-16). So every",
+    "wallspic file goes down the one open-ended stream - ranges would buy nothing here. The first of",
+    "two attempts also died 9.5 s in without a single byte ('Connection closed'), which the hero retry",
+    "already covers; the 3.2 MB file that did arrive measured byte-identical to a fresh curl of the",
+    "same url."
+  ],
+  "name": "wallspic",
+  "label": "wallspic",
+  "homepage": "https://wallspic.com",
+  "url": "https://wallspic.com/album/{album}",
+  "ask": false,
+  "record": "\"description\":\"([^\"]*)\",\"datePublished\":\"[^\"]*\",\"contentUrl\":\"(https://img\\d\\.wallspic\\.com/[a-z]+/[0-9/]*?(\\d+)/\\3-[a-z0-9_-]+?-(\\d+x\\d+)\\.jpg)\",\"fileFormat\":\"image/jpeg\",\"thumbnail\":\\{\"@context\":\"[^\"]*\",\"@type\":\"ImageObject\",\"contentUrl\":\"([^\"]+)\"",
+  "params": {},
+  "fields": {
+    "title": "$1",
+    "image": "$2",
+    "key": "$3",
+    "res": "$4",
+    "thumbPath": "$5",
+    "thumb": "{thumbPath}",
+    "page": "https://wallspic.com/album/{album}"
+  },
+  "size": "{res}",
+  "ext": "jpg",
+  "min_interval_ms": 3000,
+  "options": {
+    "album": {
+      "values": [
+        "3840x2160",
+        "1920x1080",
+        "1440x2960",
+        "best_wallpapers",
+        "popular",
+        "cars",
+        "for_mobile",
+        "full-hd-android",
+        "full-hd-iphone"
+      ],
+      "default": "3840x2160"
+    }
+  }
+}

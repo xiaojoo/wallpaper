@@ -13,6 +13,7 @@
 #include <QUrlQuery>
 
 #include <algorithm>
+#include <regex>
 #include <memory>
 #include <optional>
 
@@ -182,7 +183,7 @@ void OnlineFetcher::pumpSearch(OnlineSource& src, const QString& query, int page
             std::string parseError;
             const auto json = Json::Parse(text, parseError);
             if (!json) { fail(QString::fromStdString(parseError)); return; }
-            parsed = src.ParseSearch(*json, items, meta, err);
+            parsed = src.ParseSearch(*json, page, items, meta, err);
         } else {
             parsed = src.ParseHtml(text, page, items, meta, err);
         }
@@ -195,15 +196,22 @@ void OnlineFetcher::pumpSearch(OnlineSource& src, const QString& query, int page
         m.insert("lastPage", meta.lastPage);
         m.insert("total", qlonglong(meta.total));
         m.insert("pagesKnown", meta.pagesKnown);
+        if (meta.skippedKeys > 0)
+            qWarning("online: %s put %d cards on the page and %d of them named a file with something "
+                     "this side will not write to disk (first one, %d chars: %s)",
+                     name.toUtf8().constData(), int(items.size()) + meta.skippedKeys,
+                     meta.skippedKeys, int(meta.skippedExample.size()),
+                     meta.skippedExample.c_str());
         emit searched(name, rows, m, QString());
     });
 }
 
 void OnlineFetcher::download(OnlineSource& src, const QString& url, const QString& dest,
+                             const QString& page,
                              std::function<void(QString error, QString contentType)> done) {
     // One file at a time, in the order they were asked for: 24 tiles clicked fast is how a personal
     // app gets its address rate limited at a site that publishes a per-minute budget.
-    fileQueue_.push_back(FileJob{src.name(), url, dest, std::move(done)});
+    fileQueue_.push_back(FileJob{src.name(), url, dest, page, std::move(done)});
     pumpFile();
 }
 
@@ -247,10 +255,60 @@ void OnlineFetcher::pumpFile() {
     }
 
     if (!cur_->segs.empty()) {
+        emit progress(cur_->job.url, 0.0, bytesWritten(), cur_->total);
         for (size_t i = 0; i < cur_->segs.size(); ++i) openSegment(i);
         return;
     }
+    // A site that only names its full-size file on the wallpaper's own page has to be asked there
+    // first. That request rides the same single slot, so it is inside the same politeness as the
+    // download behind it.
+    OnlineSource* os = source(QString::fromStdString(job.sourceName));
+    if (os && !os->original().empty() && !job.page.isEmpty()) { resolveOriginal(); return; }
     openProbe();
+}
+
+// The detail page, read with the source's `original` regex. Relative hits resolve against the page's
+// own url, and the page becomes the download's Referer on the way out - the same two facts the site
+// checks: without the request it has no file to ask for, without the header it 403s the answer.
+void OnlineFetcher::resolveOriginal() {
+    OnlineSource* src = source(QString::fromStdString(cur_->job.sourceName));
+    QNetworkRequest r(QUrl(cur_->job.page));
+    r.setRawHeader("User-Agent", src ? QByteArray::fromStdString(src->userAgent()) : QByteArray());
+    r.setTransferTimeout(60000);
+    QNetworkReply* reply = nam_.get(r);
+    cur_->probe = reply;
+    QObject::connect(reply, &QNetworkReply::finished, this, [this, reply, src] {
+        if (!cur_) return;
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body = reply->readAll();
+        const QString netErr = reply->error() == QNetworkReply::NoError ? QString() : reply->errorString();
+        reply->deleteLater();
+        cur_->probe = nullptr;
+        if (!netErr.isEmpty()) { finishFile(netErr); return; }
+        if (status < 200 || status >= 300) {
+            finishFile(QStringLiteral("the wallpaper's page answered http %1").arg(status));
+            return;
+        }
+        std::smatch m;
+        const std::string text = QString::fromUtf8(body).toStdString();
+        std::regex re;
+        try { re.assign(src->original(), std::regex_constants::optimize); }
+        catch (const std::regex_error&) { finishFile(QStringLiteral("'original' is not a usable expression")); return; }
+        if (!std::regex_search(text, m, re) || m.size() < 2) {
+            finishFile(QStringLiteral("the wallpaper's page does not name the full-size file"));
+            return;
+        }
+        QString hit = QString::fromStdString(m[1].str());
+        if (hit.startsWith(QLatin1String("//"))) hit = QStringLiteral("https:") + hit;
+        const QString abs = QUrl(cur_->job.page).resolved(QUrl(hit)).toString();
+        if (!sameHost(abs, QString::fromStdString(src->homepage()))) {
+            finishFile(QStringLiteral("the page named a file on another host: %1").arg(abs));
+            return;
+        }
+        cur_->job.url = abs;
+        cur_->referer = cur_->job.page;
+        openProbe();
+    });
 }
 
 // What the first request of an unknown file is for: how long is it, and does this host honour Range
@@ -262,6 +320,7 @@ void OnlineFetcher::openProbe() {
     OnlineSource* src = source(QString::fromStdString(cur_->job.sourceName));
     r.setRawHeader("User-Agent", src ? QByteArray::fromStdString(src->userAgent()) : QByteArray());
     r.setTransferTimeout(60000);
+    if (!cur_->referer.isEmpty()) r.setRawHeader("Referer", cur_->referer.toUtf8());
     r.setRawHeader("Range", "bytes=0-0");
     QNetworkReply* reply = nam_.get(r);
     cur_->probe = reply;
@@ -288,9 +347,15 @@ void OnlineFetcher::openProbe() {
             finishFile(QStringLiteral("http %1").arg(status));
             return;
         }
+        // A chunked CDN never says how long its body is, and that is not a reason to refuse the file.
+        // Measured 2026-10-16 on wallspic: a Range probe answers 200 with `Transfer-Encoding: chunked`
+        // and no Content-Length at all (HEAD returns an empty response). Treat the missing length as
+        // unknown and take the bytes as they come - one stream, no ranges, no resume record. The price
+        // is that the hole check at the bottom of onSegmentFinished has no total to compare against, so
+        // a body that stops early is only caught by Qt noticing the chunk stream never terminated.
         if (cur_->total <= 0) {
-            finishFile(QStringLiteral("the site would not say how long the file is"));
-            return;
+            cur_->total = -1;
+            cur_->ranged = false;     // a 206 that does not name a total is worse than a 200
         }
         planSegments();
         for (size_t i = 0; i < cur_->segs.size(); ++i) openSegment(i);
@@ -309,6 +374,9 @@ void OnlineFetcher::openSegment(size_t i) {
     // what makes the split real - the gain measured with python (148 KB/s on one connection,
     // 385 KB/s on six) only exists when there are six connections.
     r.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+    // The same header the probe had to carry: a site that guards its files checks every request for
+    // it, and a range request is one more request.
+    if (!cur_->referer.isEmpty()) r.setRawHeader("Referer", cur_->referer.toUtf8());
     const qint64 from = s.begin + s.written;
     // "bytes=" is part of the header, not decoration: sent without it the request is a Range header the
     // server does not understand, answers 200 with the whole file, and every stream then writes the
@@ -340,6 +408,13 @@ void OnlineFetcher::openSegment(size_t i) {
 // offsets the previous one wrote - which is what makes the cursors on disk mean anything.
 void OnlineFetcher::planSegments() {
     const qint64 total = cur_->total;
+    if (total < 0) {
+        // One stream with no end: every Segment default already says 0..-1.
+        cur_->segs = std::vector<Segment>(1);
+        qWarning("online: %s has no length, taken in one stream", cur_->job.url.toUtf8().constData());
+        emit progress(cur_->job.url, 0.0, 0, total);
+        return;
+    }
     const int n = (cur_->ranged && total >= kSegmentFromBytes) ? streamCount() : 1;
     std::vector<Segment> plan;
     plan.resize(size_t(n));
@@ -348,6 +423,9 @@ void OnlineFetcher::planSegments() {
         plan[size_t(i)].end = (i + 1 == n ? total : total * (i + 1) / n) - 1;
     }
     cur_->segs = std::move(plan);
+    // Tell the card the length before the first byte lands, so it can decide what to show for it
+    // rather than painting "0.0 MB" for one frame and a percent afterwards.
+    emit progress(cur_->job.url, 0.0, 0, total);
     qWarning("online: %s is %lld bytes, taken in %d range%s", cur_->job.url.toUtf8().constData(),
              static_cast<long long>(cur_->total), int(cur_->segs.size()),
              cur_->segs.size() == 1 ? "" : "s");
@@ -360,7 +438,9 @@ void OnlineFetcher::onSegmentBytes(size_t i) {
     const QByteArray chunk = s.reply->readAll();
     if (chunk.isEmpty()) return;
     if (!cur_->file || !cur_->file->isOpen()) return;
-    const qint64 room = (s.end - s.begin + 1) - s.written;
+    // An open-ended stream (no length known) has no room to run out of; the clamp below would
+    // otherwise compute 0 - written and drop every byte the site sends.
+    const qint64 room = s.end < 0 ? chunk.size() : (s.end - s.begin + 1) - s.written;
     if (room <= 0) return;              // the range is full; anything else this stream sends is not ours
     const qint64 take = std::min<qint64>(room, chunk.size());
     cur_->file->seek(s.begin + s.written);
@@ -447,10 +527,15 @@ void OnlineFetcher::finishFile(const QString& error) {
     const qint64 ms = nowMs() - f.startedMs;
     const int streams = int(f.segs.size());
     cur_.reset();
-    qWarning("online: %s %lld of %lld bytes in %lld ms over %d stream%s (%.0f KB/s)",
-             error.isEmpty() ? "got" : "stopped at", static_cast<long long>(got),
-             static_cast<long long>(total), static_cast<long long>(ms), streams,
-             streams == 1 ? "" : "s", ms > 0 ? got / 1024.0 / (ms / 1000.0) : 0.0);
+    if (total > 0)
+        qWarning("online: %s %lld of %lld bytes in %lld ms over %d stream%s (%.0f KB/s)",
+                 error.isEmpty() ? "got" : "stopped at", static_cast<long long>(got),
+                 static_cast<long long>(total), static_cast<long long>(ms), streams,
+                 streams == 1 ? "" : "s", ms > 0 ? got / 1024.0 / (ms / 1000.0) : 0.0);
+    else
+        qWarning("online: %s %lld bytes of an unlisted length in %lld ms (%.0f KB/s)",
+                 error.isEmpty() ? "got" : "stopped at", static_cast<long long>(got),
+                 static_cast<long long>(ms), ms > 0 ? got / 1024.0 / (ms / 1000.0) : 0.0);
 
     if (!error.isEmpty()) {
         // Keep the bytes: that is the point of the sidecar. Only a file we never opened can be

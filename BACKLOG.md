@@ -961,3 +961,163 @@ Application::BuildThumbnails ← Application::Start
    `setOnlineSource` + `onlineSearch()` 两件事，所以改分类/分辨率反而会出图。判据：点站名之后 `ui.log` 里应当立刻
    出现一条该站的 `online: GET`，且格子不为空。没做的原因：这是浏览页自己的既有行为，和这次"在线片子实时播放"
    是两件事，混在一起改会把下载闸门的复量一起弄脏。
+
+## 他给的 15 个壁纸源候选：逐家取证（2026-10-16 02:20–02:40）
+
+一台机器一个结论，全部是这台机直连（Clash 关着，`ProxyEnable=0`）的读数，UA 是 Chrome/125 桌面串。
+`curl -m 12..30`，000 = 到点没回。
+
+| 站 | 首页 | robots.txt | 结论 |
+|---|---|---|---|
+| wallhaven.cc | 已在用 | — | **已支持**（`Online/sources/wallhaven.json`，走它的 JSON 接口） |
+| motionbgs.com | 已在用 | — | **已支持**（他贴的那条是站内一张卡片） |
+| mylivewallpapers.com | 307 无限循环 | 200（12 disallow / 13 allow） | **加不了**：Sucuri CloudProxy 的 JS 挑战（响应体里就是 `sucuri_cloudproxy_js` + `String.fromCharCode` 拼 cookie 再 reload）。Qt Network 不执行 JS，拿不到列表 |
+| wallspic.com | 200 64 KB | 200（35 disallow） | **已加（同一晚，见下）**：首页确实只有 2 个 `<img>`，但**专辑页**在 `<script type="application/ld+json">` 里自己声明了全部图片（schema.org ImageObject 数组），读这份声明就够了 |
+| wallpapers.com/4k | 200 503 KB | 200（28 disallow） | **已加（同一晚，见下）**：`www` 301 到裸域；原图能从列表页的 `data-key` 直接拼，不用进详情页 |
+| wallpaperscraft.com | 我猜的两个列表路径都 404 | 200（1 disallow） | 待查：要先找到它真正的列表 URL |
+| wallhere.com | **403** | 403 | **加不了**：反爬直接拒（连 robots.txt 都 403） |
+| wallpapershome.com | 200 48 KB | **403** | 可解析但要先补一层能力：列表是干净 HTML（`<a href="…-29900.html"><img src="/images/pages/ico_h/29900.jpg">`），**原图只在详情页**（`…/images/wallpapers/spring-beauty-wallpaper-3840x2160-vibrant-flowers-sunny-skies-29900.jpg`，文件名里的 slug 和列表的 slug 不一样，推不出来）。现在的源格式没有"进详情页取 image"这一步 → 要先给 `OnlineSource` 加一个 detail 层 |
+| www.desktophut.com | 000（12 s 超时） | 000 | **接不了，缺的是代码不是数据**（代理那条今晚已做；它是纯视频站且原片只在详情页）→ 见下面 05:00 那一节 |
+| konachan.com | 000 | 000 | **已加（代理那条做完之后）**：走系统代理 200 / 1.3 s，`post.json` 回裸数组，`tags=rating:safe` 是真过滤 |
+| yande.re | 000 | 000 | **两条路都不通**（直连 12 s 超时；走代理 5 s 断开） |
+| anime-pictures.net | 000 | 000 | 同上，两条路都不通 |
+| www.artstation.com | 000 | 200 但内容 403 | **不该加**：代理下也是 403；而且它是画师作品集，批量抓图违反站点条款 |
+| typemoon.com/book | 200 27 KB | 404 | **不是壁纸站**：出版社书目页，没有可下载的壁纸列表与原图 |
+| e-shuushuu.net | 200 84 KB | 200（1 disallow） | **不做**：列表能解析（`/post/index.json` 404，只能吃 HTML），但它**没有任何服务端分级过滤**——五个参数探针逐字节返回同一批，挡不住成人档 |
+
+**要他点的三件事**：
+1. 代理依赖的两家（desktophut、konachan）要不要加？加了之后不开 Clash 就是空页。可选做法：应用里加一条"在线源走指定代理"的设置（现在完全没有）。
+2. 图站四家（yande.re / konachan / e-shuushuu / anime-pictures）都有成人内容。要做的话必须跟 wallhaven 一样带**内容分级**开关，默认挡掉成人档——这条按哪一档默认开、哪一档默认关，要他定。
+3. ~~wallpapershome 值不值得为它给源格式加一层 detail 抓取？~~ **已做（同一晚）**：`OnlineSource` 多一条
+   `original` 正则，`OnlineFetcher::download` 多收一个卡片页，在同一单槽队列里先取详情页、正则拿到原图、
+   校验同主机，再走分段下载，并且把卡片页当 Referer 带上。`Online/sources/wallpapershome.json` 已加，
+   `--online-selftest nature wallpapershome` 全绿：rows=16、page=1/2、thumb=ico_h、hero 取回
+   **4,036,543 B**（就是 curl 带 referer 量到的那个数）、import→local_14→删回 15。
+   两个当时踩到的写法坑记在文件的 `_comment` 里：`"$3"` 只能整字段展开、不能嵌在模板里（写
+   `{homepage}$3` 会把字面量 `$3` 发出去）；`{nextpage}` 在第一页是空的，而这家裸 `/category/` 只印 8 张
+   且不给邻居链接，要用 `{page}` 才有 16 张和 下一页。
+   **wallpaperscraft 也已加（同一晚）**：`--online-selftest x wallpaperscraft` 全绿 —— rows=15、
+   thumb=…_300x168.jpg、image=同一目录把尺寸换成 _3840x2160.jpg（1,280,551 B，和 curl 逐位相同）、
+   import→local_14→删回 15。它有两个坑写进源文件的 `_comment`：① 这个站**未经请求就回 gzip**
+   （首页 8 KB 的 `1f 8b` 开头，裸读像空壳，解压后 54 KB、124 条链接、15 张卡）；② robots 写着
+   `Disallow: /search` + `Crawl-delay: 1.0` → `ask=false`、间隔取 2000 ms。服务端只有
+   `/all/<尺寸档>` 这一种网格：`/catalog/<主题>` 回 200 但那个版式 0 张卡，`?page=2` 回 404，
+   所以一次就是 15 张、没有翻页。
+   **wallspic 也已加（同一晚，04:00 复量）**：`--online-selftest x wallspic` 全绿 —— rows=27、
+   key=181827、dims=3840x2160、hero 取回 **3,212,941 B**、import→local_14→删回 15、缓存里那份和
+   `curl` 同一 URL 的结果**逐字节相同**。列表读的是专辑页自己的 JSON-LD（30 条 ImageObject），
+   `ask=false`（robots 禁了 `/search`）。
+   这家逼着下载器补了一条路：**它的 CDN 永远不说文件多大**——对 Range 探测回 200 +
+   `Transfer-Encoding: chunked`，没有 `Content-Length`，HEAD 直接空响应（2026-10-16 curl 实测）。
+   原来的 `openProbe` 把"拿不到长度"当致命错误，报 `the site would not say how long the file is`，
+   于是整家站在最后一米失败。现在改成：长度未知就开**一条没有终点的流**（不分段、不写续传记录、
+   结尾不拿长度对账），日志改成 `has no length, taken in one stream` / `got N bytes of an unlisted
+   length`。代价写进代码注释里：分段和 hole 重问在这家失效，截断只能靠 Qt 发现 chunk 流没收尾——
+   这不是纸面担心，第一次尝试就是 9.5 s 后 0 字节 `Connection closed`，靠 hero 的三次重试兜住，
+   第二次 7,999 ms 拿回 3,212,941 B（392 KB/s）。
+   界面那一头跟着补了一条：卡片原来只会印 `下载中 N%`，长度未知时那个百分数会一路停在 0，
+   看着像按下去没反应；现在 `Bridge.onlineProgressText` 在有长度时给百分数、没长度时给
+   `onlineSize()` 的 MB 数（同一个 MB 口径，两处不会打架）。
+   **还没定的事**：一家的缩略图 50,134 B（550x310），而 hero 走的是原图 3,212,941 B——单槽队列里
+   一次 hero 就把管道占满 8 秒，实测他手动翻卡时有 2/8 张卡显示"封面没取到 点此重试"。
+   同一张图 1920x1080 那一档存在且只要 **841,741 B**（3.8 倍便宜），但竖屏专辑（1440x2960、
+   2354x4763）的 1080 档是**另一个横屏裁切**，拿它当 hero 会把竖壁纸预览成横的。要不要给
+   `hero` 字段（现在六家源全都没用）按横竖分开取档，等他点。
+   **wallpapers.com 也已加（同一晚，04:40 复量）**：`--online-selftest x wallpaperscom` 全绿 —— rows=59、
+   page=1/53、hero 34,797 B、import→local_14→删回 15。三条当时的猜测被推翻：
+   ① 缩略图**不是**懒加载——`data-src` 只挂在 `/static/img/...` 那些导航图标上，卡片是普通 `<img src>`；
+   ② 原图**不用**进详情页——卡片 `<figure data-key="KEY">` 直接给出 `https://wallpapers.com/images/hd/KEY.jpg`
+   （三个样本 117,145 / 419,731 / 183,218 B，用我们自己的 UA 和 Chrome UA 逐字节相同）；
+   ③ `/images/hd4/`、`/images/hd8/` 看着像 4K/8K，实测和 `/images/hd/` **md5 相同**，是别名不是更大的档；
+   真正更大的文件在 `/download/hd4|hd5|hd8/` 下，而 `/download/` 是 robots 明确 Disallow 的 —— 不去拿。
+   顺手把 hero 填上（六家源里第一个用它的）：`/images/high/KEY.jpg` 是同一张图的 900 px 长边档，
+   34-55 KB，比原图便宜 3-12 倍，铺在 1360 px 的框里只放大 1.5 倍（300 px 封面要放大 4.5 倍）。
+   一页 60 个 `data-key` 里只有 59 个是 `data-type="wallpaper"`，另外那 7 个是头部"Top Coloring"那段
+   JSON 和 svg/png/pictures 各一枚 —— 锚在 `data-type` 上才干净。`/car` 从分类表里剔掉：它印 60 张卡
+   但**一个 `?p=` 链接都不印**，页码条会是个假数。
+
+### 在线源代理（2026-10-16 04:20，做 desktophut / konachan 的前置）
+
+入口在**在线抽屉**里、和「预览清晰度」同一列：一个文本框 + 框下面一行回读。填了就用填的
+（`host:port` 或 `socks5://host:port`），留空就取 Windows 自己的代理设置。持久化在
+`%APPDATA%\SmartWallpaper\ui.ini` 的 `online_proxy`。
+
+两个构型都量过，不是"编译通过就算接上"：
+- 填一个**死的**（`127.0.0.1:9`）→ 整条链路全红：`error: Proxy connection refused (0)`。
+- **留空**（系统代理开着）→ `--online-selftest x wallpaperscom` exit 0、rows=59。
+  这一条同时是回归：改之前所有站都是直连，现在六家（wallhaven 24 / 4kwallpapers 24 / wallspic 27 /
+  wallpaperscraft 15 / wallpapershome 16 / wallpaperscom 59）全部 import→local_14→删回 15 全绿。
+
+第一版是错的，两个坑都留了记录：
+1. **`QNetworkProxyFactory::setUseSystemConfiguration(true)` 在这台机上不顶事**。开着它、
+   `ProxyEnable=1`、`ProxyServer=127.0.0.1:7890`，请求照样裸出去——wallpapers.com 那 500 KB 的列表页
+   直连 **21.1 s**、走代理 **1.8 s**，直连那条被我们自己的零字节看门狗掐了（`http 0, 0 bytes read`）。
+   现在留空时主动 `systemProxyForQuery()` 问一次、把问到的地址钉成 application proxy，
+   并把"到底走了谁"写在框下面那行（`跟随系统代理 127.0.0.1:7890` / `系统没设代理，直连`）。
+   代价：那是一次快照，他中途改 Clash 不会自动跟上——按框里的 ✕ 会重新问一次。
+2. **卡片 key 的文件名白名单一开始写死 80 字符，吃掉了一张真壁纸**：wallpapers.com 有一张的 slug 是
+   94 字符，网格从 59 变 58 且一声不报。上限放宽到 120（够挡住 `..`、`/`、`\`，又留得下 MAX_PATH），
+   并且现在被拒的 key 会连**长度和原值**一起进日志：
+   `wallpaperscom put 60 cards on the page and 1 of them named a file with something this side will not
+   write to disk (first one, 94 chars: neon-yellow-...)`。
+   这条守卫本身是新加的：key 会拼成 `cache/online/<source>-<key>.<ext>` 的落盘路径，而
+   `QDir::absoluteFilePath` 不清理 `..`。
+
+### 剩下三家（2026-10-16 05:00，取证 + 两家落地）
+
+- **2026-10-23 已删**：`Online/sources/konachan.json` 不在树里了。他试的几个通用词（`nature` / `mountain` /
+  `1girl` / `ocean`）站点都回 **0 条**，只有它自己那套标签（`sky` / `city` / `flower`）有货 —— 内容太少。
+  下面这段留作 10-16 当天量到的事实，不改。
+- **konachan.com 已加，全绿**：`--online-selftest sky konachan` exit 0 —— rows=20、page=1/1 且
+  `pages known=0`（走 rolling）、dims=7680x4320、bytes=22,319,635、mime=image/png、
+  hero 落在 sample 档 **736,083 B**、import→local_14→删回 15。四档实测：preview 150x84 = 15,488 B /
+  sample 1500x844 = 736,083 B / jpeg 3500x1969 = 1,258,919 B / file = 22,319,635 B。
+  **分级那条是量出来的，不是抄的**：`tags=rating:general` 被站点**静默忽略**（和不带过滤**逐字节相同**，
+  9,598 B，池子里 `q` 和 `s` 混着）；`tags=rating:safe` 才是真的过滤（20/20 `rating":"s"`）。
+  所以 `rating:safe` 写死在 params 里、**不做成药丸**：要放开成人档必须改这个文件，而不是界面上一按。
+  一条要他知道的事实：rating `s` 在这站仍可能是**暗示性**的（第一张的标签里有 beach / bikini / breasts，
+  是泳装图）—— 挡掉的是 `q` 和 `e`，不是"所有身材相关的画"。
+  为它补了 JSON 那一路的三个缺口：`list: "."`（回复本身就是数组）、字段含 `{` 时当模板展开
+  （konachan 的 JSON 不给帖子自己的 URL，只给 id）、`rolling_pages` 也作用于 JSON、以及
+  **mime 在站点不给 content-type 时按 URL 后缀推**（它只给 `file_ext`）。回归：wallhaven 改后仍全绿
+  （rows=24、page 1/781、total 18722）。
+- **e-shuushuu.net 不做，理由是可测量的"没有服务端过滤"**：`?tags=vocaloid`、`?tags=long_hair`、
+  `?tags=zzqqnotaflagxyz`、`?rating=general`、`?category=safe` 五个探针**全部返回同一批**（200、~86 KB、
+  头三个 id 都是 1121054/1121053/1121052）——参数被忽略。搜索表单里的 `filter-ratings` 实测渲染成
+  "Popularity"（是个排序，不是分级）。`/api/v1/search?tags=vocaloid` 回 200 但那是**标签自动补全**
+  （`{"entity":"tags","hits":[{"title":"long hair"}…`），不是图搜。⇒ 过滤只在客户端 JS 里做，
+  **URL 层面拿不到"默认挡成人"**，这条规矩过不了，所以不接。它的 `.atom` 也不翻页（`?page=2` 逐字节相同）。
+- **desktophut.com 接不了，缺的是代码不是数据**：它是**纯视频站**，而原片 URL **不在列表页**——
+  详情页才给（`data-wallpaper-url="…/files/KNdDugferfGMTAV_Sequence 02 2 Prob4 Hyp1.mp4"`，27,570,965 B；
+  另一张 42,345,795 B），而且文件名和列表缩略图的 basename **不总是同一个**（monster-energy 那张是同一个，
+  edge-of-the-horizon 那张完全不是）⇒ 推不出来，必须走 `original` 那一跳。
+  问题在类型判定：卡片的"这是片子"是**从 `image` 那个 URL 的后缀**推出来的（motionbgs 就是这么成的：
+  `image` 给 mp4、`hero` 给一张便宜的 jpg 帧）。desktophut 在解析时只有 poster（webp 8–33 KB），
+  于是卡片会自称图片：▶ 角标不出现、"视频卡等第一帧"那条分支不成立（就是 10-15 那次"抖"的同形病），
+  而入库又按落盘后缀建成视频包 —— 一张卡两种身份。
+  **要做的话形状是**：源文件加一个"这一张是片子，URL 稍后由详情页给出"的声明，让 mime 由声明而不是
+  由 URL 决定，同时 `requestHero` 那道"视频不下 poster"的闸要认得这个声明（否则大图会一直软着）。
+  涉及 OnlineSource 的解析 + Bridge 的 hero/clip 两处判定，不是今晚能顺手验完的量，先记在这。
+
+### 「加载中铺网格底」这件事：2026-10-16 他叫停，已退回原样
+
+他要的形状是"所有图/片子还没出现的地方都铺这张网格，做成公用方法，下次换图只改一处"。做到中途
+他连着报"还是有"，最后一条是"算了回滚这个吧，保持原样"。记下来免得下一次从头再撞一遍：
+
+- **盖一层 EmptyPlate 到 hero 之上，两条路都被否**：
+  - 整块盖（`z: 1` 铺满 heroBox）→ 页签行和 设为壁纸 / 所有显示器 / 随机切换 一颗都不在屏上了
+    （1360x860 抓窗，底部那一排全没）。他要的是换底色，不是关控件。
+  - 收窄到只盖 hero、同时把图片层藏掉 → 「我只是让你把那个背景换成网格，不是让你取消它。你现在
+    取消了，在线加载图片模糊到高清图片会移动了」。隐藏层会把 10-14 那条"糊→清"的移动又放出来。
+- **回滚后的净差（已验）**：`git diff --stat Wallpaper/LivePreview.cpp` = 0 行；Main.qml 的 hero
+  图层区（1020–1120：heroHold / heroImg / heroBig / live 层 / motion）0 个 hunk，即逐字节同 HEAD。
+  窗口重新起得来（qmllint 无 error、PID 19840、1360x860 抓窗底部一排按钮都在）。
+- **留下的两处**（都是他点名要过的"公用方法"，不改任何已认可的像素）：
+  `root.emptyPlateSrc` 一个出处 + `component EmptyPlate`，hero 那块仍是 HEAD 的
+  `visible: root.shown.length === 0`；以及详情轮播那一格
+  `EmptyPlate { visible: slidePic.status !== Image.Ready }`（Main.qml:3864，原来是 #0A0D12 一块死色）
+  ——**这一处是新像素**，要退就删那一行。
+- **代价要说清楚：那一拍又回来了。** 在线加载时"透出桌面壁纸"的真根因在 LivePreview.cpp——
+  清掉 `haveFrame_` 却没有 `update()`，`QQuickPaintedItem` 于是继续显示上一张纹理（跟"要不要盖网格"
+  是两回事）。这条修法跟着一并退了。只上它、不盖任何层、不改任何 visible，是一个独立的决定，
+  他要的话我单独提。

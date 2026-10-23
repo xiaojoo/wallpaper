@@ -162,6 +162,10 @@ class Bridge final : public QObject {
     Q_PROPERTY(QString onlinePendingState READ onlinePendingState NOTIFY onlineProgressChanged)
     Q_PROPERTY(QString onlinePendingDetail READ onlinePendingDetail NOTIFY onlineProgressChanged)
     Q_PROPERTY(double onlineProgress READ onlineProgress NOTIFY onlineProgressChanged)
+    // The same number the card shows, as text: a percent once the site has said how long the file is,
+    // a byte count before it does - some CDNs never say (chunked, no Content-Length), and a download
+    // that is really moving must not read as "0%".
+    Q_PROPERTY(QString onlineProgressText READ onlineProgressText NOTIFY onlineProgressChanged)
     // The shortest gap this site is asked twice for, straight out of its description: the page quotes
     // it next to the site's own published budget, so the number on screen is the one in force.
     Q_PROPERTY(int onlineIntervalMs READ onlineIntervalMs NOTIFY onlineChanged)
@@ -337,6 +341,7 @@ public:
     QString onlinePendingState() const { return pendingState_; }
     QString onlinePendingDetail() const { return pendingDetail_; }
     double onlineProgress() const { return progress_; }
+    QString onlineProgressText() const;
     QString onlineHeroFile() const { return heroFile_; }
     QString onlineHeroKey() const { return heroKey_; }
     QString onlineHeroState() const { return heroState_; }
@@ -652,6 +657,7 @@ private:
     // search replacing the grid underneath it.
     QString pendingKey_, pendingState_, pendingDetail_;
     double progress_ = 0.0;
+    qint64 pendingBytes_ = 0, pendingTotal_ = 0;   // what the site said the file is; 0 = it never said
     // The hero's own download: which card it is for, and the file once it is on disk. Kept apart from
     // the pending import because the hero moves without being pressed, and a card he never clicked
     // must not start showing 下载中 on its button.
@@ -685,6 +691,7 @@ private:
     bool clipWanted_ = false;
     // Empty until it is normalised against the site's own list - see rebuildOnlineOptions.
     QString previewRung_;
+    void applyOnlineProxy();
 
     quintptr chromeHwnd_ = 0;   // the settings window, for showCommand
 };

@@ -1,0 +1,63 @@
+{
+  "_comment": [
+    "wallpaperscraft.com, described 2026-10-16 from the site as it answers from this machine.",
+    "",
+    "ROBOTS: 'User-agent: * / Allow: / / Disallow: /search / Crawl-delay: 1.0'. So the text search box",
+    "is off (ask=false, same rule as 4kwallpapers, whose /search is disallowed too), and the interval is",
+    "set to 2000 ms - double the crawl-delay they ask for.",
+    "",
+    "THE TRICK THIS SITE PLAYS ON A RECON: it answers with gzip even to a client that never asked for it",
+    "(the first 8 KB of every page here start with 1f 8b). Read raw, the homepage looks like an empty",
+    "shell with no links and no pictures; decompressed it is 54 KB with 124 links and 15 cards.",
+    "",
+    "WHAT IS LISTABLE: /all/<resolution> is a server-rendered grid of 15 cards and nothing else is -",
+    "/catalog/<topic> answers 200 with 0 cards in that markup (it is a topic landing page), and",
+    "/all/<resolution>?page=2 answers 404. So one visit is 15 pictures, no paging, which is what the",
+    "grid shows. The card's own link names the rung it is offered at, so `size` and the file url are",
+    "both built from the data rather than from an invented low/mid/high.",
+    "",
+    "THE FULL-SIZE FILE is the thumbnail's url with the size swapped: the card prints",
+    "…/image/single/ocean_shore_slope_1728510_300x168.jpg and the file at the same place with",
+    "_3840x2160.jpg answers 200 image/jpeg 1,280,551 bytes (measured). Dropping 'single/' 404s, and the",
+    "/download/<name>/<rung> link in the card is an html page, not the file - both were tried.",
+    "",
+    "resolution values are the site's own desktop rungs (it publishes 44 in all, including portrait and",
+    "square ones); the list here is every landscape rung from 720p up."
+  ],
+  "name": "wallpaperscraft",
+  "label": "wallpaperscraft",
+  "homepage": "https://wallpaperscraft.com",
+  "url": "https://wallpaperscraft.com/all/{resolution}",
+  "ask": false,
+  "record": "<a class=\"wallpapers__link\" href=\"/download/([a-z0-9_]+)_(\\d+)/(\\d+x\\d+)\">[\\s\\S]{0,200}?<img class=\"wallpapers__image\" src=\"([^\"]+)\"[^>]*alt=\"([^\"]*)\"",
+  "params": {},
+  "fields": {
+    "key": "$2",
+    "name": "$1",
+    "res": "$3",
+    "thumb": "$4",
+    "title": "$5",
+    "page": "https://wallpaperscraft.com/wallpaper/{name}_{key}",
+    "image": "https://images.wallpaperscraft.com/image/single/{name}_{key}_{res}.jpg"
+  },
+  "size": "{res}",
+  "ext": "jpg",
+  "min_interval_ms": 2000,
+  "options": {
+    "resolution": {
+      "values": [
+        "1280x720",
+        "1366x768",
+        "1600x900",
+        "1920x1080",
+        "1920x1200",
+        "2560x1080",
+        "2560x1440",
+        "2560x1600",
+        "3840x2160",
+        "3840x2400"
+      ],
+      "default": "3840x2160"
+    }
+  }
+}

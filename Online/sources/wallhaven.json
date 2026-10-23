@@ -25,7 +25,13 @@
     },
     "sort": {
       "default": "relevance",
-      "values": ["relevance", "newest", "top"]
+      "values": ["relevance", "newest", "top"],
+      "_needs_query": "All three answer an EMPTY keyword with an empty page while meta.total still",
+      "_without_query": "says 480208 matches on 20009 pages (measured 2026-10-17). toplist and random",
+      "_why": "are the two that answer without a term: rows=24 each. So while the box is empty, this",
+      "_note": "is what goes out; the chip still shows what he picked.",
+      "needs_query": ["relevance", "newest", "top"],
+      "without_query": "toplist"
     }
   },
   "list": "data",

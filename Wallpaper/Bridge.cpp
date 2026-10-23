@@ -2,6 +2,7 @@
 #include "Engine/App/IPCClient.hpp"
 #include "Engine/Core/Log.hpp"
 #include "Engine/Core/Platform.hpp"
+#include "Wallpaper/CoverAccess.hpp"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -16,6 +17,8 @@
 #include <QCoreApplication>
 #include <QRegularExpression>
 #include <QTimer>
+#include <QNetworkProxy>
+#include <QNetworkProxyFactory>
 
 #include <QDesktopServices>
 
@@ -490,6 +493,9 @@ Bridge::Bridge(QObject* parent) : QObject(parent) {
     target_ = s.value("target", "all").toString();
     transition_ = s.value("transition", "liquid").toString();
     previewRung_ = s.value("preview_rung").toString();
+    // Applied here, before the first request of the process and before QQmlEngine has built the image
+    // loaders the cards use: they all read the same application-wide answer.
+    applyOnlineProxy();
     timer_ = new QTimer(this);
     connect(timer_, &QTimer::timeout, this, &Bridge::tick);
     timer_->start(1000);
@@ -504,6 +510,14 @@ Bridge::Bridge(QObject* parent) : QObject(parent) {
                    const QString& error) {
                 if (name != onlineSource_) return;
                 onlineBusy_ = false;
+                // The card strip loads its covers with QML's own Image, which sends no Referer. A
+                // site whose CDN needs one (4kwallpapers answers 403 without it) is handed here what
+                // its own front page and user agent are, so the fetcher and the cards ask the same way.
+                if (OnlineSource* src = online_.source(name)) {
+                    const QString home = QString::fromStdString(src->homepage());
+                    CoverAccess::rememberSite(QUrl(home).host(), home,
+                                              QString::fromStdString(src->userAgent()));
+                }
                 if (!error.isEmpty()) {
                     onlineError_ = error;
                     emit onlineChanged();
@@ -534,6 +548,7 @@ Bridge::Bridge(QObject* parent) : QObject(parent) {
                     row.insert("state", !have.isEmpty() ? QStringLiteral("imported")
                                  : can ? QStringLiteral("new") : QStringLiteral("unsupported"));
                     row.insert("detail", have.isEmpty() ? why : have);
+                    CoverAccess::remember(row.value("thumb").toString(), row.value("page").toString());
                     onlineRows_.push_back(row);
                 }
                 emit onlineChanged();
@@ -568,6 +583,8 @@ Bridge::Bridge(QObject* parent) : QObject(parent) {
                         const QString rowKey = v.toMap().value("key").toString();
                         if (pendingState_ == QLatin1String("downloading") && pendingKey_ == rowKey) {
                             progress_ = fraction;
+                            pendingBytes_ = done;
+                            pendingTotal_ = total;
                             emit onlineProgressChanged();
                         }
                         return;
@@ -659,6 +676,39 @@ void Bridge::setPreviewRung(const QString& which) {
     const QString key = heroKey_;
     clearClip();
     if (!key.isEmpty()) requestClip(key);
+}
+
+// Two of the sites he named are not reachable from this machine at all: desktophut and konachan both
+// time out direct at 12 s and answer 200 in 1.3-3.2 s through the local proxy at 127.0.0.1:7890
+// (measured 2026-10-16). Without a proxy setting those two are an empty page whatever the source file
+// says, so this is the enabling feature, not a nicety.
+//
+// An empty field means "ask Windows", which is what a proxy client that writes the system setting
+// (his Clash does: ProxyEnable=1, ProxyServer=127.0.0.1:7890) needs - no typing at all. A typed
+// address wins over that, so a proxy that is only ever set per-app still works.
+void Bridge::applyOnlineProxy() {
+    QNetworkProxyFactory::setUseSystemConfiguration(true);
+    // Ask Windows what it uses and pin that answer. Leaving it to Qt's own system-configuration
+    // factory does not work here: with it enabled, ProxyEnable=1 and ProxyServer=127.0.0.1:7890
+    // set, a request still went out direct (measured 2026-10-16 - wallpapers.com's 500 KB listing
+    // page is 21 s direct and 1.8 s through that proxy, and this side's zero-byte watchdog killed
+    // the direct one). The resolved address goes on screen under the 代理 label, so the
+    // snapshot is at least a readable one.
+    //
+    // There is no typed address any more: the proxy is whatever Windows has and nothing else
+    // (he 10-17: 代码不需要在程序里面设置，让程序自己获取系统上的代理).
+    // The `online_proxy` key in ui.ini is no longer read, so a file that still carries it is
+    // ignored rather than obeyed - a setting nobody can see or clear is worse than no setting.
+    QNetworkProxy chosen;
+    const auto sys = QNetworkProxyFactory::systemProxyForQuery(
+        QNetworkProxyQuery(QUrl(QStringLiteral("https://wallpapers.com/"))));
+    for (const auto& p : sys) {
+        if (p.type() != QNetworkProxy::NoProxy && p.type() != QNetworkProxy::DefaultProxy) {
+            chosen = p;
+            break;
+        }
+    }
+    QNetworkProxy::setApplicationProxy(chosen);   // DefaultProxy = the system set none, go direct
 }
 
 QString Bridge::pipeName() const { return QStringLiteral(R"(\\.\pipe\SmartWallpaper.Renderer)"); }
@@ -1981,7 +2031,10 @@ void Bridge::requestHero(const QString& key) {
     setHeroState("fetching");
     // Deliberately not through setPending: that one belongs to the press on 入库, and its progress
     // would otherwise start on a card he only looked at.
-    online_.download(*s, fetch, dest, [this, key, dest](const QString& error, const QString& type) {
+    online_.download(*s, fetch, dest, row.value("page").toString(),
+                     [this, key, dest](const QString& error, const QString& type) {
+        // The card's own page travels with it: a site that only names its full-size file there
+        // needs one more request, and that request is the fetcher's business, not this one's.
         if (heroInFlight_ == key) heroInFlight_.clear();
         if (!error.isEmpty()) {
             // The file stays on disk whichever way this went - 入库 would have wanted it too. The whole
@@ -2101,7 +2154,9 @@ void Bridge::requestClip(const QString& key) {
              cur.toUtf8().constData(), rung.toUtf8().constData(),
              QFileInfo(dest).fileName().toUtf8().constData(), clipTries_ + 1, kHeroRetries + 1);
     setClipState(QStringLiteral("fetching"));
-    online_.download(*s, url, dest, [this, key, url, dest](const QString& error, const QString& type) {
+    online_.download(*s, url, dest, row.value("page").toString(),
+                     [this, key, url, dest](const QString& error, const QString& type) {
+        // Same for a clip: the source decides whether its page is worth asking.
         if (clipInFlight_ == key) clipInFlight_.clear();
         if (clipUrl_ == url) clipUrl_.clear();   // this answer is for the bar's owner, whoever it was
         if (!error.isEmpty()) {
@@ -2211,7 +2266,8 @@ void Bridge::onlineImport(int index) {
         importDownloaded(index, key, dest, page);
         return;
     }
-    online_.download(*s, image, dest, [this, index, key, dest, page](const QString& error, const QString& type) {
+    online_.download(*s, image, dest, page,
+                     [this, index, key, dest, page](const QString& error, const QString& type) {
         if (key != pendingKey_) return;   // another card was asked for in the meantime
         if (!error.isEmpty()) {
             setPending(key, QStringLiteral("failed"), error);
@@ -2235,11 +2291,25 @@ void Bridge::onlineImport(int index) {
 }
 
 void Bridge::setPending(const QString& key, const QString& state, const QString& detail) {
+    // A new card's numbers start at zero: the length on hand belongs to whichever file was downloading
+    // before, and reusing it would put that file's percent on this one until the probe answers.
+    if (key != pendingKey_ || state != QLatin1String("downloading")) {
+        progress_ = 0.0; pendingBytes_ = 0; pendingTotal_ = 0;
+    }
     pendingKey_ = key;
     pendingState_ = state;
     pendingDetail_ = detail;
-    if (state != QLatin1String("downloading")) progress_ = 0.0;
     emit onlineProgressChanged();
+}
+
+// Percent once the site has named a length, megabytes while it has not. A chunked CDN never names one
+// (wallspic's img1.wallspic.com, measured 2026-10-16), and a 3.2 MB file that takes 8 s at 392 KB/s
+// would otherwise sit on "0%" for the whole wait and read as a press that did nothing. The MB branch
+// goes through onlineSize so the card and this label never disagree about what 3.2 MB is called.
+QString Bridge::onlineProgressText() const {
+    if (pendingTotal_ > 0)
+        return QString::number(qRound(progress_ * 100.0)) + QStringLiteral("%");
+    return pendingBytes_ > 0 ? onlineSize(int(pendingBytes_)) : QStringLiteral("0 MB");
 }
 
 void Bridge::importDownloaded(int index, const QString& key, const QString& path, const QString& page) {
