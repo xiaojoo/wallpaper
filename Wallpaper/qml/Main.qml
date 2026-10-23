@@ -3838,14 +3838,20 @@ ApplicationWindow {
                         spacing: 14
 
                         Group {
-                            // The two actions on one line, equal share of the width: stacked they read
-                            // as two unrelated buttons, side by side as the one block they are.
+                            // The actions on one line, equal share of the width: stacked they read
+                            // as unrelated buttons, side by side as the one block they are.
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 12
                                 Btn { raised: true; Layout.fillWidth: true; text: trs("add_image"); enabled: Bridge.connected; onClicked: Bridge.addImageFile() }
                                 Btn { raised: true; Layout.fillWidth: true; text: trs("add_folder"); enabled: Bridge.connected; onClicked: Bridge.addImageFolder() }
                                 Btn { raised: true; Layout.fillWidth: true; text: trs("reload"); enabled: Bridge.connected; onClicked: Bridge.reload() }
+                                // The fourth is the same button coming and going: it says what clicking
+                                // it will do, so it is never greyed while the renderer is up. It takes
+                                // the wallpaper off the desktop and keeps the process, so the preview
+                                // here keeps moving - which is why it belongs with the wallpapers and
+                                // not with the renderer's start and quit.
+                                Btn { raised: true; Layout.fillWidth: true; text: trs(Bridge.desktopOn ? "wallpaper_off" : "wallpaper_on"); enabled: Bridge.connected; onClicked: Bridge.setDesktopOn(!Bridge.desktopOn) }
                             }
                             Text {
                                 visible: root.localImages.length === 0
@@ -4562,10 +4568,9 @@ ApplicationWindow {
             name: "close"
             tip: trs("close")
             danger: true
-            // Not close(): the process survives in the tray, which is the only way back once the
-            // window is gone. Tray.attach() never ran if this session has no tray, and then
-            // hideToTray() falls back to a real close.
-            onClicked: Tray.hideToTray()
+            // A real quit. The renderer keeps running - it is the wallpaper - and its notify
+            // icon is the way back in: left-click opens this window again.
+            onClicked: Qt.quit()
         }
     }
 

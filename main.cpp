@@ -88,7 +88,8 @@ void Usage() {
         "  WallpaperRenderer.exe --ctl hudframe notch|basetab|ticks|topbar|band|split\n"
         "  WallpaperRenderer.exe --ctl huddrag on | off\n"
         "  WallpaperRenderer.exe --ctl hudmove 0.42 0.31\n"
-        "  WallpaperRenderer.exe --ctl hudhome");
+        "  WallpaperRenderer.exe --ctl hudhome\n"
+        "  WallpaperRenderer.exe --ctl desktop off | on");
 }
 
 } // namespace
@@ -147,7 +148,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                                 ? L"\\\\.\\pipe\\SmartWallpaper.Renderer"
                                 : ToWide(pipeOverride);
         if (ctlCmd.empty()) {
-            PrintToParentConsole("--ctl needs a command: status|list|apply|pause|resume|quality|fit|fps|taskbar|hud|hudpos|hudscale|hudframe|huddrag|hudmove|hudhome|audio|volume|reload|quit\n");
+            PrintToParentConsole("--ctl needs a command: status|list|apply|pause|resume|quality|fit|fps|taskbar|hud|hudpos|hudscale|hudframe|huddrag|hudmove|hudhome|desktop|audio|volume|reload|quit\n");
             return 2;
         }
         Json q = Json::Object();

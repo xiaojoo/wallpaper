@@ -98,6 +98,10 @@ class Bridge final : public QObject {
     Q_PROPERTY(int chartHistory READ chartHistory NOTIFY stateChanged)
     Q_PROPERTY(int maxFps READ maxFps NOTIFY stateChanged)
     Q_PROPERTY(bool paused READ paused NOTIFY stateChanged)
+    // False while 退出桌面 is on: the renderer is still running and still feeding the preview, but its
+    // windows are hidden so the desktop shows the system's own wallpaper. The button's own label reads
+    // this, so it cannot claim 回到桌面 while the desktop is already back.
+    Q_PROPERTY(bool desktopOn READ desktopOn NOTIFY stateChanged)
     // Whether the wallpaper on the desktop is a still. The tray's 暂停壁纸 row is grey for those:
     // there is nothing playing there to stop, and a tick that changes nothing is a dead control.
     Q_PROPERTY(bool showingDynamic READ showingDynamic NOTIFY stateChanged)
@@ -284,6 +288,7 @@ public:
     bool previewAudio() const { return previewAudio_; }
     int maxFps() const { return maxFps_; }
     bool paused() const { return paused_; }
+    bool desktopOn() const { return desktopOn_; }
     bool orbitHeld() const { return orbitHeld_; }
     bool showingDynamic() const;
     bool previewVideoPaused() const { return previewPaused_; }
@@ -367,6 +372,7 @@ public:
     Q_INVOKABLE void refresh();
     Q_INVOKABLE bool apply(const QString& wallpaperId);
     Q_INVOKABLE void setPaused(bool paused);
+    Q_INVOKABLE void setDesktopOn(bool on);
     Q_INVOKABLE void setOrbitHeld(bool held);
     Q_INVOKABLE void setPreviewVideoPaused(bool paused);
     Q_INVOKABLE void setQuality(const QString& level);
@@ -596,6 +602,9 @@ private:
     bool previewAudio_ = true;
     bool qualityIsGlobal_ = false, paused_ = false, autostart_ = false;
     bool orbitHeld_ = false;
+    // True until the renderer says otherwise: an engine older than this field never answers it, and a
+    // desktop that is showing a wallpaper is the honest default for that case.
+    bool desktopOn_ = true;
     bool rotateOn_ = false;
     int rotateMin_ = 60, rotateNext_ = 0;
     QString showingId_, showingName_;

@@ -207,6 +207,7 @@ private:
     void UpdateSnapshot();
     void DrainMessages();
     void OnMonitorsChanged();
+    void OpenSettingsWindow();
     void BuildThumbnails(bool onlyMissing);
     bool StartPreview(const std::string& id, std::string& error);
     void StopPreview(const char* why);
@@ -232,6 +233,13 @@ private:
     // second one happen even when this process did not get to run it.
     bool SetIconsHidden(bool hide, std::string& error);
     void HealIconLayer();
+    // 「退出桌面」and back. Off takes this process off the screen - the windows hide, so the system's
+    // own wallpaper is what he sees - without taking it down: the slots' frame budget goes to zero and
+    // the settings window's preview keeps its own, so a clip still loops there. Everything that reached
+    // past our own windows goes back the way it was found (the shell's icons, the ring's click layer),
+    // and comes back on when the desktop does. The taskbar's alpha is not one of those: it is his own
+    // slider, and 退出壁纸 leaves it alone.
+    void SetDesktopOn(bool on);
     // Moves the rotation pointer by delta and shows the result. Returns the id that got on screen.
     std::string RotateStep(int delta);
     static bool IsAutostartEnabled();
@@ -358,6 +366,12 @@ private:
     bool iconsHidden_ = false;
     HWND iconListSeen_ = nullptr;   // the list window we applied to, to notice explorer replacing it
     std::wstring iconMarkPath_;
+    // Off = 「退出桌面」: this process is not on the screen, but it is still running and still feeding
+    // the settings window's preview. See SetDesktopOn.
+    bool desktopOn_ = true;
+    // His choice about the shell's icons, held across a desktop-off so giving the icons back for one
+    // hour does not also forget that he asked for them hidden.
+    bool iconsHiddenWanted_ = false;
     // When the ring's rectangles were last written to the log, in the frame loop's own seconds.
     double orbitGeomLogT_ = 0.0;
     // The monitor whose panel is being dragged, or -1. The layer exists only while this is >= 0, which

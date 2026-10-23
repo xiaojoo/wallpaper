@@ -104,6 +104,10 @@ const Entry kStrings[] = {
     {"stopped", "未运行", "not running"},
     {"start", "启动渲染器", "Start renderer"},
     {"quit", "退出渲染器", "Quit renderer"},
+    // One key each way, because the button is the same button: it says what clicking it will do.
+    // Off takes the wallpaper off the desktop and keeps the process, so the preview still moves.
+    {"wallpaper_off", "退出壁纸", "Wallpaper off"},
+    {"wallpaper_on", "恢复壁纸", "Wallpaper on"},
     {"reload", "重载壁纸", "Reload wallpapers"},
     {"pause", "暂停渲染", "Pause rendering"},
     {"resume", "恢复渲染", "Resume rendering"},
@@ -741,6 +745,9 @@ void Bridge::ingest(const Json& status, const Json& list) {
     host_ = QString::fromStdString(status.strOr("host"));
     root_ = QString::fromStdString(status.strOr("root"));
     paused_ = status.boolOr("paused");
+    // Default true: a renderer older than this field answers nothing, and "the desktop is showing a
+    // wallpaper" is the honest reading of that, not "it is off".
+    desktopOn_ = status.boolOr("desktop_on", true);
     autostart_ = status.boolOr("autostart");
     if (const Json* r = status.find("rotate"); r && r->isObject()) {
         rotateOn_ = r->boolOr("on");
@@ -1076,6 +1083,16 @@ void Bridge::setPaused(bool p) {
     Json out;
     request(p ? R"({"cmd":"pause"})" : R"({"cmd":"resume"})", 1500, &out);
     paused_ = p;
+    emit stateChanged();
+}
+
+void Bridge::setDesktopOn(bool on) {
+    Json out;
+    std::string body = std::format(R"({{"cmd":"desktop","arg":"{}"}})", on ? "on" : "off");
+    request(body.c_str(), 1500, &out);
+    // Optimistic like the pause switch: the reply only says "queued", and the next status read either
+    // confirms it or puts the button's label back.
+    desktopOn_ = on;
     emit stateChanged();
 }
 

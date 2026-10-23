@@ -280,7 +280,7 @@ bool Application::Start(const CommandLine& cl, std::string& error) {
 
     if (wpm_.settings().tray) {
         std::string terr;
-        if (!tray_.Install(win_, this, terr)) Warn(MOD, "tray unavailable: {}", terr);
+        if (!tray_.Install(win_, this, cl_.exeDir, terr)) Warn(MOD, "tray unavailable: {}", terr);
     }
     if (wpm_.settings().ipc) {
         ipc_ = std::make_unique<IPCServer>();
@@ -617,6 +617,9 @@ bool Application::BuildSlots(std::string& error) {
             slots_.pop_back();
             continue;
         }
+        // A monitor that shows up while 退出桌面 is on must not come back on screen showing a
+        // wallpaper - Create shows its window, so the hold has to be re-applied here.
+        if (!desktopOn_) s.window.Show(false);
         ++built;
     }
     if (!built) {
@@ -1104,6 +1107,29 @@ void Application::HealIconLayer() {
          iconlayer::ShellState(), e);
 }
 
+void Application::SetDesktopOn(bool on) {
+    if (on == desktopOn_) return;
+    desktopOn_ = on;
+    for (auto& s : slots_) s.window.Show(on);
+    std::string e;
+    if (!on) {
+        // The shell's icons are the one thing here that is not ours to keep taken: a desktop with no
+        // wallpaper and no shortcuts is just broken. Held in iconsHiddenWanted_ and put back below.
+        iconsHiddenWanted_ = iconsHidden_;
+        if (iconsHidden_) SetIconsHidden(false, e);
+        // The ring's click layer is an invisible window over the icon list. With no wallpaper on
+        // screen it would keep swallowing desktop clicks for a ring that is no longer drawn.
+        if (orbitOn_) { iconHit_.Destroy(); orbitHitMonitor_ = -1; ArmOrbitDrag(false, e); }
+        // The taskbar's alpha is deliberately NOT touched here. It is a setting he set on its own
+        // slider, not part of the picture on the wall, and 退出壁纸 is about the wallpaper.
+    } else {
+        if (iconsHiddenWanted_) SetIconsHidden(true, e);
+        if (orbitOn_) ArmOrbitHit(e);
+    }
+    Info(MOD, "desktop {} (windows shown={}, preview still fed={})", on ? "back on" : "off",
+         on ? "true" : "false", preview_.on ? "true" : "false");
+}
+
 // The ring's own clock, once per frame for every screen at once. Held still while the pointer is on an
 // icon: at a 45 s period the front of the ring travels about thirty pixels a second, which is a target
 // nobody can land a click on, and a ring that stops under the hand stops being a moving target.
@@ -1430,6 +1456,9 @@ void Application::UpdateSnapshot() {
     r.set("ffmpeg", Json::Of(FfmpegBuildNote()));
     r.set("root", Json::Of(ToUtf8(wpm_.settings().root)));
     r.set("paused", Json::Of(paused_.load()));
+    // False = 「退出桌面」: the windows are hidden and the slots draw nothing, while this process is
+    // still up and still feeding the preview. The settings window's button reads its own label off it.
+    r.set("desktop_on", Json::Of(desktopOn_));
     // What the desktop is doing with sound, in the same place it says what it is doing with frames.
     // `audio_source` is empty when nothing is audible, which is a different fact from "muted" and both
     // are different from "silent because the wallpaper carries no track" - the three readouts that made
@@ -1829,10 +1858,44 @@ void Application::UpdateSnapshot() {
         statusLine_ = line;
     }
     if (tray_.installed()) {
-        std::string tip = std::format("Wallpaper - {}", statusLine_.empty() ? line : statusLine_);
-        if (tip.size() > 120) tip.resize(120);
-        tray_.SetTip(tip);
+        tray_.SetTip(mem.workingSetMb, mem.cpuPercent, gpuLast_.self);
+        // The menu ticks and greys itself from this same picture, published on every status
+        // update - so it is right the moment it opens, with no settings window anywhere.
+        TrayState ts;
+        ts.rotateOn = rotate_.on;
+        ts.paused = paused_.load();
+        ts.audioMuted = wpm_.settings().audioMuted;
+        ts.orbitOn = orbitOn_;
+        ts.orbitHeld = orbitHeld_;
+        ts.iconsHidden = iconsHidden_;
+        ts.orbitActionable = orbitOn_ && iconsBuilt_ && renderer_.orbitReady();
+        const WallpaperPackage* shown = wpm_.find(slots_.empty() ? std::string_view{}
+                                                                : std::string_view{slots_.front().wallpaperId});
+        ts.pauseActionable = ts.paused || (shown && !(shown->isImage() && !shown->isVideo()));
+        tray_.Publish(ts);
     }
+}
+
+// The icon's left click. The settings window has no tray icon of its own any more, so this is
+// the way back in from a desktop that shows nothing but the wallpaper. An existing window is
+// raised rather than started twice - the settings window has no single-instance guard of its own.
+void Application::OpenSettingsWindow() {
+    if (HWND existing = FindWindowW(nullptr, L"Wallpaper")) {
+        ShowWindow(existing, IsIconic(existing) ? SW_RESTORE : SW_SHOW);
+        SetForegroundWindow(existing);
+        Info(MOD, "tray: raised the settings window");
+        return;
+    }
+    const std::wstring exe = cl_.exeDir + L"\\Wallpaper.exe";
+    if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        Warn(MOD, "tray: no Wallpaper.exe at {}", ToUtf8(exe));
+        return;
+    }
+    if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", exe.c_str(), nullptr,
+                                                cl_.exeDir.c_str(), SW_SHOWNORMAL)) <= 32)
+        Warn(MOD, "tray: ShellExecute failed for {}", ToUtf8(exe));
+    else
+        Info(MOD, "tray: started the settings window");
 }
 
 void Application::BuildThumbnails(bool onlyMissing) {
@@ -2323,7 +2386,11 @@ int Application::Run() {
         for (auto& s : slots_) {
             const MonitorInfo& m = s.window.monitor();
             int want = 0;
-            if (!paused_) {
+            // `desktopOn_` joins the pause test rather than hiding the windows only: hidden windows
+            // still get drawn into, and drawing a desktop nobody can see costs the same GPU as one
+            // who can. The preview is not in this loop's budget (see the clocks below), which is why
+            // 退出桌面 can empty the screen without emptying the settings window's picture.
+            if (!paused_ && desktopOn_) {
                 want = s.instance.package().baseFps();
                 if (int byMonitor = wpm_.FpsForMonitor(m)) want = std::min(want, byMonitor);
                 want = std::min(want, wpm_.settings().globalMaxFps);
@@ -2478,6 +2545,9 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         // wallpaper underneath. Asking for a picture is the intent to see it, so the hold ends here -
         // the same rule the preview pass already applies to a new target.
         paused_ = false;
+        // And the same rule covers 退出桌面: applying a picture while the desktop layer is off brings
+        // the layer back, rather than answering ok to a wallpaper drawing onto a hidden window.
+        SetDesktopOn(true);
         wpm_.SetAssignment(monitor, arg);
         // The text is this thread's own state and costs microseconds; the file is 8-43 ms of disk on a
         // machine with something scanning every write, which was a fifth of the held picture at a switch.
@@ -2769,6 +2839,14 @@ std::string Application::DoCommandLocal(const std::string& action, const std::st
         ArmDrag(kPanelChart, false, e);
         result = std::format(R"({{"ok":true,"chart_corner":"{}"}})",
                              HudCornerName(wpm_.settings().chartCorner));
+    } else if (action == "desktop") {
+        // 「退出桌面」and「回到桌面」. The process stays up on purpose: it is the only thing that can
+        // decode a clip for the settings window's preview, and the ask was a bare desktop with the
+        // preview still moving.
+        const bool on = arg == "on" || arg == "true" || arg == "1";
+        SetDesktopOn(on);
+        result = std::format(R"({{"ok":true,"desktop_on":{},"preview_on":{}}})",
+                             desktopOn_ ? "true" : "false", preview_.on ? "true" : "false");
     } else if (action == "icons") {
         // The shell's own icon layer, which the ring stands in for. Not persisted for the same reason
         // the ring is not: a desktop that lost its shortcuts because this program was killed should not
@@ -3189,17 +3267,14 @@ LRESULT Application::OnWindowMessage(HWND h, UINT m, WPARAM w, LPARAM l) {
         case WM_APP_QUIT:
             Stop("window message quit");
             return 0;
-        case WM_TRAYICON: {
-            // NOTIFYICON_VERSION_4 packs the event into the high word of lParam.
-            UINT ev = LOWORD(l);
-            if (HIWORD(l) == 1) ev = LOWORD(l);
-            if (ev == WM_RBUTTONUP || ev == WM_CONTEXTMENU || ev == WM_LBUTTONUP || ev == WM_LBUTTONDBLCLK)
-                tray_.ShowMenu(h);
-            return 0;
-        }
-        case WM_COMMAND:
-            if (tray_.HandleCommand(LOWORD(w))) return 0;
+        // The icon lives on the menu thread, so nothing arrives here from the shell. What does
+        // arrive is the pick it made, and the ask to bring the settings window back.
+        case WM_TRAY_RESULT:
+            if (tray_.HandleCommand(static_cast<UINT>(w))) return 0;
             break;
+        case WM_TRAY_OPEN_GUI:
+            OpenSettingsWindow();
+            return 0;
         default:
             break;
     }

@@ -3,7 +3,6 @@
 #include "Wallpaper/Bridge.hpp"
 #include "Wallpaper/LivePreview.hpp"
 #include "Wallpaper/OnlineSelfTest.hpp"
-#include "Wallpaper/TrayMenu.hpp"
 
 #include <QDir>
 #include <QFile>
@@ -60,12 +59,11 @@ int main(int argc, char* argv[]) {
     // (resources/app.rc). Both come from the same generated Wallpaper.ico.
     app.setWindowIcon(QIcon(QDir(QCoreApplication::applicationDirPath())
                                 .absoluteFilePath("Wallpaper.ico")));
-    // Closing the window hides it to the tray now, and a hidden window must not read as "no windows
-    // left". The tray's 退出 is the one path that ends this process, and it calls quit() itself.
-    app.setQuitOnLastWindowClosed(false);
+    // Closing the window ends the process. The notify icon is the renderer's now, and its menu does
+    // everything this window's tray used to - so nothing is left hidden and unreachable.
+    app.setQuitOnLastWindowClosed(true);
 
     sw::Bridge bridge;
-    sw::TrayMenu tray(bridge);   // gets its window in attach(), below, once QML has made one
     // Deep links for the click harness: self-drawn Qt controls are not reachable through UIA on
     // this build, so the state a screenshot should show is passed in here instead.
     for (int i = 1; i < argc; ++i) {
@@ -86,8 +84,6 @@ int main(int argc, char* argv[]) {
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("Bridge"), &bridge);
-    // The title bar's close button asks the tray to hide the window instead of closing it.
-    engine.rootContext()->setContextProperty(QStringLiteral("Tray"), &tray);
     qmlRegisterType<sw::LivePreview>("SW", 1, 0, "LivePreview");
     // Loaded from disk next to the exe: editing Main.qml then restarting is enough to see the
     // change, which matters more here than shipping one embedded resource.
@@ -103,7 +99,6 @@ int main(int argc, char* argv[]) {
     for (QObject* o : engine.rootObjects())
         if (auto* w = qobject_cast<QWindow*>(o)) {
             bridge.adoptChromeWindow(static_cast<qint64>(w->winId()));
-            tray.attach(w);
             break;
         }
     return app.exec();
